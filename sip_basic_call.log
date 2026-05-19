@@ -1,0 +1,113 @@
+=== BASIC CALL SMOKE TEST ===
+Target: udp:127.0.0.1:15062
+Client SIP: udp:127.0.0.1:25061
+Client RTP: udp:127.0.0.1:26000
+
+--- INVITE REQUEST ---
+INVITE sip:echo@127.0.0.1:15062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:25061;branch=z9hG4bK-smoke-call-001;rport
+Max-Forwards: 70
+From: <sip:tester@127.0.0.1>;tag=from-smoke-call-001
+To: <sip:echo@127.0.0.1>
+Call-ID: smoke-call-001@127.0.0.1
+CSeq: 1 INVITE
+Contact: <sip:tester@127.0.0.1:25061>
+Content-Type: application/sdp
+Content-Length: 175
+
+v=0
+o=smoke-client 1779124395 1 IN IP4 127.0.0.1
+s=Smoke Call
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 26000 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+--- INVITE RESPONSE ---
+From: udp:127.0.0.1:15062
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 127.0.0.1:25061;branch=z9hG4bK-smoke-call-001;rport
+From: <sip:tester@127.0.0.1>;tag=from-smoke-call-001
+To: <sip:echo@127.0.0.1>;tag=316472
+Call-ID: smoke-call-001@127.0.0.1
+CSeq: 1 INVITE
+Server: mini-python-call-server/0.1
+Content-Length: 0
+
+
+--- INVITE RESPONSE ---
+From: udp:127.0.0.1:15062
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 127.0.0.1:25061;branch=z9hG4bK-smoke-call-001;rport
+From: <sip:tester@127.0.0.1>;tag=from-smoke-call-001
+To: <sip:echo@127.0.0.1>;tag=608874
+Call-ID: smoke-call-001@127.0.0.1
+CSeq: 1 INVITE
+Server: mini-python-call-server/0.1
+Content-Length: 0
+
+
+--- INVITE RESPONSE ---
+From: udp:127.0.0.1:15062
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:25061;branch=z9hG4bK-smoke-call-001;rport
+From: <sip:tester@127.0.0.1>;tag=from-smoke-call-001
+To: <sip:echo@127.0.0.1>;tag=180921
+Call-ID: smoke-call-001@127.0.0.1
+CSeq: 1 INVITE
+Server: mini-python-call-server/0.1
+Content-Length: 164
+Contact: <sip:python-call-server@0.0.0.0:15062>
+Content-Type: application/sdp
+
+v=0
+o=mini-call-server 1779124395 1 IN IP4 0.0.0.0
+s=Mini Python Call Server
+c=IN IP4 0.0.0.0
+t=0 0
+m=audio 12000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+
+--- ACK REQUEST ---
+ACK sip:echo@127.0.0.1:15062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:25061;branch=z9hG4bK-smoke-call-001-ack;rport
+Max-Forwards: 70
+From: <sip:tester@127.0.0.1>;tag=from-smoke-call-001
+To: <sip:echo@127.0.0.1>;tag=180921
+Call-ID: smoke-call-001@127.0.0.1
+CSeq: 1 ACK
+Contact: <sip:tester@127.0.0.1:25061>
+Content-Length: 0
+
+
+--- RTP CHECK ---
+RTP echo received from udp:127.0.0.1:12000 bytes=172 payload_type=0 sequence=47411
+--- BYE REQUEST ---
+BYE sip:echo@127.0.0.1:15062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:25061;branch=z9hG4bK-smoke-call-001-bye;rport
+Max-Forwards: 70
+From: <sip:tester@127.0.0.1>;tag=from-smoke-call-001
+To: <sip:echo@127.0.0.1>;tag=180921
+Call-ID: smoke-call-001@127.0.0.1
+CSeq: 2 BYE
+Contact: <sip:tester@127.0.0.1:25061>
+Content-Length: 0
+
+
+--- BYE RESPONSE ---
+From: udp:127.0.0.1:15062
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:25061;branch=z9hG4bK-smoke-call-001-bye;rport
+From: <sip:tester@127.0.0.1>;tag=from-smoke-call-001
+To: <sip:echo@127.0.0.1>;tag=180921
+Call-ID: smoke-call-001@127.0.0.1
+CSeq: 2 BYE
+Server: mini-python-call-server/0.1
+Content-Length: 0
+
+
+--- RESULT ---
+PASS: basic SIP call and RTP echo completed successfully.

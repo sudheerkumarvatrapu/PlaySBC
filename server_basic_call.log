@@ -1,0 +1,16 @@
+=== BASIC CALL SMOKE TEST ===
+Command: python3 mini_call_server.py --sip-port 15062 --rtp-min 12000 --rtp-max 12010 --debug
+
+--- SERVER LOG ---
+2026-05-18 10:12:41,757 INFO SIP listening on udp:0.0.0.0:15062
+2026-05-18 10:13:15,707 INFO SIP INVITE from 127.0.0.1:25061
+2026-05-18 10:13:15,708 INFO RTP listening on 0.0.0.0:12000
+2026-05-18 10:13:15,708 INFO SIP ACK from 127.0.0.1:25061
+2026-05-18 10:13:15,709 INFO SIP BYE from 127.0.0.1:25061
+2026-05-18 10:13:15,709 INFO Closed RTP session for call-id smoke-call-001@127.0.0.1
+
+--- MEDIA CHECK ---
+RTP echo received from udp:127.0.0.1:12000 bytes=172 payload_type=0 sequence=47411
+
+--- RESULT ---
+PASS: basic SIP call completed and RTP echo media was received.

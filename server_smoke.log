@@ -1,0 +1,9 @@
+=== SERVER SMOKE TEST ===
+Command: python3 mini_call_server.py --sip-port 15062 --rtp-min 12000 --rtp-max 12010 --debug
+
+--- SERVER LOG ---
+2026-05-18 10:09:33,779 INFO SIP listening on udp:0.0.0.0:15062
+2026-05-18 10:09:56,458 INFO SIP OPTIONS from 127.0.0.1:25060
+
+--- RESULT ---
+PASS: server bound UDP SIP port 15062 and handled OPTIONS request from 127.0.0.1:25060.
