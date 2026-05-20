@@ -2,10 +2,21 @@
 
 This project currently provides a small educational SIP/RTP call server with RTP echo and basic G.711 PCMU/PCMA handling. The next improvements below are ordered from most useful for validation to more advanced production-style features.
 
+## Status
+
+Completed:
+
+- Per-call log files
+- RTP recording to WAV for G.711 PCMU/PCMA calls
+
+Next recommended item:
+
+- Config file support
+
 ## Recommended Build Order
 
-1. Per-call log files
-2. RTP recording to WAV
+1. Per-call log files - done
+2. RTP recording to WAV - done
 3. Config file support
 4. SIP digest authentication
 5. DTMF detection
@@ -204,7 +215,7 @@ Why this matters:
 The best next implementation task is:
 
 ```text
-Add per-call log files and RTP recording to WAV.
+Add config file support.
 ```
 
-That gives the project the biggest immediate improvement because every test call will produce reviewable artifacts: a SIP/media call log and an audio recording.
+That is now the best next improvement because call logs and recordings are already implemented. A config file will make repeatable local tests and future Docker packaging cleaner.

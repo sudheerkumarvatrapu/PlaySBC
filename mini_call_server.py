@@ -26,7 +26,9 @@ import re
 import socket
 import struct
 import time
+import wave
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 try:
@@ -39,6 +41,10 @@ CRLF = "\r\n"
 PCMU = 0
 PCMA = 8
 SUPPORTED_CODECS = (PCMU, PCMA)
+CODEC_NAMES = {
+    PCMU: "PCMU",
+    PCMA: "PCMA",
+}
 
 
 @dataclass
@@ -57,20 +63,137 @@ class SipMessage:
 
 
 @dataclass
+class CallArtifacts:
+    call_id: str
+    log_dir: Path
+    recording_dir: Path
+    log_path: Path = field(init=False)
+    wav_path: Path = field(init=False)
+    wav_file: Optional[wave.Wave_write] = field(default=None, init=False)
+    recording_warning_logged: bool = field(default=False, init=False)
+    unsupported_payloads_logged: set = field(default_factory=set, init=False)
+
+    def __post_init__(self) -> None:
+        safe_call_id = safe_filename(self.call_id)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.recording_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = self.log_dir / f"{safe_call_id}.log"
+        self.wav_path = self.recording_dir / f"{safe_call_id}.wav"
+        self.log_path.write_text("", encoding="utf-8")
+        self.log("CALL START", f"call_id={self.call_id}")
+
+    def log(self, event: str, detail: str = "") -> None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        line = f"{timestamp} {event}"
+        if detail:
+            line += f" {detail}"
+        with self.log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(line + "\n")
+
+    def record_payload(self, payload_type: int, payload: bytes) -> None:
+        if not payload:
+            return
+
+        if audioop is None:
+            if not self.recording_warning_logged:
+                self.log("RECORDING SKIPPED", "audioop unavailable; cannot convert G.711 to WAV")
+                self.recording_warning_logged = True
+            return
+
+        if payload_type == PCMU:
+            pcm = audioop.ulaw2lin(payload, 2)
+        elif payload_type == PCMA:
+            pcm = audioop.alaw2lin(payload, 2)
+        else:
+            if payload_type not in self.unsupported_payloads_logged:
+                self.log("RECORDING SKIPPED", f"unsupported_payload_type={payload_type}")
+                self.unsupported_payloads_logged.add(payload_type)
+            return
+
+        if self.wav_file is None:
+            self.wav_file = wave.open(str(self.wav_path), "wb")
+            self.wav_file.setnchannels(1)
+            self.wav_file.setsampwidth(2)
+            self.wav_file.setframerate(8000)
+            self.log("RECORDING START", f"path={self.wav_path}")
+
+        self.wav_file.writeframes(pcm)
+
+    def close(self) -> None:
+        if self.wav_file:
+            self.wav_file.close()
+            self.wav_file = None
+            self.log("RECORDING CLOSED", f"path={self.wav_path}")
+
+
+@dataclass
 class RtpSession:
     call_id: str
     local_ip: str
     local_port: int
     preferred_payload: int = PCMU
+    remote_payloads: Tuple[int, ...] = field(default_factory=tuple)
+    artifacts: Optional[CallArtifacts] = None
     remote_addr: Optional[Tuple[str, int]] = None
     transport: Optional[asyncio.DatagramTransport] = None
     sequence: int = field(default_factory=lambda: random.randint(0, 65535))
     timestamp: int = field(default_factory=lambda: random.randint(0, 2**32 - 1))
     ssrc: int = field(default_factory=lambda: random.randint(1, 2**32 - 1))
+    created_at: float = field(default_factory=time.time)
+    acknowledged_at: Optional[float] = None
+    last_rtp_at: Optional[float] = None
+    packets_received: int = 0
+    packets_sent: int = 0
+    bytes_received: int = 0
+    bytes_sent: int = 0
+    payload_types_received: Dict[int, int] = field(default_factory=dict)
+    closed: bool = False
+
+    def log(self, event: str, detail: str = "") -> None:
+        if self.artifacts:
+            self.artifacts.log(event, detail)
+
+    def mark_ack(self) -> None:
+        self.acknowledged_at = time.time()
+        self.log("ACK RECEIVED")
+
+    def record_rtp(self, payload_type: int, payload: bytes) -> None:
+        self.packets_received += 1
+        self.bytes_received += len(payload)
+        self.payload_types_received[payload_type] = self.payload_types_received.get(payload_type, 0) + 1
+        self.last_rtp_at = time.time()
+        if self.artifacts:
+            self.artifacts.record_payload(payload_type, payload)
+
+    def record_rtp_sent(self, payload: bytes) -> None:
+        self.packets_sent += 1
+        self.bytes_sent += len(payload)
+        self.last_rtp_at = time.time()
 
     def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
         if self.transport:
             self.transport.close()
+        duration = time.time() - self.created_at
+        payloads = ",".join(
+            f"{CODEC_NAMES.get(payload_type, str(payload_type))}:{count}"
+            for payload_type, count in sorted(self.payload_types_received.items())
+        ) or "none"
+        self.log(
+            "CALL SUMMARY",
+            (
+                f"duration_seconds={duration:.3f} "
+                f"rtp_packets_received={self.packets_received} "
+                f"rtp_packets_sent={self.packets_sent} "
+                f"rtp_bytes_received={self.bytes_received} "
+                f"rtp_bytes_sent={self.bytes_sent} "
+                f"payloads_received={payloads}"
+            ),
+        )
+        if self.artifacts:
+            self.artifacts.close()
 
 
 class G711Transcoder:
@@ -107,18 +230,32 @@ class RtpProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.session.transport = transport  # type: ignore[assignment]
         logging.info("RTP listening on %s:%s", self.session.local_ip, self.session.local_port)
+        self.session.log("RTP LISTENING", f"local={self.session.local_ip}:{self.session.local_port}")
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
         if len(data) < 12:
             return
 
+        first_packet = self.session.remote_addr is None
         self.session.remote_addr = addr
         version = data[0] >> 6
         if version != 2:
             return
 
+        csrc_count = data[0] & 0x0F
+        header_len = 12 + (csrc_count * 4)
+        if len(data) < header_len:
+            return
+
         src_payload_type = data[1] & 0x7F
-        payload = data[12:]
+        payload = data[header_len:]
+        if first_packet:
+            self.session.log(
+                "RTP REMOTE",
+                f"remote={addr[0]}:{addr[1]} first_payload_type={CODEC_NAMES.get(src_payload_type, src_payload_type)}",
+            )
+        self.session.record_rtp(src_payload_type, payload)
+
         out_payload_type = self.session.preferred_payload
         out_payload = self.transcoder.convert(payload, src_payload_type, out_payload_type)
 
@@ -135,28 +272,39 @@ class RtpProtocol(asyncio.DatagramProtocol):
 
         if self.session.transport:
             self.session.transport.sendto(header + out_payload, addr)
+            self.session.record_rtp_sent(out_payload)
 
 
 class MediaServer:
-    def __init__(self, local_ip: str, port_min: int, port_max: int):
+    def __init__(self, local_ip: str, port_min: int, port_max: int, log_dir: Path, recording_dir: Path):
         self.local_ip = local_ip
         self.port_min = port_min if port_min % 2 == 0 else port_min + 1
         self.port_max = port_max
+        self.log_dir = log_dir
+        self.recording_dir = recording_dir
         self.sessions: Dict[str, RtpSession] = {}
         self.transcoder = G711Transcoder()
         self._next_port = self.port_min
 
-    async def create_session(self, call_id: str, preferred_payload: int) -> RtpSession:
+    async def create_session(
+        self,
+        call_id: str,
+        preferred_payload: int,
+        remote_payloads: Tuple[int, ...],
+    ) -> RtpSession:
         if call_id in self.sessions:
             return self.sessions[call_id]
 
         loop = asyncio.get_running_loop()
         local_port = self._allocate_port()
+        artifacts = CallArtifacts(call_id=call_id, log_dir=self.log_dir, recording_dir=self.recording_dir)
         session = RtpSession(
             call_id=call_id,
             local_ip=self.local_ip,
             local_port=local_port,
             preferred_payload=preferred_payload,
+            remote_payloads=remote_payloads,
+            artifacts=artifacts,
         )
         await loop.create_datagram_endpoint(
             lambda: RtpProtocol(session, self.transcoder),
@@ -164,6 +312,9 @@ class MediaServer:
         )
         self.sessions[call_id] = session
         return session
+
+    def get_session(self, call_id: str) -> Optional[RtpSession]:
+        return self.sessions.get(call_id)
 
     def close_session(self, call_id: str) -> None:
         session = self.sessions.pop(call_id, None)
@@ -246,8 +397,25 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             remote_payloads = parse_sdp_payloads(message.body)
             preferred_payload = choose_payload(remote_payloads)
             call_id = message.header("call-id", make_call_id())
-            rtp = await self.media.create_session(call_id, preferred_payload)
+            rtp = await self.media.create_session(call_id, preferred_payload, remote_payloads)
+            rtp.log(
+                "INVITE RECEIVED",
+                (
+                    f"source={message.source[0]}:{message.source[1]} "
+                    f"from={message.header('from')} to={message.header('to')}"
+                ),
+            )
+            rtp.log(
+                "SDP OFFER",
+                f"payloads={format_payloads(remote_payloads)} selected={CODEC_NAMES.get(preferred_payload, preferred_payload)}",
+            )
+            rtp.log("SIP RESPONSE", "100 Trying")
+            rtp.log("SIP RESPONSE", "180 Ringing")
             sdp = make_sdp(self.local_ip, rtp.local_port, preferred_payload)
+            rtp.log(
+                "SDP ANSWER",
+                f"local_rtp={self.local_ip}:{rtp.local_port} payload={CODEC_NAMES.get(preferred_payload, preferred_payload)}",
+            )
 
             self.send_response(
                 message,
@@ -259,13 +427,22 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     "Content-Type": "application/sdp",
                 },
             )
+            rtp.log("SIP RESPONSE", "200 OK")
             return
 
         if method == "ACK":
+            session = self.media.get_session(message.header("call-id"))
+            if session:
+                session.mark_ack()
             return
 
         if method == "BYE":
+            session = self.media.get_session(message.header("call-id"))
+            if session:
+                session.log("BYE RECEIVED", f"source={message.source[0]}:{message.source[1]}")
             self.send_response(message, 200, "OK")
+            if session:
+                session.log("SIP RESPONSE", "200 OK for BYE")
             self.media.close_session(message.header("call-id"))
             return
 
@@ -364,6 +541,15 @@ def choose_payload(remote_payloads: Tuple[int, ...]) -> int:
     return PCMU
 
 
+def format_payloads(payloads: Tuple[int, ...]) -> str:
+    return ",".join(CODEC_NAMES.get(payload, str(payload)) for payload in payloads) or "none"
+
+
+def safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return cleaned or "call"
+
+
 def make_sdp(local_ip: str, rtp_port: int, payload_type: int) -> str:
     codecs = {
         PCMU: "a=rtpmap:0 PCMU/8000",
@@ -394,6 +580,8 @@ async def main() -> None:
     parser.add_argument("--sip-port", type=int, default=5060, help="SIP UDP port")
     parser.add_argument("--rtp-min", type=int, default=10000, help="First RTP UDP port")
     parser.add_argument("--rtp-max", type=int, default=10100, help="Last RTP UDP port")
+    parser.add_argument("--log-dir", default="logs", help="Directory for per-call log files")
+    parser.add_argument("--recording-dir", default="recordings", help="Directory for inbound RTP WAV recordings")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
@@ -402,7 +590,7 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    media = MediaServer(args.ip, args.rtp_min, args.rtp_max)
+    media = MediaServer(args.ip, args.rtp_min, args.rtp_max, Path(args.log_dir), Path(args.recording_dir))
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(
         lambda: SipServerProtocol(args.ip, args.sip_port, media),
