@@ -10,6 +10,8 @@ import struct
 import time
 from pathlib import Path
 
+from smoke_utils import default_transcript_dir
+
 
 ROOT = Path(__file__).resolve().parent
 SERVER_IP = "127.0.0.1"
@@ -131,7 +133,7 @@ def send_rtp_and_dtmf(remote_rtp_port: int, digit: int = 5) -> tuple[str, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Basic SIP call smoke client")
-    parser.add_argument("--output-dir", default=str(ROOT), help="Directory for the SIP transcript")
+    parser.add_argument("--output-dir", default=str(default_transcript_dir()), help="Directory for the SIP transcript")
     args = parser.parse_args()
 
     sip_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

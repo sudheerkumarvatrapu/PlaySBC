@@ -77,6 +77,15 @@ artifacts/
 
 This keeps sanity and soak test outputs from overwriting older logs.
 
+The smoke clients also default to a fresh transcript folder under `artifacts/`:
+
+```bash
+python3 smoke_register_client.py
+python3 smoke_call_client.py
+```
+
+Use `--output-dir` when you want both clients to write transcripts into the same run folder.
+
 If `users` is non-empty, `REGISTER` requires SIP digest authentication. Leave `users` empty for open demo registration:
 
 ```json

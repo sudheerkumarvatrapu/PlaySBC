@@ -203,7 +203,7 @@ Suggested GitHub Actions workflow:
 Run:
 
 ```bash
-python3 -m py_compile mini_call_server.py smoke_call_client.py
+python3 -m py_compile mini_call_server.py smoke_call_client.py smoke_register_client.py
 python3 -m unittest
 ```
 

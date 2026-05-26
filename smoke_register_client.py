@@ -8,6 +8,7 @@ import socket
 from pathlib import Path
 
 from mini_call_server import CRLF, make_digest_response, parse_digest_header
+from smoke_utils import default_transcript_dir
 
 
 SERVER_IP = "127.0.0.1"
@@ -51,7 +52,7 @@ def status_line(message: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SIP REGISTER digest auth smoke client")
-    parser.add_argument("--output-dir", default=".", help="Directory for the SIP transcript")
+    parser.add_argument("--output-dir", default=str(default_transcript_dir()), help="Directory for the SIP transcript")
     args = parser.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
