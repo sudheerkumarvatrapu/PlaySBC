@@ -24,6 +24,7 @@ import json
 import logging
 import random
 import re
+import secrets
 import socket
 import struct
 import time
@@ -60,7 +61,11 @@ class ServerConfig:
     rtp_max: int = 10100
     log_dir: str = "logs"
     recording_dir: str = "recordings"
+    artifact_root: str = ""
+    run_id: str = ""
     default_codec: str = "PCMU"
+    auth_realm: str = "mini-call-server"
+    users: Dict[str, str] = field(default_factory=dict)
     debug: bool = False
 
     @property
@@ -75,8 +80,31 @@ SERVER_CONFIG_KEYS = {
     "rtp_max",
     "log_dir",
     "recording_dir",
+    "artifact_root",
+    "run_id",
     "default_codec",
+    "auth_realm",
+    "users",
     "debug",
+}
+
+DTMF_EVENTS = {
+    0: "0",
+    1: "1",
+    2: "2",
+    3: "3",
+    4: "4",
+    5: "5",
+    6: "6",
+    7: "7",
+    8: "8",
+    9: "9",
+    10: "*",
+    11: "#",
+    12: "A",
+    13: "B",
+    14: "C",
+    15: "D",
 }
 
 
@@ -166,6 +194,7 @@ class RtpSession:
     local_port: int
     preferred_payload: int = PCMU
     remote_payloads: Tuple[int, ...] = field(default_factory=tuple)
+    dtmf_payload_type: Optional[int] = None
     artifacts: Optional[CallArtifacts] = None
     remote_addr: Optional[Tuple[str, int]] = None
     transport: Optional[asyncio.DatagramTransport] = None
@@ -180,6 +209,9 @@ class RtpSession:
     bytes_received: int = 0
     bytes_sent: int = 0
     payload_types_received: Dict[int, int] = field(default_factory=dict)
+    dtmf_events: list = field(default_factory=list)
+    dtmf_events_started: set = field(default_factory=set)
+    dtmf_events_completed: set = field(default_factory=set)
     closed: bool = False
 
     def log(self, event: str, detail: str = "") -> None:
@@ -190,18 +222,36 @@ class RtpSession:
         self.acknowledged_at = time.time()
         self.log("ACK RECEIVED")
 
-    def record_rtp(self, payload_type: int, payload: bytes) -> None:
+    def record_rtp(self, payload_type: int, payload: bytes, record_audio: bool = True) -> None:
         self.packets_received += 1
         self.bytes_received += len(payload)
         self.payload_types_received[payload_type] = self.payload_types_received.get(payload_type, 0) + 1
         self.last_rtp_at = time.time()
-        if self.artifacts:
+        if record_audio and self.artifacts:
             self.artifacts.record_payload(payload_type, payload)
 
     def record_rtp_sent(self, payload: bytes) -> None:
         self.packets_sent += 1
         self.bytes_sent += len(payload)
         self.last_rtp_at = time.time()
+
+    def handle_dtmf_payload(self, payload: bytes) -> None:
+        event = parse_dtmf_event(payload)
+        if event is None:
+            self.log("DTMF IGNORED", "reason=short_payload")
+            return
+
+        event_id, digit, is_end, duration = event
+        if event_id not in self.dtmf_events_started:
+            self.dtmf_events_started.add(event_id)
+            self.log("DTMF START", f"digit={digit} event={event_id}")
+
+        if is_end:
+            completion_key = (event_id, duration)
+            if completion_key not in self.dtmf_events_completed:
+                self.dtmf_events_completed.add(completion_key)
+                self.dtmf_events.append(digit)
+                self.log("DTMF END", f"digit={digit} event={event_id} duration={duration}")
 
     def close(self) -> None:
         if self.closed:
@@ -214,6 +264,7 @@ class RtpSession:
             f"{CODEC_NAMES.get(payload_type, str(payload_type))}:{count}"
             for payload_type, count in sorted(self.payload_types_received.items())
         ) or "none"
+        dtmf = "".join(self.dtmf_events) or "none"
         self.log(
             "CALL SUMMARY",
             (
@@ -222,7 +273,8 @@ class RtpSession:
                 f"rtp_packets_sent={self.packets_sent} "
                 f"rtp_bytes_received={self.bytes_received} "
                 f"rtp_bytes_sent={self.bytes_sent} "
-                f"payloads_received={payloads}"
+                f"payloads_received={payloads} "
+                f"dtmf={dtmf}"
             ),
         )
         if self.artifacts:
@@ -287,6 +339,12 @@ class RtpProtocol(asyncio.DatagramProtocol):
                 "RTP REMOTE",
                 f"remote={addr[0]}:{addr[1]} first_payload_type={CODEC_NAMES.get(src_payload_type, src_payload_type)}",
             )
+
+        if self.session.dtmf_payload_type == src_payload_type:
+            self.session.record_rtp(src_payload_type, payload, record_audio=False)
+            self.session.handle_dtmf_payload(payload)
+            return
+
         self.session.record_rtp(src_payload_type, payload)
 
         out_payload_type = self.session.preferred_payload
@@ -324,6 +382,7 @@ class MediaServer:
         call_id: str,
         preferred_payload: int,
         remote_payloads: Tuple[int, ...],
+        dtmf_payload_type: Optional[int],
     ) -> RtpSession:
         if call_id in self.sessions:
             return self.sessions[call_id]
@@ -337,6 +396,7 @@ class MediaServer:
             local_port=local_port,
             preferred_payload=preferred_payload,
             remote_payloads=remote_payloads,
+            dtmf_payload_type=dtmf_payload_type,
             artifacts=artifacts,
         )
         await loop.create_datagram_endpoint(
@@ -379,11 +439,22 @@ class MediaServer:
 
 
 class SipServerProtocol(asyncio.DatagramProtocol):
-    def __init__(self, local_ip: str, local_port: int, media: MediaServer, default_payload: int):
+    def __init__(
+        self,
+        local_ip: str,
+        local_port: int,
+        media: MediaServer,
+        default_payload: int,
+        auth_realm: str,
+        users: Dict[str, str],
+    ):
         self.local_ip = local_ip
         self.local_port = local_port
         self.media = media
         self.default_payload = default_payload
+        self.auth_realm = auth_realm
+        self.users = users
+        self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, str] = {}
 
@@ -407,6 +478,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
         if method == "REGISTER":
             user = extract_user(message.header("to")) or extract_user(message.header("from")) or "unknown"
+            auth_result = self.authenticate_register(message, user)
+            if auth_result == "challenge":
+                self.send_response(
+                    message,
+                    401,
+                    "Unauthorized",
+                    extra_headers={"WWW-Authenticate": self.make_authenticate_header()},
+                )
+                logging.info("Challenged REGISTER for %s", user)
+                return
+            if auth_result == "forbidden":
+                self.send_response(message, 403, "Forbidden")
+                logging.info("Rejected REGISTER for unknown user %s", user)
+                return
+
             self.registrations[user] = message.header("contact")
             self.send_response(message, 200, "OK")
             logging.info("Registered %s -> %s", user, self.registrations[user])
@@ -429,9 +515,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.send_response(message, 180, "Ringing")
 
             remote_payloads = parse_sdp_payloads(message.body)
+            dtmf_payload_type = parse_dtmf_payload_type(message.body)
             preferred_payload = choose_payload(remote_payloads, self.default_payload)
             call_id = message.header("call-id", make_call_id())
-            rtp = await self.media.create_session(call_id, preferred_payload, remote_payloads)
+            rtp = await self.media.create_session(call_id, preferred_payload, remote_payloads, dtmf_payload_type)
             rtp.log(
                 "INVITE RECEIVED",
                 (
@@ -441,7 +528,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             rtp.log(
                 "SDP OFFER",
-                f"payloads={format_payloads(remote_payloads)} selected={CODEC_NAMES.get(preferred_payload, preferred_payload)}",
+                (
+                    f"payloads={format_payloads(remote_payloads)} "
+                    f"selected={CODEC_NAMES.get(preferred_payload, preferred_payload)} "
+                    f"dtmf_payload={dtmf_payload_type if dtmf_payload_type is not None else 'none'}"
+                ),
             )
             rtp.log("SIP RESPONSE", "100 Trying")
             rtp.log("SIP RESPONSE", "180 Ringing")
@@ -481,6 +572,44 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         self.send_response(message, 405, "Method Not Allowed", extra_headers={"Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE"})
+
+    def authenticate_register(self, message: SipMessage, user: str) -> str:
+        if not self.users:
+            return "ok"
+        if user not in self.users:
+            return "forbidden"
+
+        authorization = message.header("authorization")
+        if not authorization:
+            return "challenge"
+
+        digest = parse_digest_header(authorization)
+        nonce = digest.get("nonce", "")
+        if (
+            digest.get("username") != user
+            or digest.get("realm") != self.auth_realm
+            or nonce not in self.nonces
+            or time.time() - self.nonces[nonce] > 300
+        ):
+            return "challenge"
+
+        expected = make_digest_response(
+            username=user,
+            realm=self.auth_realm,
+            password=self.users[user],
+            method=message.method,
+            uri=digest.get("uri", ""),
+            nonce=nonce,
+            nc=digest.get("nc"),
+            cnonce=digest.get("cnonce"),
+            qop=digest.get("qop"),
+        )
+        return "ok" if secrets.compare_digest(expected, digest.get("response", "")) else "challenge"
+
+    def make_authenticate_header(self) -> str:
+        nonce = secrets.token_hex(16)
+        self.nonces[nonce] = time.time()
+        return f'Digest realm="{self.auth_realm}", nonce="{nonce}", algorithm=MD5, qop="auth"'
 
     def send_response(
         self,
@@ -568,6 +697,12 @@ def parse_sdp_payloads(sdp: str) -> Tuple[int, ...]:
     return tuple(payloads)
 
 
+def parse_dtmf_payload_type(sdp: str) -> Optional[int]:
+    for match in re.finditer(r"^a=rtpmap:(\d+)\s+telephone-event/8000", sdp, re.IGNORECASE | re.MULTILINE):
+        return int(match.group(1))
+    return None
+
+
 def choose_payload(remote_payloads: Tuple[int, ...], default_payload: int = PCMU) -> int:
     if default_payload in SUPPORTED_CODECS and default_payload in remote_payloads:
         return default_payload
@@ -593,6 +728,55 @@ def format_payloads(payloads: Tuple[int, ...]) -> str:
 def safe_filename(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
     return cleaned or "call"
+
+
+def parse_dtmf_event(payload: bytes) -> Optional[Tuple[int, str, bool, int]]:
+    if len(payload) < 4:
+        return None
+    event_id = payload[0]
+    digit = DTMF_EVENTS.get(event_id, str(event_id))
+    is_end = bool(payload[1] & 0x80)
+    duration = struct.unpack("!H", payload[2:4])[0]
+    return event_id, digit, is_end, duration
+
+
+def parse_digest_header(value: str) -> Dict[str, str]:
+    value = value.strip()
+    if value.lower().startswith("digest "):
+        value = value[7:].strip()
+
+    fields: Dict[str, str] = {}
+    for part in re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', value):
+        key, _, raw_value = part.strip().partition("=")
+        if not key:
+            continue
+        parsed_value = raw_value.strip()
+        if parsed_value.startswith('"') and parsed_value.endswith('"'):
+            parsed_value = parsed_value[1:-1]
+        fields[key.lower()] = parsed_value
+    return fields
+
+
+def make_digest_response(
+    username: str,
+    realm: str,
+    password: str,
+    method: str,
+    uri: str,
+    nonce: str,
+    nc: Optional[str] = None,
+    cnonce: Optional[str] = None,
+    qop: Optional[str] = None,
+) -> str:
+    ha1 = md5_hex(f"{username}:{realm}:{password}")
+    ha2 = md5_hex(f"{method}:{uri}")
+    if qop:
+        return md5_hex(f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}")
+    return md5_hex(f"{ha1}:{nonce}:{ha2}")
+
+
+def md5_hex(value: str) -> str:
+    return hashlib.md5(value.encode("utf-8")).hexdigest()
 
 
 def make_sdp(local_ip: str, rtp_port: int, payload_type: int) -> str:
@@ -651,7 +835,11 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
-    if key in {"sip_ip", "log_dir", "recording_dir", "default_codec"}:
+    if key == "users":
+        if not isinstance(value, dict):
+            raise ValueError("users must be a JSON object mapping usernames to passwords")
+        return {str(username): str(password) for username, password in value.items()}
+    if key in {"sip_ip", "log_dir", "recording_dir", "artifact_root", "run_id", "default_codec", "auth_realm"}:
         return str(value)
     return value
 
@@ -664,7 +852,10 @@ def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> Serve
         "rtp_max": args.rtp_max,
         "log_dir": args.log_dir,
         "recording_dir": args.recording_dir,
+        "artifact_root": args.artifact_root,
+        "run_id": args.run_id,
         "default_codec": args.default_codec,
+        "auth_realm": args.auth_realm,
         "debug": args.debug,
     }
     for key, value in overrides.items():
@@ -681,6 +872,22 @@ def validate_config(config: ServerConfig) -> None:
         raise ValueError("sip_port must be between 1 and 65535")
     if config.rtp_min <= 0 or config.rtp_max > 65535 or config.rtp_min > config.rtp_max:
         raise ValueError("RTP port range must be within 1-65535 and rtp_min must be <= rtp_max")
+    if not config.auth_realm:
+        raise ValueError("auth_realm must not be empty")
+
+
+def resolve_artifact_dirs(config: ServerConfig) -> Tuple[Path, Path, Optional[Path]]:
+    if not config.artifact_root:
+        return Path(config.log_dir), Path(config.recording_dir), None
+
+    run_id = config.run_id or time.strftime("run-%Y%m%d-%H%M%S", time.localtime())
+    root = Path(config.artifact_root)
+    run_dir = root / safe_filename(run_id)
+    suffix = 2
+    while run_dir.exists() and not config.run_id:
+        run_dir = root / f"{safe_filename(run_id)}-{suffix}"
+        suffix += 1
+    return run_dir / "logs", run_dir / "recordings", run_dir
 
 
 async def main() -> None:
@@ -692,7 +899,10 @@ async def main() -> None:
     parser.add_argument("--rtp-max", type=int, help="Last RTP UDP port")
     parser.add_argument("--log-dir", help="Directory for per-call log files")
     parser.add_argument("--recording-dir", help="Directory for inbound RTP WAV recordings")
+    parser.add_argument("--artifact-root", help="Create a fresh run folder under this directory for logs and recordings")
+    parser.add_argument("--run-id", help="Run folder name when --artifact-root is used")
     parser.add_argument("--default-codec", type=str.upper, choices=sorted(CODEC_PAYLOADS), help="Preferred answer codec")
+    parser.add_argument("--auth-realm", help="SIP digest authentication realm")
     parser.add_argument("--debug", action="store_true", default=None, help="Enable debug logging")
     args = parser.parse_args()
 
@@ -706,16 +916,29 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    log_dir, recording_dir, run_dir = resolve_artifact_dirs(config)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    recording_dir.mkdir(parents=True, exist_ok=True)
+    if run_dir:
+        logging.info("Writing run artifacts under %s", run_dir)
+
     media = MediaServer(
         config.sip_ip,
         config.rtp_min,
         config.rtp_max,
-        Path(config.log_dir),
-        Path(config.recording_dir),
+        log_dir,
+        recording_dir,
     )
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(
-        lambda: SipServerProtocol(config.sip_ip, config.sip_port, media, config.default_payload),
+        lambda: SipServerProtocol(
+            config.sip_ip,
+            config.sip_port,
+            media,
+            config.default_payload,
+            config.auth_realm,
+            config.users,
+        ),
         local_addr=(config.sip_ip, config.sip_port),
     )
 

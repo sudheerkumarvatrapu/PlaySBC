@@ -14,6 +14,8 @@ It supports:
 - Per-call log files
 - Inbound RTP recording to WAV for G.711 PCMU/PCMA calls
 - JSON config file support
+- Optional SIP digest authentication for `REGISTER`
+- RFC 2833 DTMF detection
 
 It is meant for local testing and learning. It is not a production SIP server.
 
@@ -53,8 +55,33 @@ Supported config keys:
   "rtp_max": 10100,
   "log_dir": "logs",
   "recording_dir": "recordings",
+  "artifact_root": "artifacts",
+  "run_id": "",
   "default_codec": "PCMU",
+  "auth_realm": "mini-call-server",
+  "users": {
+    "1001": "secret-password"
+  },
   "debug": false
+}
+```
+
+When `artifact_root` is set, each server run creates a fresh folder such as:
+
+```text
+artifacts/
+  run-20260526-104238/
+    logs/
+    recordings/
+```
+
+This keeps sanity and soak test outputs from overwriting older logs.
+
+If `users` is non-empty, `REGISTER` requires SIP digest authentication. Leave `users` empty for open demo registration:
+
+```json
+{
+  "users": {}
 }
 ```
 
@@ -87,7 +114,7 @@ Example account settings:
 - SIP port: `5062`
 - Transport: UDP
 - Username: any value, for example `1001`
-- Password: empty or any value, because this demo does not authenticate
+- Password: use the configured password when `users` is enabled, for example `secret-password`
 
 Then call any SIP URI at the server, for example:
 
@@ -96,6 +123,8 @@ sip:echo@127.0.0.1:5062
 ```
 
 The server auto-answers and echoes received RTP audio back to the caller.
+
+DTMF digits sent as RFC 2833 `telephone-event/8000` are logged in the per-call log.
 
 ## Notes
 

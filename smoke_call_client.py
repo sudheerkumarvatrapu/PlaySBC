@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import socket
 import struct
@@ -30,9 +31,11 @@ def build_invite() -> str:
             "s=Smoke Call",
             f"c=IN IP4 {CLIENT_IP}",
             "t=0 0",
-            f"m=audio {CLIENT_RTP_PORT} RTP/AVP 0 8",
+            f"m=audio {CLIENT_RTP_PORT} RTP/AVP 0 8 101",
             "a=rtpmap:0 PCMU/8000",
             "a=rtpmap:8 PCMA/8000",
+            "a=rtpmap:101 telephone-event/8000",
+            "a=fmtp:101 0-16",
             "a=sendrecv",
             "",
         ]
@@ -98,7 +101,7 @@ def parse_answer_rtp_port(message: str) -> int:
     return int(match.group(1))
 
 
-def send_rtp_and_wait_for_echo(remote_rtp_port: int) -> str:
+def send_rtp_and_dtmf(remote_rtp_port: int, digit: int = 5) -> tuple[str, str]:
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind((CLIENT_IP, CLIENT_RTP_PORT))
     rtp_sock.settimeout(3)
@@ -107,20 +110,30 @@ def send_rtp_and_wait_for_echo(remote_rtp_port: int) -> str:
     packet = struct.pack("!BBHII", 0x80, 0, 1, 160, 0x12345678) + payload
     rtp_sock.sendto(packet, (SERVER_IP, remote_rtp_port))
     data, addr = rtp_sock.recvfrom(2048)
-    rtp_sock.close()
 
     if len(data) < 12:
         raise RuntimeError("Short RTP echo packet")
 
     payload_type = data[1] & 0x7F
     sequence = struct.unpack("!H", data[2:4])[0]
-    return (
+    echo_result = (
         f"RTP echo received from udp:{addr[0]}:{addr[1]} "
         f"bytes={len(data)} payload_type={payload_type} sequence={sequence}"
     )
 
+    start_event = bytes([digit, 10, 0, 160])
+    end_event = bytes([digit, 0x80 | 10, 1, 64])
+    rtp_sock.sendto(struct.pack("!BBHII", 0x80, 101, 2, 320, 0x12345678) + start_event, (SERVER_IP, remote_rtp_port))
+    rtp_sock.sendto(struct.pack("!BBHII", 0x80, 101, 3, 320, 0x12345678) + end_event, (SERVER_IP, remote_rtp_port))
+    rtp_sock.close()
+    return echo_result, f"DTMF sent digit={digit} payload_type=101"
+
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Basic SIP call smoke client")
+    parser.add_argument("--output-dir", default=str(ROOT), help="Directory for the SIP transcript")
+    args = parser.parse_args()
+
     sip_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sip_sock.bind((CLIENT_IP, CLIENT_SIP_PORT))
     sip_sock.settimeout(3)
@@ -157,8 +170,9 @@ def main() -> None:
     sip_sock.sendto(ack.encode("utf-8"), (SERVER_IP, SERVER_PORT))
     transcript += ["--- ACK REQUEST ---", ack]
 
-    rtp_result = send_rtp_and_wait_for_echo(remote_rtp_port)
+    rtp_result, dtmf_result = send_rtp_and_dtmf(remote_rtp_port)
     transcript += ["--- RTP CHECK ---", rtp_result]
+    transcript += ["--- DTMF CHECK ---", dtmf_result]
 
     bye = build_bye(to_header)
     sip_sock.sendto(bye.encode("utf-8"), (SERVER_IP, SERVER_PORT))
@@ -169,9 +183,12 @@ def main() -> None:
     transcript += ["--- BYE RESPONSE ---", f"From: udp:{addr[0]}:{addr[1]}", bye_response]
     transcript += ["--- RESULT ---", "PASS: basic SIP call and RTP echo completed successfully.", ""]
 
-    (ROOT / "sip_basic_call.log").write_text("\n".join(transcript), encoding="utf-8")
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "sip_basic_call.log").write_text("\n".join(transcript), encoding="utf-8")
     print("PASS")
     print(rtp_result)
+    print(dtmf_result)
 
 
 if __name__ == "__main__":
