@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import random
 import re
@@ -29,7 +30,7 @@ import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import audioop  # type: ignore
@@ -44,6 +45,38 @@ SUPPORTED_CODECS = (PCMU, PCMA)
 CODEC_NAMES = {
     PCMU: "PCMU",
     PCMA: "PCMA",
+}
+CODEC_PAYLOADS = {
+    "PCMU": PCMU,
+    "PCMA": PCMA,
+}
+
+
+@dataclass
+class ServerConfig:
+    sip_ip: str = "0.0.0.0"
+    sip_port: int = 5060
+    rtp_min: int = 10000
+    rtp_max: int = 10100
+    log_dir: str = "logs"
+    recording_dir: str = "recordings"
+    default_codec: str = "PCMU"
+    debug: bool = False
+
+    @property
+    def default_payload(self) -> int:
+        return codec_payload(self.default_codec)
+
+
+SERVER_CONFIG_KEYS = {
+    "sip_ip",
+    "sip_port",
+    "rtp_min",
+    "rtp_max",
+    "log_dir",
+    "recording_dir",
+    "default_codec",
+    "debug",
 }
 
 
@@ -346,10 +379,11 @@ class MediaServer:
 
 
 class SipServerProtocol(asyncio.DatagramProtocol):
-    def __init__(self, local_ip: str, local_port: int, media: MediaServer):
+    def __init__(self, local_ip: str, local_port: int, media: MediaServer, default_payload: int):
         self.local_ip = local_ip
         self.local_port = local_port
         self.media = media
+        self.default_payload = default_payload
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, str] = {}
 
@@ -395,7 +429,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.send_response(message, 180, "Ringing")
 
             remote_payloads = parse_sdp_payloads(message.body)
-            preferred_payload = choose_payload(remote_payloads)
+            preferred_payload = choose_payload(remote_payloads, self.default_payload)
             call_id = message.header("call-id", make_call_id())
             rtp = await self.media.create_session(call_id, preferred_payload, remote_payloads)
             rtp.log(
@@ -534,11 +568,22 @@ def parse_sdp_payloads(sdp: str) -> Tuple[int, ...]:
     return tuple(payloads)
 
 
-def choose_payload(remote_payloads: Tuple[int, ...]) -> int:
+def choose_payload(remote_payloads: Tuple[int, ...], default_payload: int = PCMU) -> int:
+    if default_payload in SUPPORTED_CODECS and default_payload in remote_payloads:
+        return default_payload
+
     for payload in remote_payloads:
         if payload in SUPPORTED_CODECS:
             return payload
     return PCMU
+
+
+def codec_payload(codec_name: str) -> int:
+    codec = codec_name.upper()
+    if codec not in CODEC_PAYLOADS:
+        supported = ", ".join(sorted(CODEC_PAYLOADS))
+        raise ValueError(f"Unsupported default_codec {codec_name!r}. Supported values: {supported}")
+    return CODEC_PAYLOADS[codec]
 
 
 def format_payloads(payloads: Tuple[int, ...]) -> str:
@@ -574,27 +619,104 @@ def make_call_id() -> str:
     return hashlib.sha1(str(random.random()).encode("ascii")).hexdigest()
 
 
+def load_config_file(path: Optional[str]) -> ServerConfig:
+    config = ServerConfig()
+    if not path:
+        return config
+
+    config_path = Path(path)
+    try:
+        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON config {config_path}: {exc}") from exc
+
+    if not isinstance(raw_config, dict):
+        raise ValueError(f"Config {config_path} must contain a JSON object")
+
+    for key, value in raw_config.items():
+        if key not in SERVER_CONFIG_KEYS:
+            raise ValueError(f"Unknown config key {key!r} in {config_path}")
+        setattr(config, key, coerce_config_value(key, value))
+
+    validate_config(config)
+    return config
+
+
+def coerce_config_value(key: str, value: Any) -> Any:
+    if key in {"sip_port", "rtp_min", "rtp_max"}:
+        return int(value)
+    if key == "debug":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    if key in {"sip_ip", "log_dir", "recording_dir", "default_codec"}:
+        return str(value)
+    return value
+
+
+def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> ServerConfig:
+    overrides = {
+        "sip_ip": args.sip_ip,
+        "sip_port": args.sip_port,
+        "rtp_min": args.rtp_min,
+        "rtp_max": args.rtp_max,
+        "log_dir": args.log_dir,
+        "recording_dir": args.recording_dir,
+        "default_codec": args.default_codec,
+        "debug": args.debug,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            setattr(config, key, coerce_config_value(key, value))
+    validate_config(config)
+    return config
+
+
+def validate_config(config: ServerConfig) -> None:
+    config.default_codec = config.default_codec.upper()
+    codec_payload(config.default_codec)
+    if config.sip_port <= 0 or config.sip_port > 65535:
+        raise ValueError("sip_port must be between 1 and 65535")
+    if config.rtp_min <= 0 or config.rtp_max > 65535 or config.rtp_min > config.rtp_max:
+        raise ValueError("RTP port range must be within 1-65535 and rtp_min must be <= rtp_max")
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Small SIP/RTP call server")
-    parser.add_argument("--ip", default="0.0.0.0", help="IP address to bind and advertise")
-    parser.add_argument("--sip-port", type=int, default=5060, help="SIP UDP port")
-    parser.add_argument("--rtp-min", type=int, default=10000, help="First RTP UDP port")
-    parser.add_argument("--rtp-max", type=int, default=10100, help="Last RTP UDP port")
-    parser.add_argument("--log-dir", default="logs", help="Directory for per-call log files")
-    parser.add_argument("--recording-dir", default="recordings", help="Directory for inbound RTP WAV recordings")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--config", help="Path to a JSON config file")
+    parser.add_argument("--ip", dest="sip_ip", help="IP address to bind and advertise")
+    parser.add_argument("--sip-port", type=int, help="SIP UDP port")
+    parser.add_argument("--rtp-min", type=int, help="First RTP UDP port")
+    parser.add_argument("--rtp-max", type=int, help="Last RTP UDP port")
+    parser.add_argument("--log-dir", help="Directory for per-call log files")
+    parser.add_argument("--recording-dir", help="Directory for inbound RTP WAV recordings")
+    parser.add_argument("--default-codec", type=str.upper, choices=sorted(CODEC_PAYLOADS), help="Preferred answer codec")
+    parser.add_argument("--debug", action="store_true", default=None, help="Enable debug logging")
     args = parser.parse_args()
 
+    try:
+        config = apply_cli_overrides(load_config_file(args.config), args)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+
     logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=logging.DEBUG if config.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    media = MediaServer(args.ip, args.rtp_min, args.rtp_max, Path(args.log_dir), Path(args.recording_dir))
+    media = MediaServer(
+        config.sip_ip,
+        config.rtp_min,
+        config.rtp_max,
+        Path(config.log_dir),
+        Path(config.recording_dir),
+    )
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(
-        lambda: SipServerProtocol(args.ip, args.sip_port, media),
-        local_addr=(args.ip, args.sip_port),
+        lambda: SipServerProtocol(config.sip_ip, config.sip_port, media, config.default_payload),
+        local_addr=(config.sip_ip, config.sip_port),
     )
 
     await asyncio.Future()

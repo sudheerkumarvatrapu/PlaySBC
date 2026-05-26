@@ -13,6 +13,7 @@ It supports:
 - Basic G.711 transcoding between PCMU and PCMA when Python `audioop` is available
 - Per-call log files
 - Inbound RTP recording to WAV for G.711 PCMU/PCMA calls
+- JSON config file support
 
 It is meant for local testing and learning. It is not a production SIP server.
 
@@ -28,6 +29,33 @@ If your softphone is on another machine, advertise the real LAN IP instead:
 
 ```bash
 python3 mini_call_server.py --ip 192.168.1.50 --sip-port 5062 --rtp-min 10000 --rtp-max 10100
+```
+
+You can also run from the example config:
+
+```bash
+python3 mini_call_server.py --config config.example.json
+```
+
+Command-line flags override config values, so this is valid for quick tests:
+
+```bash
+python3 mini_call_server.py --config config.example.json --sip-port 15062 --rtp-min 12000 --rtp-max 12010 --debug
+```
+
+Supported config keys:
+
+```json
+{
+  "sip_ip": "0.0.0.0",
+  "sip_port": 5062,
+  "rtp_min": 10000,
+  "rtp_max": 10100,
+  "log_dir": "logs",
+  "recording_dir": "recordings",
+  "default_codec": "PCMU",
+  "debug": false
+}
 ```
 
 ## Call Artifacts
@@ -75,3 +103,4 @@ The server auto-answers and echoes received RTP audio back to the caller.
 - NAT traversal, TLS, SRTP, authentication, DTMF handling, and real call bridging are intentionally not included.
 - Python 3.13 may not include `audioop`; in that case same-codec RTP echo still works, but PCMU/PCMA transcoding falls back to pass-through.
 - If `audioop` is unavailable, WAV recording is skipped with a per-call log warning.
+- Use `config.local.json` for machine-specific config; it is ignored by Git.

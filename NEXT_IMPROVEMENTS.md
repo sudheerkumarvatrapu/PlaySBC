@@ -8,16 +8,17 @@ Completed:
 
 - Per-call log files
 - RTP recording to WAV for G.711 PCMU/PCMA calls
+- Config file support
 
 Next recommended item:
 
-- Config file support
+- SIP digest authentication
 
 ## Recommended Build Order
 
 1. Per-call log files - done
 2. RTP recording to WAV - done
-3. Config file support
+3. Config file support - done
 4. SIP digest authentication
 5. DTMF detection
 6. Call bridging
@@ -215,7 +216,7 @@ Why this matters:
 The best next implementation task is:
 
 ```text
-Add config file support.
+Add SIP digest authentication for REGISTER.
 ```
 
-That is now the best next improvement because call logs and recordings are already implemented. A config file will make repeatable local tests and future Docker packaging cleaner.
+That is now the best next improvement because config-file support is implemented. Authentication will make registration behavior closer to real SIP systems.
