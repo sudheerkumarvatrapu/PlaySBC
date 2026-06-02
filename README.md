@@ -16,6 +16,7 @@ It supports:
 - JSON config file support
 - Optional SIP digest authentication for `REGISTER`
 - RFC 2833 DTMF detection
+- SIPp regression scenarios and fresh per-run artifacts
 
 It is meant for local testing and learning. It is not a production SIP server.
 
@@ -135,10 +136,58 @@ The server auto-answers and echoes received RTP audio back to the caller.
 
 DTMF digits sent as RFC 2833 `telephone-event/8000` are logged in the per-call log.
 
+## SIPp Regression Harness
+
+Install [SIPp](https://github.com/SIPp/sipp) on macOS:
+
+```bash
+brew install sipp
+```
+
+Run the scenario harness against a managed local mini server:
+
+```bash
+python3 tools/run_sipp_regression.py --start-server
+```
+
+Available scenarios:
+
+```text
+options
+register_digest
+call_echo
+```
+
+Run a focused scenario:
+
+```bash
+python3 tools/run_sipp_regression.py --start-server --scenario options --calls 10 --rate 5
+```
+
+Prepare and inspect all SIPp commands without requiring SIPp to be installed:
+
+```bash
+python3 tools/run_sipp_regression.py --dry-run
+```
+
+Every harness execution creates a new folder:
+
+```text
+artifacts/
+  sipp/
+    sipp-20260602-120000/
+      summary.json
+      options/
+      register_digest/
+      call_echo/
+```
+
+The broader engineering path is documented in [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
+
 ## Notes
 
 - Open UDP SIP port `5062` and RTP ports `10000-10100` in your firewall.
-- NAT traversal, TLS, SRTP, authentication, DTMF handling, and real call bridging are intentionally not included.
+- NAT traversal, TLS, SRTP, and real call bridging are intentionally not included.
 - Python 3.13 may not include `audioop`; in that case same-codec RTP echo still works, but PCMU/PCMA transcoding falls back to pass-through.
 - If `audioop` is unavailable, WAV recording is skipped with a per-call log warning.
 - Use `config.local.json` for machine-specific config; it is ignored by Git.

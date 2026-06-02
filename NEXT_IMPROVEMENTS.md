@@ -11,10 +11,12 @@ Completed:
 - Config file support
 - SIP digest authentication
 - DTMF detection
+- Unit tests and Python smoke clients
+- SIPp regression harness
 
 Next recommended item:
 
-- Call bridging
+- SIP state machine cleanup
 
 ## Recommended Build Order
 
@@ -23,9 +25,14 @@ Next recommended item:
 3. Config file support - done
 4. SIP digest authentication - done
 5. DTMF detection - done
-6. Call bridging
-7. Docker packaging
-8. Automated tests and GitHub Actions
+6. SIPp regression harness - done
+7. SIP state machine cleanup
+8. Transaction layer and retransmission cache
+9. RTP jitter buffer and media metrics
+10. Call bridging
+11. Routing engine
+12. Docker packaging
+13. GitHub Actions
 
 ## 1. Per-Call Log Files
 
@@ -144,7 +151,37 @@ Why this matters:
 - Useful for IVR tests
 - Verifies RTP event handling beyond simple audio echo
 
-## 6. Call Bridging
+## 6. SIPp Regression Harness
+
+Automate SIP regression scenarios:
+
+- `OPTIONS` health check
+- Digest-authenticated `REGISTER`
+- Basic answered call with `ACK` and `BYE`
+- Fresh artifact folder for every regression run
+
+Why this matters:
+
+- Repeatable protocol checks
+- A foundation for load and soak runs
+- Traceable message, error, and statistics files
+
+## 7. SIP State Machine Cleanup
+
+Add explicit dialog state tracking:
+
+- Call-ID
+- Tags
+- Branch IDs
+- CSeq
+- `INIT`, `RINGING`, `ANSWERED`, and `TERMINATED` states
+
+Why this matters:
+
+- Makes invalid method ordering visible
+- Prepares the server for transaction correctness and call bridging
+
+## 8. Call Bridging
 
 Move from echo server to basic two-party bridging.
 
@@ -160,7 +197,7 @@ Why this matters:
 - Turns the demo into a tiny call server
 - Enables real endpoint-to-endpoint calls
 
-## 7. Docker Packaging
+## 9. Docker Packaging
 
 Add Docker support.
 
@@ -181,7 +218,7 @@ Why this matters:
 - Easier repeatable testing
 - Cleaner deployment on Linux hosts
 
-## 8. Tests And GitHub Actions
+## 10. Tests And GitHub Actions
 
 Add automated tests for SIP parsing and call smoke behavior.
 
@@ -218,7 +255,9 @@ Why this matters:
 The best next implementation task is:
 
 ```text
-Add call bridging.
+Add explicit SIP dialog state tracking.
 ```
 
-That is now the best next improvement because SIP authentication and DTMF detection are implemented. Bridging will move the project from an echo server toward endpoint-to-endpoint calls.
+That is now the best next improvement because the SIPp harness gives us a regression baseline. Dialog state tracking is the right foundation before transaction timers and bridging.
+
+See [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md) for the broader SBC and real-time communications roadmap.
