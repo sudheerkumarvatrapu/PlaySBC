@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from rtp.analyzer import RtpAnalyzer
+from rtp.packet import RtpPacket
 from sip.dialog import DialogError, DialogManager
 from sip.transaction import TransactionManager
 
@@ -69,6 +71,7 @@ class ServerConfig:
     default_codec: str = "PCMU"
     auth_realm: str = "mini-call-server"
     users: Dict[str, str] = field(default_factory=dict)
+    bridge_rooms: Tuple[str, ...] = ("bridge",)
     debug: bool = False
 
     @property
@@ -88,6 +91,7 @@ SERVER_CONFIG_KEYS = {
     "default_codec",
     "auth_realm",
     "users",
+    "bridge_rooms",
     "debug",
 }
 
@@ -215,6 +219,13 @@ class RtpSession:
     dtmf_events: list = field(default_factory=list)
     dtmf_events_started: set = field(default_factory=set)
     dtmf_events_completed: set = field(default_factory=set)
+    analyzer: RtpAnalyzer = field(default_factory=RtpAnalyzer)
+    media_mode: str = "echo"
+    bridge_id: str = ""
+    peer_session: Optional["RtpSession"] = None
+    relayed_packets: int = 0
+    relayed_bytes: int = 0
+    relay_wait_logged: bool = False
     closed: bool = False
 
     def log(self, event: str, detail: str = "") -> None:
@@ -224,6 +235,10 @@ class RtpSession:
     def mark_ack(self) -> None:
         self.acknowledged_at = time.time()
         self.log("ACK RECEIVED")
+
+    def record_rtp_packet(self, packet: RtpPacket, record_audio: bool = True) -> None:
+        self.analyzer.observe(packet, record_audio=record_audio)
+        self.record_rtp(packet.payload_type, packet.payload, record_audio=record_audio)
 
     def record_rtp(self, payload_type: int, payload: bytes, record_audio: bool = True) -> None:
         self.packets_received += 1
@@ -237,6 +252,19 @@ class RtpSession:
         self.packets_sent += 1
         self.bytes_sent += len(payload)
         self.last_rtp_at = time.time()
+
+    def set_peer(self, peer: "RtpSession") -> None:
+        self.peer_session = peer
+        self.log("BRIDGE PAIRED", f"bridge_id={self.bridge_id} peer_call_id={peer.call_id}")
+
+    def clear_peer(self) -> None:
+        if self.peer_session:
+            self.log("BRIDGE PEER LEFT", f"peer_call_id={self.peer_session.call_id}")
+        self.peer_session = None
+
+    def record_relay(self, payload: bytes) -> None:
+        self.relayed_packets += 1
+        self.relayed_bytes += len(payload)
 
     def handle_dtmf_payload(self, payload: bytes) -> None:
         event = parse_dtmf_event(payload)
@@ -272,12 +300,16 @@ class RtpSession:
             "CALL SUMMARY",
             (
                 f"duration_seconds={duration:.3f} "
+                f"media_mode={self.media_mode} "
                 f"rtp_packets_received={self.packets_received} "
                 f"rtp_packets_sent={self.packets_sent} "
+                f"rtp_packets_relayed={self.relayed_packets} "
                 f"rtp_bytes_received={self.bytes_received} "
                 f"rtp_bytes_sent={self.bytes_sent} "
+                f"rtp_bytes_relayed={self.relayed_bytes} "
                 f"payloads_received={payloads} "
-                f"dtmf={dtmf}"
+                f"dtmf={dtmf} "
+                f"{self.analyzer.summary_text()}"
             ),
         )
         if self.artifacts:
@@ -321,52 +353,72 @@ class RtpProtocol(asyncio.DatagramProtocol):
         self.session.log("RTP LISTENING", f"local={self.session.local_ip}:{self.session.local_port}")
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
-        if len(data) < 12:
+        try:
+            packet = RtpPacket.parse(data)
+        except ValueError:
             return
 
         first_packet = self.session.remote_addr is None
         self.session.remote_addr = addr
-        version = data[0] >> 6
-        if version != 2:
-            return
-
-        csrc_count = data[0] & 0x0F
-        header_len = 12 + (csrc_count * 4)
-        if len(data) < header_len:
-            return
-
-        src_payload_type = data[1] & 0x7F
-        payload = data[header_len:]
         if first_packet:
             self.session.log(
                 "RTP REMOTE",
-                f"remote={addr[0]}:{addr[1]} first_payload_type={CODEC_NAMES.get(src_payload_type, src_payload_type)}",
+                f"remote={addr[0]}:{addr[1]} first_payload_type={CODEC_NAMES.get(packet.payload_type, packet.payload_type)}",
             )
 
-        if self.session.dtmf_payload_type == src_payload_type:
-            self.session.record_rtp(src_payload_type, payload, record_audio=False)
-            self.session.handle_dtmf_payload(payload)
+        record_audio = self.session.dtmf_payload_type != packet.payload_type
+        self.session.record_rtp_packet(packet, record_audio=record_audio)
+
+        if self.session.dtmf_payload_type == packet.payload_type:
+            self.session.handle_dtmf_payload(packet.payload)
+            if self.session.media_mode == "bridge":
+                self._relay_packet(packet)
             return
 
-        self.session.record_rtp(src_payload_type, payload)
+        if self.session.media_mode == "bridge":
+            self._relay_packet(packet)
+            return
 
         out_payload_type = self.session.preferred_payload
-        out_payload = self.transcoder.convert(payload, src_payload_type, out_payload_type)
+        out_payload = self.transcoder.convert(packet.payload, packet.payload_type, out_payload_type)
 
         self.session.sequence = (self.session.sequence + 1) & 0xFFFF
         self.session.timestamp = (self.session.timestamp + len(out_payload)) & 0xFFFFFFFF
-        header = struct.pack(
-            "!BBHII",
-            0x80,
-            out_payload_type & 0x7F,
-            self.session.sequence,
-            self.session.timestamp,
-            self.session.ssrc,
+        response = RtpPacket.build(
+            payload_type=out_payload_type,
+            sequence=self.session.sequence,
+            timestamp=self.session.timestamp,
+            ssrc=self.session.ssrc,
+            payload=out_payload,
         )
 
         if self.session.transport:
-            self.session.transport.sendto(header + out_payload, addr)
+            self.session.transport.sendto(response, addr)
             self.session.record_rtp_sent(out_payload)
+
+    def _relay_packet(self, packet: RtpPacket) -> None:
+        peer = self.session.peer_session
+        if not peer or not peer.transport or not peer.remote_addr:
+            if not self.session.relay_wait_logged:
+                self.session.log("BRIDGE WAITING", "reason=peer_rtp_not_ready")
+                self.session.relay_wait_logged = True
+            return
+
+        out_payload_type = peer.preferred_payload
+        out_payload = self.transcoder.convert(packet.payload, packet.payload_type, out_payload_type)
+        peer.sequence = (peer.sequence + 1) & 0xFFFF
+        peer.timestamp = (peer.timestamp + len(out_payload)) & 0xFFFFFFFF
+        response = RtpPacket.build(
+            payload_type=out_payload_type,
+            sequence=peer.sequence,
+            timestamp=peer.timestamp,
+            ssrc=peer.ssrc,
+            payload=out_payload,
+            marker=packet.marker,
+        )
+        peer.transport.sendto(response, peer.remote_addr)
+        peer.record_rtp_sent(out_payload)
+        self.session.record_relay(out_payload)
 
 
 class MediaServer:
@@ -377,6 +429,7 @@ class MediaServer:
         self.log_dir = log_dir
         self.recording_dir = recording_dir
         self.sessions: Dict[str, RtpSession] = {}
+        self.bridge_waiting: Dict[str, RtpSession] = {}
         self.transcoder = G711Transcoder()
         self._next_port = self.port_min
 
@@ -386,6 +439,7 @@ class MediaServer:
         preferred_payload: int,
         remote_payloads: Tuple[int, ...],
         dtmf_payload_type: Optional[int],
+        bridge_id: str = "",
     ) -> RtpSession:
         if call_id in self.sessions:
             return self.sessions[call_id]
@@ -401,13 +455,29 @@ class MediaServer:
             remote_payloads=remote_payloads,
             dtmf_payload_type=dtmf_payload_type,
             artifacts=artifacts,
+            media_mode="bridge" if bridge_id else "echo",
+            bridge_id=bridge_id,
         )
         await loop.create_datagram_endpoint(
             lambda: RtpProtocol(session, self.transcoder),
             local_addr=(self.local_ip, local_port),
         )
         self.sessions[call_id] = session
+        if bridge_id:
+            self.join_bridge(session)
         return session
+
+    def join_bridge(self, session: RtpSession) -> None:
+        waiting = self.bridge_waiting.get(session.bridge_id)
+        if waiting and waiting.call_id != session.call_id and not waiting.closed:
+            waiting.set_peer(session)
+            session.set_peer(waiting)
+            self.bridge_waiting.pop(session.bridge_id, None)
+            logging.info("Paired bridge %s: %s <-> %s", session.bridge_id, waiting.call_id, session.call_id)
+            return
+
+        self.bridge_waiting[session.bridge_id] = session
+        session.log("BRIDGE WAITING", f"bridge_id={session.bridge_id} reason=waiting_for_second_leg")
 
     def get_session(self, call_id: str) -> Optional[RtpSession]:
         return self.sessions.get(call_id)
@@ -415,6 +485,10 @@ class MediaServer:
     def close_session(self, call_id: str) -> None:
         session = self.sessions.pop(call_id, None)
         if session:
+            if session.bridge_id and self.bridge_waiting.get(session.bridge_id) is session:
+                self.bridge_waiting.pop(session.bridge_id, None)
+            if session.peer_session:
+                session.peer_session.clear_peer()
             session.close()
             logging.info("Closed RTP session for call-id %s", call_id)
 
@@ -450,6 +524,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         default_payload: int,
         auth_realm: str,
         users: Dict[str, str],
+        bridge_rooms: Tuple[str, ...],
     ):
         self.local_ip = local_ip
         self.local_port = local_port
@@ -457,6 +532,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.default_payload = default_payload
         self.auth_realm = auth_realm
         self.users = users
+        self.bridge_rooms = set(bridge_rooms)
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, str] = {}
@@ -549,12 +625,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             remote_payloads = parse_sdp_payloads(message.body)
             dtmf_payload_type = parse_dtmf_payload_type(message.body)
             preferred_payload = choose_payload(remote_payloads, self.default_payload)
-            rtp = await self.media.create_session(call_id, preferred_payload, remote_payloads, dtmf_payload_type)
+            target_user = extract_request_user(message.start_line) or "echo"
+            bridge_id = target_user if target_user in self.bridge_rooms else ""
+            rtp = await self.media.create_session(
+                call_id,
+                preferred_payload,
+                remote_payloads,
+                dtmf_payload_type,
+                bridge_id=bridge_id,
+            )
             rtp.log(
                 "INVITE RECEIVED",
                 (
                     f"source={message.source[0]}:{message.source[1]} "
-                    f"from={message.header('from')} to={message.header('to')}"
+                    f"from={message.header('from')} to={message.header('to')} "
+                    f"target_user={target_user} media_mode={rtp.media_mode}"
                 ),
             )
             rtp.log(
@@ -769,6 +854,11 @@ def extract_user(header_value: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def extract_request_user(start_line: str) -> Optional[str]:
+    match = re.search(r"^\S+\s+sip:([^@;:\s>]+)", start_line, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
 def parse_sdp_payloads(sdp: str) -> Tuple[int, ...]:
     match = re.search(r"^m=audio\s+\d+\s+RTP/AVP\s+(.+)$", sdp, re.MULTILINE)
     if not match:
@@ -925,6 +1015,12 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if not isinstance(value, dict):
             raise ValueError("users must be a JSON object mapping usernames to passwords")
         return {str(username): str(password) for username, password in value.items()}
+    if key == "bridge_rooms":
+        if isinstance(value, str):
+            return (value,)
+        if isinstance(value, list):
+            return tuple(str(room) for room in value)
+        raise ValueError("bridge_rooms must be a string or list of strings")
     if key in {"sip_ip", "log_dir", "recording_dir", "artifact_root", "run_id", "default_codec", "auth_realm"}:
         return str(value)
     return value
@@ -1024,6 +1120,7 @@ async def main() -> None:
             config.default_payload,
             config.auth_realm,
             config.users,
+            config.bridge_rooms,
         ),
         local_addr=(config.sip_ip, config.sip_port),
     )

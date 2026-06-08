@@ -14,6 +14,9 @@ Implemented:
 - JSON config
 - Unit tests and Python smoke clients
 - SIPp regression harness
+- SIP dialog state tracking and UDP transaction cache
+- RTP analyzer metrics
+- Basic inbound two-leg bridge room
 
 ## Phase 1: SIP State Machine Cleanup
 
@@ -61,11 +64,13 @@ Regression coverage includes an async timer unit test, a Python UDP smoke client
 
 ## Phase 3: RTP Jitter Buffer And Metrics
 
-Add:
+Status: implemented baseline.
+
+Added:
 
 - RTP sequence tracking
 - Sequence gap detection
-- Packet reordering
+- Out-of-order and duplicate packet detection
 - Late packet tracking
 - Basic jitter calculation
 
@@ -80,15 +85,19 @@ late_packets
 
 ## Phase 4: RTP Analyzer
 
-Add:
+Status: implemented baseline.
+
+Added:
 
 - RTP clock drift estimation
 - Silence detection
 - DTMF event summary
-- A lightweight media-session inspection command
+- Per-call media-session summary in call logs
 - A documented MOS-estimation approximation
 
 ## Phase 5: Call Bridging
+
+Status: implemented inbound bridge-room baseline.
 
 Move from:
 
@@ -104,10 +113,11 @@ UA-A <-> server <-> UA-B
 
 Add:
 
-- Registrar-backed endpoint lookup
-- Two dialog legs
+- Two inbound dialog legs
 - RTP relay between endpoint legs
 - PCMU/PCMA transcoding only where required
+
+The current bridge is a meet-me room: both endpoints call `sip:bridge@server`, then the media server pairs the legs and relays anchored RTP. Full outbound B2BUA setup, registrar-backed lookup, and route policies remain Phase 6 work.
 
 ## Phase 6: Routing Engine
 
@@ -170,4 +180,4 @@ Before each larger phase:
 
 ## Recommended Next Implementation
 
-Begin Phase 3 RTP sequence tracking and jitter metrics. Continue Phase 2 hardening in parallel with CANCEL handling and more invalid in-dialog request scenarios.
+Begin Phase 6 routing engine work: registrar-backed endpoint lookup, route policies, and outbound leg setup for a fuller B2BUA path.

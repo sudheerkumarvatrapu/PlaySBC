@@ -18,6 +18,8 @@ It supports:
 - RFC 2833 DTMF detection
 - Explicit SIP dialog state tracking
 - UDP server transaction cache and INVITE response retransmission timers
+- RTP jitter, packet-loss, silence, clock-drift, and MOS-style analyzer metrics
+- Basic two-leg bridge room for anchored RTP relay
 - SIPp regression scenarios and fresh per-run artifacts
 
 It is meant for local testing and learning. It is not a production SIP server.
@@ -65,6 +67,7 @@ Supported config keys:
   "users": {
     "1001": "secret-password"
   },
+  "bridge_rooms": ["bridge"],
   "debug": false
 }
 ```
@@ -86,6 +89,7 @@ The smoke clients also default to a fresh transcript folder under `artifacts/`:
 python3 smoke_register_client.py
 python3 smoke_call_client.py
 python3 smoke_transaction_client.py
+python3 smoke_bridge_client.py
 ```
 
 Use `--output-dir` when you want both clients to write transcripts into the same run folder.
@@ -147,6 +151,16 @@ INIT -> RINGING -> ANSWERED -> TERMINATED
 
 The dialog record keeps the `Call-ID`, local and remote tags, branch IDs, CSeq values, and lifecycle timestamps. UDP request retransmissions reuse cached responses. Final INVITE responses are retransmitted on timers until an ACK arrives or the transaction expires.
 
+The call summary also exports RTP analyzer metrics such as packet loss, jitter, late packets, silence percentage, clock drift, and a simple MOS-style estimate.
+
+For a basic anchored bridge test, have two callers dial:
+
+```text
+sip:bridge@127.0.0.1:5062
+```
+
+The first leg waits in the `bridge` room. The second leg pairs with it, and RTP is relayed between the two server RTP sockets once both endpoints have sent media.
+
 ## SIPp Regression Harness
 
 Install [SIPp](https://github.com/SIPp/sipp) on macOS:
@@ -199,7 +213,7 @@ The broader engineering path is documented in [docs/EVOLUTION_PLAN.md](docs/EVOL
 ## Notes
 
 - Open UDP SIP port `5062` and RTP ports `10000-10100` in your firewall.
-- NAT traversal, TLS, SRTP, and real call bridging are intentionally not included.
+- NAT traversal, TLS, SRTP, and outbound B2BUA call setup are intentionally not included.
 - Python 3.13 may not include `audioop`; in that case same-codec RTP echo still works, but PCMU/PCMA transcoding falls back to pass-through.
 - If `audioop` is unavailable, WAV recording is skipped with a per-call log warning.
 - Use `config.local.json` for machine-specific config; it is ignored by Git.

@@ -12,5 +12,6 @@
   "users": {
     "1001": "secret-password"
   },
+  "bridge_rooms": ["bridge"],
   "debug": false
 }
