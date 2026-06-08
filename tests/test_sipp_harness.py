@@ -45,7 +45,10 @@ class SippScenarioTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             run_dir = Path(tmp) / "unit-test-run"
             summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-            self.assertEqual([item["status"] for item in summary["results"]], ["dry-run", "dry-run", "dry-run"])
+            self.assertEqual(
+                [item["status"] for item in summary["results"]],
+                ["dry-run"] * len(run_sipp_regression.DEFAULT_SCENARIOS),
+            )
             for scenario in run_sipp_regression.DEFAULT_SCENARIOS:
                 self.assertTrue((run_dir / scenario / "command.txt").exists())
 

@@ -16,6 +16,8 @@ It supports:
 - JSON config file support
 - Optional SIP digest authentication for `REGISTER`
 - RFC 2833 DTMF detection
+- Explicit SIP dialog state tracking
+- UDP server transaction cache and INVITE response retransmission timers
 - SIPp regression scenarios and fresh per-run artifacts
 
 It is meant for local testing and learning. It is not a production SIP server.
@@ -83,6 +85,7 @@ The smoke clients also default to a fresh transcript folder under `artifacts/`:
 ```bash
 python3 smoke_register_client.py
 python3 smoke_call_client.py
+python3 smoke_transaction_client.py
 ```
 
 Use `--output-dir` when you want both clients to write transcripts into the same run folder.
@@ -136,6 +139,14 @@ The server auto-answers and echoes received RTP audio back to the caller.
 
 DTMF digits sent as RFC 2833 `telephone-event/8000` are logged in the per-call log.
 
+Each call also tracks the dialog lifecycle:
+
+```text
+INIT -> RINGING -> ANSWERED -> TERMINATED
+```
+
+The dialog record keeps the `Call-ID`, local and remote tags, branch IDs, CSeq values, and lifecycle timestamps. UDP request retransmissions reuse cached responses. Final INVITE responses are retransmitted on timers until an ACK arrives or the transaction expires.
+
 ## SIPp Regression Harness
 
 Install [SIPp](https://github.com/SIPp/sipp) on macOS:
@@ -156,6 +167,7 @@ Available scenarios:
 options
 register_digest
 call_echo
+invalid_bye
 ```
 
 Run a focused scenario:

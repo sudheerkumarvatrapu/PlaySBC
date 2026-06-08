@@ -17,7 +17,9 @@ Implemented:
 
 ## Phase 1: SIP State Machine Cleanup
 
-Add explicit dialog state tracking:
+Status: implemented baseline.
+
+Explicit dialog state tracking:
 
 ```python
 class CallState(Enum):
@@ -27,7 +29,7 @@ class CallState(Enum):
     TERMINATED = 3
 ```
 
-Track:
+Tracked:
 
 - Call-ID
 - Local and remote tags
@@ -43,15 +45,19 @@ Outcome:
 
 ## Phase 2: Transaction Layer
 
-Add:
+Status: implemented educational baseline.
+
+Added:
 
 - INVITE server transactions
 - Non-INVITE server transactions
 - Response caching
-- UDP retransmission timers
+- UDP final INVITE response retransmission timers until ACK or expiry
 - Transaction expiration
 
-Use RFC 3261 as the primary baseline and study RFC 6026 for INVITE transaction corrections.
+The current layer is intentionally compact. Continue using RFC 3261 as the primary baseline and study RFC 6026 for INVITE transaction corrections before treating it as production signaling code. Future hardening should add transport-aware timer tuning, CANCEL handling, error-response transaction coverage, and richer transaction metrics.
+
+Regression coverage includes an async timer unit test, a Python UDP smoke client for byte-for-byte cached response replay, and a SIPp scenario for unknown-dialog `BYE` rejection.
 
 ## Phase 3: RTP Jitter Buffer And Metrics
 
@@ -164,4 +170,4 @@ Before each larger phase:
 
 ## Recommended Next Implementation
 
-Implement Phase 1: explicit SIP dialog state tracking, then extend SIPp scenarios to cover invalid and retransmitted requests.
+Begin Phase 3 RTP sequence tracking and jitter metrics. Continue Phase 2 hardening in parallel with CANCEL handling and more invalid in-dialog request scenarios.

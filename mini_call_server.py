@@ -33,6 +33,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from sip.dialog import DialogError, DialogManager
+from sip.transaction import TransactionManager
+
 try:
     import audioop  # type: ignore
 except Exception:  # pragma: no cover - audioop is unavailable in newer Python builds.
@@ -457,6 +460,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, str] = {}
+        self.dialogs = DialogManager()
+        self.transactions = TransactionManager(self._send_packet)
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -475,6 +480,18 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     async def handle_message(self, message: SipMessage) -> None:
         method = message.method
+
+        if method != "ACK":
+            _, duplicate = self.transactions.receive_request(
+                method,
+                message.header("via"),
+                message.header("cseq"),
+                message.header("call-id"),
+                message.source,
+            )
+            if duplicate:
+                logging.info("Replayed cached response for retransmitted %s", method)
+                return
 
         if method == "REGISTER":
             user = extract_user(message.header("to")) or extract_user(message.header("from")) or "unknown"
@@ -511,13 +528,27 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         if method == "INVITE":
-            self.send_response(message, 100, "Trying")
-            self.send_response(message, 180, "Ringing")
+            call_id = message.header("call-id", make_call_id())
+            try:
+                dialog = self.dialogs.create_invite(
+                    call_id,
+                    message.header("from"),
+                    message.header("via"),
+                    message.header("cseq"),
+                )
+            except DialogError as exc:
+                self.send_response(message, 491, "Request Pending")
+                logging.info("Rejected INVITE for %s: %s", call_id, exc)
+                return
+
+            dialog.mark_ringing()
+            to_header = dialog.to_header(message.header("to"))
+            self.send_response(message, 100, "Trying", to_header=to_header)
+            self.send_response(message, 180, "Ringing", to_header=to_header)
 
             remote_payloads = parse_sdp_payloads(message.body)
             dtmf_payload_type = parse_dtmf_payload_type(message.body)
             preferred_payload = choose_payload(remote_payloads, self.default_payload)
-            call_id = message.header("call-id", make_call_id())
             rtp = await self.media.create_session(call_id, preferred_payload, remote_payloads, dtmf_payload_type)
             rtp.log(
                 "INVITE RECEIVED",
@@ -547,28 +578,66 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 200,
                 "OK",
                 body=sdp,
+                to_header=to_header,
                 extra_headers={
                     "Contact": f"<sip:python-call-server@{self.local_ip}:{self.local_port}>",
                     "Content-Type": "application/sdp",
                 },
             )
+            dialog.mark_answered()
+            rtp.log(
+                "DIALOG STATE",
+                (
+                    f"state={dialog.state.name} local_tag={dialog.local_tag} "
+                    f"remote_tag={dialog.remote_tag or 'none'} invite_branch={dialog.invite_branch or 'none'} "
+                    f"remote_cseq={dialog.remote_cseq}"
+                ),
+            )
             rtp.log("SIP RESPONSE", "200 OK")
             return
 
         if method == "ACK":
-            session = self.media.get_session(message.header("call-id"))
+            call_id = message.header("call-id")
+            session = self.media.get_session(call_id)
             if session:
+                try:
+                    dialog = self.dialogs.acknowledge(call_id, message.header("cseq"))
+                except DialogError as exc:
+                    logging.info("Ignored invalid ACK for %s: %s", call_id, exc)
+                    return
+                self.transactions.acknowledge_invite(call_id, message.header("cseq"))
                 session.mark_ack()
+                session.log("DIALOG STATE", f"state={dialog.state.name} acknowledged=true")
             return
 
         if method == "BYE":
-            session = self.media.get_session(message.header("call-id"))
+            call_id = message.header("call-id")
+            session = self.media.get_session(call_id)
+            try:
+                dialog = self.dialogs.terminate(
+                    call_id,
+                    message.header("from"),
+                    message.header("to"),
+                    message.header("via"),
+                    message.header("cseq"),
+                )
+            except DialogError as exc:
+                self.send_response(message, 481, "Call/Transaction Does Not Exist")
+                logging.info("Rejected BYE for %s: %s", call_id, exc)
+                return
             if session:
                 session.log("BYE RECEIVED", f"source={message.source[0]}:{message.source[1]}")
             self.send_response(message, 200, "OK")
             if session:
+                session.log(
+                    "DIALOG STATE",
+                    (
+                        f"state={dialog.state.name} remote_cseq={dialog.remote_cseq} "
+                        f"branches={','.join(sorted(dialog.branch_ids)) or 'none'}"
+                    ),
+                )
                 session.log("SIP RESPONSE", "200 OK for BYE")
-            self.media.close_session(message.header("call-id"))
+            self.media.close_session(call_id)
             return
 
         self.send_response(message, 405, "Method Not Allowed", extra_headers={"Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE"})
@@ -618,6 +687,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         reason: str,
         body: str = "",
         extra_headers: Optional[Dict[str, str]] = None,
+        to_header: Optional[str] = None,
     ) -> None:
         if not self.transport:
             return
@@ -625,7 +695,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         headers = {
             "Via": request.header("via"),
             "From": request.header("from"),
-            "To": ensure_tag(request.header("to")),
+            "To": to_header or ensure_tag(request.header("to")),
             "Call-ID": request.header("call-id"),
             "CSeq": request.header("cseq"),
             "Server": "mini-python-call-server/0.1",
@@ -637,7 +707,23 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         lines = [f"SIP/2.0 {status} {reason}"]
         lines.extend(f"{name}: {value}" for name, value in headers.items() if value)
         packet = (CRLF.join(lines) + CRLF + CRLF + body).encode("utf-8")
-        self.transport.sendto(packet, request.source)
+        self._send_packet(packet, request.source)
+        self.transactions.cache_response(
+            request.method,
+            request.header("via"),
+            request.header("cseq"),
+            request.header("call-id"),
+            packet,
+            request.source,
+            status,
+        )
+
+    def _send_packet(self, packet: bytes, destination: Tuple[str, int]) -> None:
+        if self.transport:
+            self.transport.sendto(packet, destination)
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        self.transactions.close()
 
 
 def parse_sip_message(text: str, source: Tuple[str, int]) -> SipMessage:

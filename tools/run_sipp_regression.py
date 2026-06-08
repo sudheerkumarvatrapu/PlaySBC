@@ -18,11 +18,12 @@ from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_DIR = ROOT / "sipp" / "scenarios"
-DEFAULT_SCENARIOS = ("options", "register_digest", "call_echo")
+DEFAULT_SCENARIOS = ("options", "register_digest", "call_echo", "invalid_bye")
 SCENARIO_SERVICES = {
     "options": "echo",
     "register_digest": "1001",
     "call_echo": "echo",
+    "invalid_bye": "echo",
 }
 
 
