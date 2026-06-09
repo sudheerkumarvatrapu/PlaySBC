@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<scenario name="B2BUA UAS B">
+  <recv request="INVITE" crlf="true" />
+
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=sipp-b-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:sipp-b@[local_ip]:[local_port]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <pause milliseconds="250" />
+
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=sipp-b-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:sipp-b@[local_ip]:[local_port]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=sipp-b 53655765 2353687638 IN IP4 [local_ip]
+      s=SIPp B
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-16
+      a=ptime:20
+      a=sendrecv
+    ]]>
+  </send>
+
+  <recv request="ACK" rtd="true" crlf="true" />
+
+  <recv request="BYE" crlf="true" />
+
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <timewait milliseconds="1000" />
+
+  <ResponseTimeRepartition value="10,20,50,100,150,500,1000" />
+  <CallLengthRepartition value="100,250,500,1000,2000,5000" />
+</scenario>
