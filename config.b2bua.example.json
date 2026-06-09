@@ -1,8 +1,8 @@
 {
-  "sip_ip": "0.0.0.0",
-  "sip_port": 5062,
-  "rtp_min": 10000,
-  "rtp_max": 10100,
+  "sip_ip": "127.0.0.1",
+  "sip_port": 25062,
+  "rtp_min": 25100,
+  "rtp_max": 25140,
   "log_dir": "logs",
   "recording_dir": "recordings",
   "artifact_root": "artifacts",
@@ -13,6 +13,8 @@
     "1001": "secret-password"
   },
   "bridge_rooms": ["bridge"],
-  "b2bua_routes": {},
-  "debug": false
+  "b2bua_routes": {
+    "1002": "sip:1002@127.0.0.1:25082"
+  },
+  "debug": true
 }

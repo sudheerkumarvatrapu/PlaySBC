@@ -72,6 +72,7 @@ class ServerConfig:
     auth_realm: str = "mini-call-server"
     users: Dict[str, str] = field(default_factory=dict)
     bridge_rooms: Tuple[str, ...] = ("bridge",)
+    b2bua_routes: Dict[str, str] = field(default_factory=dict)
     debug: bool = False
 
     @property
@@ -92,6 +93,7 @@ SERVER_CONFIG_KEYS = {
     "auth_realm",
     "users",
     "bridge_rooms",
+    "b2bua_routes",
     "debug",
 }
 
@@ -126,8 +128,52 @@ class SipMessage:
     def method(self) -> str:
         return self.start_line.split(" ", 1)[0].upper()
 
+    @property
+    def is_response(self) -> bool:
+        return self.start_line.upper().startswith("SIP/2.0 ")
+
+    @property
+    def status_code(self) -> int:
+        if not self.is_response:
+            return 0
+        parts = self.start_line.split(" ", 2)
+        return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+
+    @property
+    def reason_phrase(self) -> str:
+        if not self.is_response:
+            return ""
+        parts = self.start_line.split(" ", 2)
+        return parts[2] if len(parts) > 2 else ""
+
     def header(self, name: str, default: str = "") -> str:
         return self.headers.get(name.lower(), default)
+
+
+@dataclass
+class SipUri:
+    user: str
+    host: str
+    port: int = 5060
+
+    @property
+    def uri(self) -> str:
+        return f"sip:{self.user}@{self.host}:{self.port}"
+
+    @property
+    def address(self) -> Tuple[str, int]:
+        return self.host, self.port
+
+
+@dataclass
+class B2BUACall:
+    inbound_call_id: str
+    outbound_call_id: str
+    outbound_target: SipUri
+    outbound_from_header: str
+    outbound_to_header: str = ""
+    outbound_contact_uri: str = ""
+    outbound_cseq: int = 1
 
 
 @dataclass
@@ -255,7 +301,11 @@ class RtpSession:
 
     def set_peer(self, peer: "RtpSession") -> None:
         self.peer_session = peer
-        self.log("BRIDGE PAIRED", f"bridge_id={self.bridge_id} peer_call_id={peer.call_id}")
+        event = "B2BUA PAIRED" if self.media_mode == "b2bua" else "BRIDGE PAIRED"
+        detail = f"peer_call_id={peer.call_id}"
+        if self.bridge_id:
+            detail = f"bridge_id={self.bridge_id} {detail}"
+        self.log(event, detail)
 
     def clear_peer(self) -> None:
         if self.peer_session:
@@ -371,11 +421,11 @@ class RtpProtocol(asyncio.DatagramProtocol):
 
         if self.session.dtmf_payload_type == packet.payload_type:
             self.session.handle_dtmf_payload(packet.payload)
-            if self.session.media_mode == "bridge":
+            if self.session.media_mode in {"bridge", "b2bua"}:
                 self._relay_packet(packet)
             return
 
-        if self.session.media_mode == "bridge":
+        if self.session.media_mode in {"bridge", "b2bua"}:
             self._relay_packet(packet)
             return
 
@@ -440,6 +490,7 @@ class MediaServer:
         remote_payloads: Tuple[int, ...],
         dtmf_payload_type: Optional[int],
         bridge_id: str = "",
+        media_mode: str = "echo",
     ) -> RtpSession:
         if call_id in self.sessions:
             return self.sessions[call_id]
@@ -455,7 +506,7 @@ class MediaServer:
             remote_payloads=remote_payloads,
             dtmf_payload_type=dtmf_payload_type,
             artifacts=artifacts,
-            media_mode="bridge" if bridge_id else "echo",
+            media_mode="bridge" if bridge_id else media_mode,
             bridge_id=bridge_id,
         )
         await loop.create_datagram_endpoint(
@@ -525,6 +576,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         auth_realm: str,
         users: Dict[str, str],
         bridge_rooms: Tuple[str, ...],
+        b2bua_routes: Dict[str, str],
     ):
         self.local_ip = local_ip
         self.local_port = local_port
@@ -533,11 +585,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.auth_realm = auth_realm
         self.users = users
         self.bridge_rooms = set(bridge_rooms)
+        self.b2bua_routes = b2bua_routes
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, str] = {}
         self.dialogs = DialogManager()
         self.transactions = TransactionManager(self._send_packet)
+        self.pending_outbound_responses: Dict[str, asyncio.Queue] = {}
+        self.b2bua_calls_by_inbound: Dict[str, B2BUACall] = {}
+        self.b2bua_calls_by_outbound: Dict[str, B2BUACall] = {}
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -551,8 +607,28 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             logging.exception("Could not parse SIP message from %s:%s", *addr)
             return
 
+        if message.is_response:
+            logging.info("SIP response %s from %s:%s", message.status_code, *addr)
+            self.handle_response(message)
+            return
+
         logging.info("SIP %s from %s:%s", message.method, *addr)
         asyncio.create_task(self.handle_message(message))
+
+    def handle_response(self, message: SipMessage) -> None:
+        call_id = message.header("call-id")
+        queue = self.pending_outbound_responses.get(call_id)
+        if queue:
+            queue.put_nowait(message)
+            return
+
+        b2bua_call = self.b2bua_calls_by_outbound.get(call_id)
+        if b2bua_call:
+            logging.info(
+                "B2BUA outbound response %s for inbound call %s",
+                message.status_code,
+                b2bua_call.inbound_call_id,
+            )
 
     async def handle_message(self, message: SipMessage) -> None:
         method = message.method
@@ -620,12 +696,27 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             dialog.mark_ringing()
             to_header = dialog.to_header(message.header("to"))
             self.send_response(message, 100, "Trying", to_header=to_header)
-            self.send_response(message, 180, "Ringing", to_header=to_header)
 
             remote_payloads = parse_sdp_payloads(message.body)
             dtmf_payload_type = parse_dtmf_payload_type(message.body)
             preferred_payload = choose_payload(remote_payloads, self.default_payload)
             target_user = extract_request_user(message.start_line) or "echo"
+            route_uri = self.b2bua_routes.get(target_user)
+            if route_uri:
+                await self.handle_b2bua_invite(
+                    message=message,
+                    dialog=dialog,
+                    to_header=to_header,
+                    inbound_call_id=call_id,
+                    target_user=target_user,
+                    route_uri=route_uri,
+                    preferred_payload=preferred_payload,
+                    remote_payloads=remote_payloads,
+                    dtmf_payload_type=dtmf_payload_type,
+                )
+                return
+
+            self.send_response(message, 180, "Ringing", to_header=to_header)
             bridge_id = target_user if target_user in self.bridge_rooms else ""
             rtp = await self.media.create_session(
                 call_id,
@@ -693,6 +784,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 self.transactions.acknowledge_invite(call_id, message.header("cseq"))
                 session.mark_ack()
                 session.log("DIALOG STATE", f"state={dialog.state.name} acknowledged=true")
+                b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+                if b2bua_call:
+                    self.send_outbound_ack(b2bua_call)
             return
 
         if method == "BYE":
@@ -713,6 +807,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             if session:
                 session.log("BYE RECEIVED", f"source={message.source[0]}:{message.source[1]}")
             self.send_response(message, 200, "OK")
+            b2bua_call = self.b2bua_calls_by_inbound.pop(call_id, None)
+            if b2bua_call:
+                self.b2bua_calls_by_outbound.pop(b2bua_call.outbound_call_id, None)
+                self.send_outbound_bye(b2bua_call)
+                self.media.close_session(b2bua_call.outbound_call_id)
             if session:
                 session.log(
                     "DIALOG STATE",
@@ -726,6 +825,244 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         self.send_response(message, 405, "Method Not Allowed", extra_headers={"Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE"})
+
+    async def handle_b2bua_invite(
+        self,
+        message: SipMessage,
+        dialog: Any,
+        to_header: str,
+        inbound_call_id: str,
+        target_user: str,
+        route_uri: str,
+        preferred_payload: int,
+        remote_payloads: Tuple[int, ...],
+        dtmf_payload_type: Optional[int],
+    ) -> None:
+        try:
+            target = parse_sip_uri(route_uri)
+        except ValueError as exc:
+            logging.info("Rejected B2BUA route for %s: %s", target_user, exc)
+            self.send_response(message, 502, "Bad Gateway", to_header=to_header)
+            return
+
+        inbound_rtp = await self.media.create_session(
+            inbound_call_id,
+            preferred_payload,
+            remote_payloads,
+            dtmf_payload_type,
+            media_mode="b2bua",
+        )
+        inbound_remote = parse_sdp_remote_addr(message.body, message.source[0])
+        if inbound_remote:
+            inbound_rtp.remote_addr = inbound_remote
+            inbound_rtp.log("RTP REMOTE", f"remote={inbound_remote[0]}:{inbound_remote[1]} source=sdp")
+
+        outbound_call_id = make_call_id()
+        outbound_rtp = await self.media.create_session(
+            outbound_call_id,
+            preferred_payload,
+            remote_payloads,
+            dtmf_payload_type,
+            media_mode="b2bua",
+        )
+
+        outbound_from = f"Mini B2BUA <sip:b2bua@{self.local_ip}:{self.local_port}>;tag={secrets.token_hex(6)}"
+        b2bua_call = B2BUACall(
+            inbound_call_id=inbound_call_id,
+            outbound_call_id=outbound_call_id,
+            outbound_target=target,
+            outbound_from_header=outbound_from,
+        )
+        self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
+        self.b2bua_calls_by_outbound[outbound_call_id] = b2bua_call
+
+        response_queue: asyncio.Queue = asyncio.Queue()
+        self.pending_outbound_responses[outbound_call_id] = response_queue
+        inbound_rtp.log(
+            "B2BUA ROUTE",
+            f"target_user={target_user} route={target.uri} outbound_call_id={outbound_call_id}",
+        )
+
+        outbound_body = make_sdp(
+            self.local_ip,
+            outbound_rtp.local_port,
+            preferred_payload,
+            dtmf_payload_type=dtmf_payload_type,
+            payloads=remote_payloads,
+        )
+        self.send_outbound_invite(b2bua_call, outbound_body)
+
+        try:
+            final_response = await self.wait_for_outbound_invite(
+                response_queue,
+                message,
+                to_header,
+                inbound_rtp,
+            )
+        except asyncio.TimeoutError:
+            inbound_rtp.log("B2BUA FAILURE", f"route={target.uri} reason=outbound_invite_timeout")
+            self.send_response(message, 480, "Temporarily Unavailable", to_header=to_header)
+            self.cleanup_b2bua_call(b2bua_call)
+            return
+        finally:
+            self.pending_outbound_responses.pop(outbound_call_id, None)
+
+        status = final_response.status_code
+        reason = final_response.reason_phrase or "Upstream Response"
+        if status < 200 or status >= 300:
+            inbound_rtp.log("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
+            self.send_response(message, status, reason, to_header=to_header)
+            self.cleanup_b2bua_call(b2bua_call)
+            return
+
+        b2bua_call.outbound_to_header = final_response.header("to")
+        b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
+        outbound_payloads = parse_sdp_payloads(final_response.body)
+        outbound_rtp.remote_payloads = outbound_payloads
+        outbound_rtp.preferred_payload = choose_payload(outbound_payloads, preferred_payload)
+        outbound_remote = parse_sdp_remote_addr(final_response.body, final_response.source[0])
+        if outbound_remote:
+            outbound_rtp.remote_addr = outbound_remote
+            outbound_rtp.log("RTP REMOTE", f"remote={outbound_remote[0]}:{outbound_remote[1]} source=sdp")
+
+        inbound_rtp.set_peer(outbound_rtp)
+        outbound_rtp.set_peer(inbound_rtp)
+
+        answer_sdp = make_sdp(
+            self.local_ip,
+            inbound_rtp.local_port,
+            inbound_rtp.preferred_payload,
+            dtmf_payload_type=dtmf_payload_type,
+        )
+        self.send_response(
+            message,
+            200,
+            "OK",
+            body=answer_sdp,
+            to_header=to_header,
+            extra_headers={
+                "Contact": f"<sip:python-call-server@{self.local_ip}:{self.local_port}>",
+                "Content-Type": "application/sdp",
+            },
+        )
+        dialog.mark_answered()
+        inbound_rtp.log(
+            "DIALOG STATE",
+            (
+                f"state={dialog.state.name} local_tag={dialog.local_tag} "
+                f"remote_tag={dialog.remote_tag or 'none'} invite_branch={dialog.invite_branch or 'none'} "
+                f"remote_cseq={dialog.remote_cseq}"
+            ),
+        )
+        inbound_rtp.log("SIP RESPONSE", "200 OK")
+        outbound_rtp.log(
+            "B2BUA ANSWERED",
+            f"inbound_call_id={inbound_call_id} outbound_payload={CODEC_NAMES.get(outbound_rtp.preferred_payload, outbound_rtp.preferred_payload)}",
+        )
+
+    async def wait_for_outbound_invite(
+        self,
+        response_queue: asyncio.Queue,
+        inbound_request: SipMessage,
+        to_header: str,
+        inbound_rtp: RtpSession,
+        timeout: float = 10.0,
+    ) -> SipMessage:
+        while True:
+            response = await asyncio.wait_for(response_queue.get(), timeout=timeout)
+            status = response.status_code
+            reason = response.reason_phrase or "Upstream Response"
+            if status < 200:
+                if status != 100:
+                    body = response.body if response.body else ""
+                    extra_headers = {"Content-Type": response.header("content-type")} if body else None
+                    self.send_response(
+                        inbound_request,
+                        status,
+                        reason,
+                        body=body,
+                        to_header=to_header,
+                        extra_headers=extra_headers,
+                    )
+                    inbound_rtp.log("SIP RESPONSE", f"{status} {reason} from outbound")
+                continue
+            return response
+
+    def send_outbound_invite(self, b2bua_call: B2BUACall, body: str) -> None:
+        headers = {
+            "Via": self.make_via_header(),
+            "From": b2bua_call.outbound_from_header,
+            "To": f"<{b2bua_call.outbound_target.uri}>",
+            "Call-ID": b2bua_call.outbound_call_id,
+            "CSeq": f"{b2bua_call.outbound_cseq} INVITE",
+            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Max-Forwards": "69",
+            "Subject": f"B2BUA outbound leg for {b2bua_call.inbound_call_id}",
+            "Content-Type": "application/sdp",
+        }
+        packet = build_sip_request("INVITE", b2bua_call.outbound_target.uri, headers, body)
+        self._send_packet(packet, b2bua_call.outbound_target.address)
+        session = self.media.get_session(b2bua_call.outbound_call_id)
+        if session:
+            session.log("B2BUA OUTBOUND INVITE", f"target={b2bua_call.outbound_target.uri}")
+
+    def send_outbound_ack(self, b2bua_call: B2BUACall) -> None:
+        request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+        headers = {
+            "Via": self.make_via_header(),
+            "From": b2bua_call.outbound_from_header,
+            "To": b2bua_call.outbound_to_header,
+            "Call-ID": b2bua_call.outbound_call_id,
+            "CSeq": f"{b2bua_call.outbound_cseq} ACK",
+            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Max-Forwards": "69",
+        }
+        self._send_packet(
+            build_sip_request("ACK", request_uri, headers),
+            self.outbound_destination(b2bua_call),
+        )
+        session = self.media.get_session(b2bua_call.outbound_call_id)
+        if session:
+            session.mark_ack()
+            session.log("B2BUA OUTBOUND ACK")
+
+    def send_outbound_bye(self, b2bua_call: B2BUACall) -> None:
+        request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+        b2bua_call.outbound_cseq += 1
+        headers = {
+            "Via": self.make_via_header(),
+            "From": b2bua_call.outbound_from_header,
+            "To": b2bua_call.outbound_to_header,
+            "Call-ID": b2bua_call.outbound_call_id,
+            "CSeq": f"{b2bua_call.outbound_cseq} BYE",
+            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Max-Forwards": "69",
+        }
+        self._send_packet(
+            build_sip_request("BYE", request_uri, headers),
+            self.outbound_destination(b2bua_call),
+        )
+        session = self.media.get_session(b2bua_call.outbound_call_id)
+        if session:
+            session.log("B2BUA OUTBOUND BYE", f"target={request_uri}")
+
+    def outbound_destination(self, b2bua_call: B2BUACall) -> Tuple[str, int]:
+        if b2bua_call.outbound_contact_uri:
+            try:
+                return parse_sip_uri(b2bua_call.outbound_contact_uri).address
+            except ValueError:
+                pass
+        return b2bua_call.outbound_target.address
+
+    def cleanup_b2bua_call(self, b2bua_call: B2BUACall) -> None:
+        self.b2bua_calls_by_inbound.pop(b2bua_call.inbound_call_id, None)
+        self.b2bua_calls_by_outbound.pop(b2bua_call.outbound_call_id, None)
+        self.pending_outbound_responses.pop(b2bua_call.outbound_call_id, None)
+        self.media.close_session(b2bua_call.outbound_call_id)
+        self.media.close_session(b2bua_call.inbound_call_id)
+
+    def make_via_header(self) -> str:
+        return f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK-{secrets.token_hex(8)}"
 
     def authenticate_register(self, message: SipMessage, user: str) -> str:
         if not self.users:
@@ -859,6 +1196,22 @@ def extract_request_user(start_line: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def extract_sip_uri(value: str) -> str:
+    match = re.search(r"sip:[^;>\s]+", value, re.IGNORECASE)
+    return match.group(0) if match else ""
+
+
+def parse_sip_uri(value: str) -> SipUri:
+    match = re.search(r"sip:([^@;>\s]+)@([^;:>\s]+)(?::(\d+))?", value, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Invalid SIP URI {value!r}")
+
+    port = int(match.group(3)) if match.group(3) else 5060
+    if port <= 0 or port > 65535:
+        raise ValueError(f"Invalid SIP URI port {port}")
+    return SipUri(user=match.group(1), host=match.group(2), port=port)
+
+
 def parse_sdp_payloads(sdp: str) -> Tuple[int, ...]:
     match = re.search(r"^m=audio\s+\d+\s+RTP/AVP\s+(.+)$", sdp, re.MULTILINE)
     if not match:
@@ -871,6 +1224,22 @@ def parse_sdp_payloads(sdp: str) -> Tuple[int, ...]:
         except ValueError:
             continue
     return tuple(payloads)
+
+
+def parse_sdp_remote_addr(sdp: str, fallback_ip: str = "") -> Optional[Tuple[str, int]]:
+    media_match = re.search(r"^m=audio\s+(\d+)\s+RTP/AVP\b", sdp, re.MULTILINE)
+    if not media_match:
+        return None
+
+    connection_match = re.search(r"^c=IN\s+IP[46]\s+([^\s]+)", sdp, re.MULTILINE)
+    host = connection_match.group(1) if connection_match else fallback_ip
+    if not host:
+        return None
+
+    port = int(media_match.group(1))
+    if port <= 0 or port > 65535:
+        return None
+    return host, port
 
 
 def parse_dtmf_payload_type(sdp: str) -> Optional[int]:
@@ -955,24 +1324,50 @@ def md5_hex(value: str) -> str:
     return hashlib.md5(value.encode("utf-8")).hexdigest()
 
 
-def make_sdp(local_ip: str, rtp_port: int, payload_type: int) -> str:
+def make_sdp(
+    local_ip: str,
+    rtp_port: int,
+    payload_type: int,
+    dtmf_payload_type: Optional[int] = None,
+    payloads: Optional[Tuple[int, ...]] = None,
+) -> str:
+    offered_payloads = []
+    if payloads:
+        offered_payloads.extend(payload for payload in payloads if payload in SUPPORTED_CODECS)
+    if payload_type not in offered_payloads:
+        offered_payloads.insert(0, payload_type)
+
+    if dtmf_payload_type is not None and dtmf_payload_type not in offered_payloads:
+        offered_payloads.append(dtmf_payload_type)
+
     codecs = {
         PCMU: "a=rtpmap:0 PCMU/8000",
         PCMA: "a=rtpmap:8 PCMA/8000",
     }
-    return CRLF.join(
-        [
-            "v=0",
-            f"o=mini-call-server {int(time.time())} 1 IN IP4 {local_ip}",
-            "s=Mini Python Call Server",
-            f"c=IN IP4 {local_ip}",
-            "t=0 0",
-            f"m=audio {rtp_port} RTP/AVP {payload_type}",
-            codecs[payload_type],
-            "a=sendrecv",
-            "",
-        ]
-    )
+    lines = [
+        "v=0",
+        f"o=mini-call-server {int(time.time())} 1 IN IP4 {local_ip}",
+        "s=Mini Python Call Server",
+        f"c=IN IP4 {local_ip}",
+        "t=0 0",
+        f"m=audio {rtp_port} RTP/AVP {' '.join(str(payload) for payload in offered_payloads)}",
+    ]
+    for payload in offered_payloads:
+        if payload in codecs:
+            lines.append(codecs[payload])
+        elif payload == dtmf_payload_type:
+            lines.append(f"a=rtpmap:{payload} telephone-event/8000")
+            lines.append(f"a=fmtp:{payload} 0-16")
+    lines.extend(["a=sendrecv", ""])
+    return CRLF.join(lines)
+
+
+def build_sip_request(method: str, request_uri: str, headers: Dict[str, str], body: str = "") -> bytes:
+    lines = [f"{method} {request_uri} SIP/2.0"]
+    headers_with_length = dict(headers)
+    headers_with_length["Content-Length"] = str(len(body.encode("utf-8")))
+    lines.extend(f"{name}: {value}" for name, value in headers_with_length.items() if value)
+    return (CRLF.join(lines) + CRLF + CRLF + body).encode("utf-8")
 
 
 def make_call_id() -> str:
@@ -1015,6 +1410,10 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if not isinstance(value, dict):
             raise ValueError("users must be a JSON object mapping usernames to passwords")
         return {str(username): str(password) for username, password in value.items()}
+    if key == "b2bua_routes":
+        if not isinstance(value, dict):
+            raise ValueError("b2bua_routes must be a JSON object mapping dialed users to SIP URIs")
+        return {str(username): str(uri) for username, uri in value.items()}
     if key == "bridge_rooms":
         if isinstance(value, str):
             return (value,)
@@ -1056,6 +1455,10 @@ def validate_config(config: ServerConfig) -> None:
         raise ValueError("RTP port range must be within 1-65535 and rtp_min must be <= rtp_max")
     if not config.auth_realm:
         raise ValueError("auth_realm must not be empty")
+    for user, route_uri in config.b2bua_routes.items():
+        if not user:
+            raise ValueError("b2bua_routes keys must not be empty")
+        parse_sip_uri(route_uri)
 
 
 def resolve_artifact_dirs(config: ServerConfig) -> Tuple[Path, Path, Optional[Path]]:
@@ -1121,6 +1524,7 @@ async def main() -> None:
             config.auth_realm,
             config.users,
             config.bridge_rooms,
+            config.b2bua_routes,
         ),
         local_addr=(config.sip_ip, config.sip_port),
     )

@@ -20,6 +20,7 @@ It supports:
 - UDP server transaction cache and INVITE response retransmission timers
 - RTP jitter, packet-loss, silence, clock-drift, and MOS-style analyzer metrics
 - Basic two-leg bridge room for anchored RTP relay
+- Basic B2BUA outbound routing for configured SIP targets
 - SIPp regression scenarios and fresh per-run artifacts
 
 It is meant for local testing and learning. It is not a production SIP server.
@@ -68,6 +69,7 @@ Supported config keys:
     "1001": "secret-password"
   },
   "bridge_rooms": ["bridge"],
+  "b2bua_routes": {},
   "debug": false
 }
 ```
@@ -161,6 +163,18 @@ sip:bridge@127.0.0.1:5062
 
 The first leg waits in the `bridge` room. The second leg pairs with it, and RTP is relayed between the two server RTP sockets once both endpoints have sent media.
 
+For a basic B2BUA route, configure a dialed user to an outbound SIP URI:
+
+```json
+{
+  "b2bua_routes": {
+    "1002": "sip:1002@127.0.0.1:25082"
+  }
+}
+```
+
+Then calls to `sip:1002@127.0.0.1:25062` are answered only after the server creates an outbound leg to `127.0.0.1:25082`. The inbound and outbound RTP sessions are paired through the server.
+
 ## SIPp Regression Harness
 
 Install [SIPp](https://github.com/SIPp/sipp) on macOS:
@@ -214,6 +228,7 @@ The broader engineering path is documented in [docs/EVOLUTION_PLAN.md](docs/EVOL
 
 - Open UDP SIP port `5062` and RTP ports `10000-10100` in your firewall.
 - NAT traversal, TLS, SRTP, and outbound B2BUA call setup are intentionally not included.
+- NAT traversal, TLS, and SRTP are intentionally not included.
 - Python 3.13 may not include `audioop`; in that case same-codec RTP echo still works, but PCMU/PCMA transcoding falls back to pass-through.
 - If `audioop` is unavailable, WAV recording is skipped with a per-call log warning.
 - Use `config.local.json` for machine-specific config; it is ignored by Git.

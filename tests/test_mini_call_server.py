@@ -26,6 +26,7 @@ class SipParsingTests(unittest.TestCase):
 
     def test_sdp_payload_and_dtmf_detection(self):
         sdp = (
+            "c=IN IP4 127.0.0.1\r\n"
             "m=audio 26000 RTP/AVP 0 8 101\r\n"
             "a=rtpmap:0 PCMU/8000\r\n"
             "a=rtpmap:8 PCMA/8000\r\n"
@@ -33,6 +34,22 @@ class SipParsingTests(unittest.TestCase):
         )
         self.assertEqual(server.parse_sdp_payloads(sdp), (0, 8, 101))
         self.assertEqual(server.parse_dtmf_payload_type(sdp), 101)
+        self.assertEqual(server.parse_sdp_remote_addr(sdp), ("127.0.0.1", 26000))
+
+    def test_parse_sip_uri_with_default_and_explicit_ports(self):
+        explicit = server.parse_sip_uri("<sip:1002@127.0.0.1:25082>")
+        self.assertEqual(explicit.user, "1002")
+        self.assertEqual(explicit.address, ("127.0.0.1", 25082))
+
+        default = server.parse_sip_uri("sip:1003@example.test")
+        self.assertEqual(default.address, ("example.test", 5060))
+
+    def test_make_sdp_can_include_multiple_codecs_and_dtmf(self):
+        sdp = server.make_sdp("127.0.0.1", 30000, server.PCMU, dtmf_payload_type=101, payloads=(0, 8, 101))
+        self.assertIn("m=audio 30000 RTP/AVP 0 8 101", sdp)
+        self.assertIn("a=rtpmap:0 PCMU/8000", sdp)
+        self.assertIn("a=rtpmap:8 PCMA/8000", sdp)
+        self.assertIn("a=rtpmap:101 telephone-event/8000", sdp)
 
 
 class CodecTests(unittest.TestCase):
@@ -78,7 +95,11 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
             config_path.write_text(
-                '{"sip_port": 5062, "default_codec": "PCMA", "users": {"1001": "secret"}}',
+                (
+                    '{"sip_port": 5062, "default_codec": "PCMA", '
+                    '"users": {"1001": "secret"}, '
+                    '"b2bua_routes": {"1002": "sip:1002@127.0.0.1:25082"}}'
+                ),
                 encoding="utf-8",
             )
             config = server.load_config_file(str(config_path))
@@ -99,6 +120,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.sip_port, 15062)
             self.assertEqual(config.default_payload, server.PCMA)
             self.assertEqual(config.users["1001"], "secret")
+            self.assertEqual(config.b2bua_routes["1002"], "sip:1002@127.0.0.1:25082")
 
     def test_resolve_artifact_dirs_creates_unique_run_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
