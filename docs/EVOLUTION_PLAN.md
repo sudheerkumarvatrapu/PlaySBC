@@ -139,6 +139,7 @@ Added:
 - B2BUA response forwarding for provisional and final INVITE responses
 - Dynamic SIPp smoke runner that registers any callee name before running the call
 - Unified B2BUA call-flow log with an ASCII SIP ladder for basic one-call SIPp smoke
+- SIPp B `100 Trying` is kept on the outbound leg to show the independent B2BUA-to-UAS INVITE transaction; it is not forwarded to SIPp A.
 
 Current verified call path:
 

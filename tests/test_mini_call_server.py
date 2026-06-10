@@ -202,9 +202,11 @@ class B2BUAFlowLogTests(unittest.TestCase):
             self.assertIn("SIPp A", text)
             self.assertIn("B2BUA", text)
             self.assertIn("SIPp B", text)
-            self.assertIn("01 |-- INVITE", text)
-            self.assertIn("03", text)
-            self.assertIn("<-- 200 OK", text)
+            self.assertIn("Step", text)
+            self.assertIn("01                  |          INVITE           |", text)
+            self.assertIn("                    |-------------------------->|", text)
+            self.assertIn("03                  |                           |          200 OK", text)
+            self.assertIn("                    |                           |<--------------------------|", text)
 
 
 if __name__ == "__main__":

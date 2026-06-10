@@ -258,6 +258,10 @@ class RoutingEngine:
 
 
 class B2BUAFlowLog:
+    LADDER_PARTICIPANTS = ("SIPp A", "B2BUA", "SIPp B")
+    LADDER_STEP_WIDTH = 6
+    LADDER_COLUMN_WIDTH = 28
+
     def __init__(
         self,
         log_dir: Path,
@@ -301,34 +305,94 @@ class B2BUAFlowLog:
             return
         with self.path.open("a", encoding="utf-8") as log_file:
             log_file.write("\nSIP LADDER\n")
-            log_file.write(f"{'SIPp A':^24}{'B2BUA':^24}{'SIPp B':^24}\n")
-            log_file.write(f"{'|':^24}{'|':^24}{'|':^24}\n")
+            log_file.write(self._ladder_header() + "\n")
+            log_file.write(self._ladder_separator() + "\n")
+            log_file.write(self._ladder_lifeline() + "\n")
             for index, (sender, receiver, message, detail) in enumerate(self.events, start=1):
-                log_file.write(f"{index:02d} {self._ladder_line(sender, receiver, message)}\n")
+                for line in self._ladder_event(index, sender, receiver, message):
+                    log_file.write(line + "\n")
+            log_file.write(self._ladder_lifeline() + "\n")
 
-    def _ladder_line(self, sender: str, receiver: str, label: str) -> str:
-        left_idle = f"{'|':^24}"
-        middle_idle = f"{'|':^24}"
-        right_idle = f"{'|':^24}"
-        if sender == "SIPp A" and receiver == "B2BUA":
-            return f"{self._right_arrow(label):<24}{middle_idle}{right_idle}"
-        if sender == "B2BUA" and receiver == "SIPp A":
-            return f"{self._left_arrow(label):<24}{middle_idle}{right_idle}"
-        if sender == "B2BUA" and receiver == "SIPp B":
-            return f"{left_idle}{self._right_arrow(label):<24}{right_idle}"
-        if sender == "SIPp B" and receiver == "B2BUA":
-            return f"{left_idle}{self._left_arrow(label):<24}{right_idle}"
-        return f"{sender} -> {receiver}: {label}"
+    def _ladder_header(self) -> str:
+        columns = [f"{participant:^{self.LADDER_COLUMN_WIDTH}}" for participant in self.LADDER_PARTICIPANTS]
+        return f"{'Step':<{self.LADDER_STEP_WIDTH}}" + "".join(columns).rstrip()
 
-    def _right_arrow(self, label: str) -> str:
-        return f"|-- {self._short_label(label):<14} -->"
+    def _ladder_separator(self) -> str:
+        return "-" * (self.LADDER_STEP_WIDTH + (self.LADDER_COLUMN_WIDTH * len(self.LADDER_PARTICIPANTS)))
 
-    def _left_arrow(self, label: str) -> str:
-        return f"<-- {self._short_label(label):<14} --|"
+    def _ladder_lifeline(self, step: str = "") -> str:
+        row = self._blank_ladder_row(step)
+        for position in self._ladder_positions():
+            row[position] = "|"
+        return "".join(row).rstrip()
 
-    def _short_label(self, label: str) -> str:
+    def _ladder_event(self, index: int, sender: str, receiver: str, label: str) -> List[str]:
+        if sender not in self.LADDER_PARTICIPANTS or receiver not in self.LADDER_PARTICIPANTS:
+            return [f"{index:02d} {sender} -> {receiver}: {label}"]
+
+        sender_index = self.LADDER_PARTICIPANTS.index(sender)
+        receiver_index = self.LADDER_PARTICIPANTS.index(receiver)
+        if abs(sender_index - receiver_index) != 1:
+            return [f"{index:02d} {sender} -> {receiver}: {label}"]
+
+        return [
+            self._ladder_label_line(index, sender_index, receiver_index, label),
+            self._ladder_arrow_line(sender_index, receiver_index),
+        ]
+
+    def _ladder_label_line(self, index: int, sender_index: int, receiver_index: int, label: str) -> str:
+        row = self._blank_ladder_row(f"{index:02d}")
+        positions = self._ladder_positions()
+        for position in positions:
+            row[position] = "|"
+        left = min(positions[sender_index], positions[receiver_index])
+        right = max(positions[sender_index], positions[receiver_index])
+        text_start = left + 2
+        text_width = max(1, right - left - 3)
+        text = self._short_label(label, text_width)
+        label_start = text_start + max(0, (text_width - len(text)) // 2)
+        self._put_text(row, label_start, text)
+        return "".join(row).rstrip()
+
+    def _ladder_arrow_line(self, sender_index: int, receiver_index: int) -> str:
+        row = self._blank_ladder_row("")
+        positions = self._ladder_positions()
+        for position in positions:
+            row[position] = "|"
+
+        sender = positions[sender_index]
+        receiver = positions[receiver_index]
+        if sender < receiver:
+            for position in range(sender + 1, receiver - 1):
+                row[position] = "-"
+            row[receiver - 1] = ">"
+        else:
+            row[receiver + 1] = "<"
+            for position in range(receiver + 2, sender):
+                row[position] = "-"
+        return "".join(row).rstrip()
+
+    def _blank_ladder_row(self, step: str) -> List[str]:
+        width = self.LADDER_STEP_WIDTH + (self.LADDER_COLUMN_WIDTH * len(self.LADDER_PARTICIPANTS))
+        row = list(" " * width)
+        self._put_text(row, 0, f"{step:<{self.LADDER_STEP_WIDTH}}")
+        return row
+
+    def _ladder_positions(self) -> List[int]:
+        return [
+            self.LADDER_STEP_WIDTH + (index * self.LADDER_COLUMN_WIDTH) + (self.LADDER_COLUMN_WIDTH // 2)
+            for index, _ in enumerate(self.LADDER_PARTICIPANTS)
+        ]
+
+    def _put_text(self, row: List[str], start: int, text: str) -> None:
+        for offset, character in enumerate(text):
+            position = start + offset
+            if 0 <= position < len(row):
+                row[position] = character
+
+    def _short_label(self, label: str, limit: int = 14) -> str:
         cleaned = " ".join(label.split())
-        return cleaned[:14]
+        return cleaned[:limit]
 
 
 @dataclass
