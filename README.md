@@ -291,6 +291,65 @@ python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --ho
 
 That load run does not generate ladder logs unless you explicitly add `--ladder`. The runner dynamically registers the callee contact, starts SIPp B as the UAS, starts SIPp A as the UAC, and writes a fresh artifact folder containing SIPp traces, server logs, and summary JSON.
 
+### Manual SIPp Commands
+
+The managed SIPp runners are the easiest path, but the server also works with manual SIPp commands.
+
+For a direct SIPp UAC call into the mini server, start the server:
+
+```bash
+python3 mini_call_server.py --ip 127.0.0.1 --sip-port 5062 --rtp-min 10000 --rtp-max 10100 --debug
+```
+
+Then run SIPp UAC:
+
+```bash
+sipp 127.0.0.1:5062 -sn uac -s 1001 -m 1 -r 1 -trace_msg -trace_err
+```
+
+For a full manual B2BUA call, use the custom SIPp XML scenarios because they include PCMU, PCMA, RTP, and telephone-event payload `101`.
+
+Start SIPp B as the UAS:
+
+```bash
+sipp -sf sipp/scenarios/b2bua_uas_b.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25082 -m 1 -trace_msg -trace_err -trace_logs -min_rtp_port 27000 -max_rtp_port 27200
+```
+
+In another terminal, start the server with a route to SIPp B. This one-line config is useful for quick local manual testing:
+
+```bash
+python3 - <<'PY'
+import json
+
+config = {
+    "sip_ip": "127.0.0.1",
+    "sip_port": 25062,
+    "rtp_min": 25100,
+    "rtp_max": 25400,
+    "artifact_root": "artifacts",
+    "users": {},
+    "route_policies": [
+        {"name": "manual-sipp-b", "match": "alice", "target": "sip:alice@127.0.0.1:25082", "priority": 10}
+    ],
+    "b2bua_ladder_logs": True,
+    "debug": True,
+}
+
+with open("config.manual-sipp.json", "w", encoding="utf-8") as fh:
+    json.dump(config, fh, indent=2)
+    fh.write("\n")
+PY
+python3 mini_call_server.py --config config.manual-sipp.json
+```
+
+Then start SIPp A as the UAC:
+
+```bash
+sipp 127.0.0.1:25062 -sf sipp/scenarios/b2bua_uac_a.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25081 -m 1 -r 1 -d 1000 -trace_msg -trace_err -trace_logs -min_rtp_port 26000 -max_rtp_port 26200
+```
+
+The manual B2BUA call writes server artifacts under `artifacts/run-*/logs/`, including the unified `b2bua_*.log` ladder file when `b2bua_ladder_logs` is enabled.
+
 The broader engineering path is documented in [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
 
 ## Notes
