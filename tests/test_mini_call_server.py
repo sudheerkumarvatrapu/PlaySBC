@@ -104,7 +104,8 @@ class ConfigTests(unittest.TestCase):
                     '{"sip_port": 5062, "default_codec": "PCMA", '
                     '"users": {"1001": "secret"}, '
                     '"b2bua_routes": {"1002": "sip:1002@127.0.0.1:25082"}, '
-                    '"route_policies": [{"name": "registered", "match": "*", "target": "registration"}]}'
+                    '"route_policies": [{"name": "registered", "match": "*", "target": "registration"}], '
+                    '"b2bua_ladder_logs": false}'
                 ),
                 encoding="utf-8",
             )
@@ -128,6 +129,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.users["1001"], "secret")
             self.assertEqual(config.b2bua_routes["1002"], "sip:1002@127.0.0.1:25082")
             self.assertEqual(config.route_policies[0]["name"], "registered")
+            self.assertFalse(config.b2bua_ladder_logs)
 
     def test_resolve_artifact_dirs_creates_unique_run_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,6 +180,31 @@ class RoutingEngineTests(unittest.TestCase):
         self.assertIsNotNone(route)
         self.assertEqual(route.source, "static")
         self.assertEqual(route.target.address, ("127.0.0.1", 27000))
+
+
+class B2BUAFlowLogTests(unittest.TestCase):
+    def test_ladder_renderer_uses_clear_three_column_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route = server.RouteResult(
+                target=server.SipUri("callee", "127.0.0.1", 25082),
+                policy_name="registered",
+                source="registrar",
+            )
+            flow = server.B2BUAFlowLog(Path(tmp), "call-123", "callee", route)
+            flow.sip("SIPp A", "B2BUA", "INVITE")
+            flow.sip("B2BUA", "SIPp B", "INVITE")
+            flow.sip("SIPp B", "B2BUA", "200 OK")
+            flow.sip("B2BUA", "SIPp A", "200 OK")
+            flow.render_ladder()
+
+            text = flow.path.read_text(encoding="utf-8")
+            self.assertIn("SIP LADDER", text)
+            self.assertIn("SIPp A", text)
+            self.assertIn("B2BUA", text)
+            self.assertIn("SIPp B", text)
+            self.assertIn("01 |-- INVITE", text)
+            self.assertIn("03", text)
+            self.assertIn("<-- 200 OK", text)
 
 
 if __name__ == "__main__":

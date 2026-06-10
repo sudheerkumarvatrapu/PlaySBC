@@ -138,7 +138,7 @@ Added:
 - B2BUA outbound INVITE, ACK, and BYE leg setup
 - B2BUA response forwarding for provisional and final INVITE responses
 - Dynamic SIPp smoke runner that registers any callee name before running the call
-- Unified B2BUA call-flow log with an ASCII SIP ladder
+- Unified B2BUA call-flow log with an ASCII SIP ladder for basic one-call SIPp smoke
 
 Current verified call path:
 
@@ -151,6 +151,8 @@ The 5 cps / 60 second hold smoke shape is supported by:
 ```bash
 python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000
 ```
+
+The load shape disables ladder logs by default to avoid creating one ladder file per call. Use `--ladder` when a sampled ladder is needed during a short run.
 
 Remaining Phase 6 hardening:
 

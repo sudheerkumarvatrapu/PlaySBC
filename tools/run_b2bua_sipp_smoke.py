@@ -155,6 +155,7 @@ def write_dynamic_config(args: argparse.Namespace, run_dir: Path) -> Path:
                 "priority": 10,
             }
         ],
+        "b2bua_ladder_logs": args.ladder_enabled,
         "debug": True,
     }
     config_path = run_dir / "server-config.json"
@@ -227,6 +228,7 @@ def write_summary(run_dir: Path, args: argparse.Namespace, results: List[SmokeRe
         "calls": args.calls,
         "rate": args.rate,
         "hold_ms": args.hold_ms,
+        "ladder_enabled": args.ladder_enabled,
         "flow_logs": flow_logs,
         "results": [asdict(result) for result in results],
     }
@@ -250,11 +252,14 @@ def main() -> int:
     parser.add_argument("--calls", type=int, default=1)
     parser.add_argument("--rate", type=int, default=1)
     parser.add_argument("--hold-ms", type=int, default=1000)
+    parser.add_argument("--ladder", dest="ladder", action="store_true", default=None, help="Force unified B2BUA ladder logs on")
+    parser.add_argument("--no-ladder", dest="ladder", action="store_false", help="Force unified B2BUA ladder logs off")
     parser.add_argument("--output-root", default=str(ROOT / "artifacts" / "sipp"))
     parser.add_argument("--run-id", default="")
     parser.add_argument("--sipp-bin", default="sipp")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    args.ladder_enabled = args.ladder if args.ladder is not None else (args.calls == 1 and args.rate == 1)
 
     run_dir = Path(args.output_root) / (args.run_id or make_run_id())
     if run_dir.exists():

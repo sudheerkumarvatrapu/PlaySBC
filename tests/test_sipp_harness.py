@@ -113,9 +113,43 @@ class SippScenarioTests(unittest.TestCase):
             self.assertEqual(summary["callee"], "drycallee")
             self.assertEqual(summary["rate"], 5)
             self.assertEqual(summary["hold_ms"], 60000)
+            self.assertFalse(summary["ladder_enabled"])
+            server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
+            self.assertFalse(server_config["b2bua_ladder_logs"])
             self.assertTrue((run_dir / "server-command.txt").exists())
             self.assertTrue((run_dir / "uac-command.txt").exists())
             self.assertTrue((run_dir / "uas-command.txt").exists())
+
+    def test_b2bua_basic_dry_run_enables_ladder_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "b2bua-basic-dry-run",
+                    "--callee",
+                    "basiccallee",
+                    "--calls",
+                    "1",
+                    "--rate",
+                    "1",
+                    "--hold-ms",
+                    "1000",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            run_dir = Path(tmp) / "b2bua-basic-dry-run"
+            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary["ladder_enabled"])
+            self.assertTrue(server_config["b2bua_ladder_logs"])
 
 
 def argparse_namespace(**values):

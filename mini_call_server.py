@@ -75,6 +75,7 @@ class ServerConfig:
     bridge_rooms: Tuple[str, ...] = ("bridge",)
     b2bua_routes: Dict[str, str] = field(default_factory=dict)
     route_policies: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
+    b2bua_ladder_logs: bool = True
     debug: bool = False
 
     @property
@@ -97,6 +98,7 @@ SERVER_CONFIG_KEYS = {
     "bridge_rooms",
     "b2bua_routes",
     "route_policies",
+    "b2bua_ladder_logs",
     "debug",
 }
 
@@ -262,10 +264,13 @@ class B2BUAFlowLog:
         inbound_call_id: str,
         target_user: str,
         route: RouteResult,
+        enabled: bool = True,
     ):
+        self.enabled = enabled
         self.events: List[Tuple[str, str, str, str]] = []
-        self.path = log_dir / f"b2bua_{safe_filename(inbound_call_id)}.log"
-        self.path.write_text("", encoding="utf-8")
+        self.path = log_dir / f"b2bua_{safe_filename(inbound_call_id)}.log" if enabled else None
+        if self.path:
+            self.path.write_text("", encoding="utf-8")
         self.write(
             "CALL START",
             (
@@ -275,6 +280,8 @@ class B2BUAFlowLog:
         )
 
     def write(self, event: str, detail: str = "") -> None:
+        if not self.path:
+            return
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         line = f"{timestamp} {event}"
         if detail:
@@ -283,27 +290,45 @@ class B2BUAFlowLog:
             log_file.write(line + "\n")
 
     def sip(self, sender: str, receiver: str, message: str, detail: str = "") -> None:
+        if not self.enabled:
+            return
         self.events.append((sender, receiver, message, detail))
         suffix = f" {detail}" if detail else ""
         self.write("SIP FLOW", f"{sender} -> {receiver}: {message}{suffix}")
 
     def render_ladder(self) -> None:
+        if not self.path:
+            return
         with self.path.open("a", encoding="utf-8") as log_file:
             log_file.write("\nSIP LADDER\n")
-            log_file.write(f"{'SIPp A':<28}{'B2BUA':<28}{'SIPp B':<28}\n")
-            for sender, receiver, message, detail in self.events:
-                log_file.write(self._ladder_line(sender, receiver, message) + "\n")
+            log_file.write(f"{'SIPp A':^24}{'B2BUA':^24}{'SIPp B':^24}\n")
+            log_file.write(f"{'|':^24}{'|':^24}{'|':^24}\n")
+            for index, (sender, receiver, message, detail) in enumerate(self.events, start=1):
+                log_file.write(f"{index:02d} {self._ladder_line(sender, receiver, message)}\n")
 
     def _ladder_line(self, sender: str, receiver: str, label: str) -> str:
+        left_idle = f"{'|':^24}"
+        middle_idle = f"{'|':^24}"
+        right_idle = f"{'|':^24}"
         if sender == "SIPp A" and receiver == "B2BUA":
-            return f"{label:<28}{'-------------------------->':<28}{'|':<28}"
+            return f"{self._right_arrow(label):<24}{middle_idle}{right_idle}"
         if sender == "B2BUA" and receiver == "SIPp A":
-            return f"{'<--------------------------':<28}{label:<28}{'|':<28}"
+            return f"{self._left_arrow(label):<24}{middle_idle}{right_idle}"
         if sender == "B2BUA" and receiver == "SIPp B":
-            return f"{'|':<28}{label:<28}{'-------------------------->'}"
+            return f"{left_idle}{self._right_arrow(label):<24}{right_idle}"
         if sender == "SIPp B" and receiver == "B2BUA":
-            return f"{'|':<28}{'<--------------------------':<28}{label}"
+            return f"{left_idle}{self._left_arrow(label):<24}{right_idle}"
         return f"{sender} -> {receiver}: {label}"
+
+    def _right_arrow(self, label: str) -> str:
+        return f"|-- {self._short_label(label):<14} -->"
+
+    def _left_arrow(self, label: str) -> str:
+        return f"<-- {self._short_label(label):<14} --|"
+
+    def _short_label(self, label: str) -> str:
+        cleaned = " ".join(label.split())
+        return cleaned[:14]
 
 
 @dataclass
@@ -726,6 +751,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         bridge_rooms: Tuple[str, ...],
         b2bua_routes: Dict[str, str],
         route_policies: Tuple[Dict[str, Any], ...],
+        b2bua_ladder_logs: bool,
     ):
         self.local_ip = local_ip
         self.local_port = local_port
@@ -735,6 +761,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.users = users
         self.bridge_rooms = set(bridge_rooms)
         self.b2bua_routes = b2bua_routes
+        self.b2bua_ladder_logs = b2bua_ladder_logs
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, Registration] = {}
@@ -1018,7 +1045,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         dtmf_payload_type: Optional[int],
     ) -> None:
         target = route.target
-        flow_log = B2BUAFlowLog(self.media.log_dir, inbound_call_id, target_user, route)
+        flow_log = B2BUAFlowLog(
+            self.media.log_dir,
+            inbound_call_id,
+            target_user,
+            route,
+            enabled=self.b2bua_ladder_logs,
+        )
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
 
@@ -1646,7 +1679,7 @@ def load_config_file(path: Optional[str]) -> ServerConfig:
 def coerce_config_value(key: str, value: Any) -> Any:
     if key in {"sip_port", "rtp_min", "rtp_max"}:
         return int(value)
-    if key == "debug":
+    if key in {"debug", "b2bua_ladder_logs"}:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -1787,6 +1820,7 @@ async def main() -> None:
             config.bridge_rooms,
             config.b2bua_routes,
             config.route_policies,
+            config.b2bua_ladder_logs,
         ),
         local_addr=(config.sip_ip, config.sip_port),
     )

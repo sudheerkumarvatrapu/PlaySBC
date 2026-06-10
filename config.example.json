@@ -15,5 +15,6 @@
   "bridge_rooms": ["bridge"],
   "b2bua_routes": {},
   "route_policies": [],
+  "b2bua_ladder_logs": true,
   "debug": false
 }

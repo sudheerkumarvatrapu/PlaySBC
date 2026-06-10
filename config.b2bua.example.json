@@ -20,5 +20,6 @@
       "priority": 10
     }
   ],
+  "b2bua_ladder_logs": true,
   "debug": true
 }

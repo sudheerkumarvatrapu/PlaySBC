@@ -73,6 +73,7 @@ Supported config keys:
   "bridge_rooms": ["bridge"],
   "b2bua_routes": {},
   "route_policies": [],
+  "b2bua_ladder_logs": true,
   "debug": false
 }
 ```
@@ -217,11 +218,13 @@ You can also use route-policy templates:
 }
 ```
 
-B2BUA call logs include a unified flow file named like `b2bua_<call-id>.log`. It records the route decision, both SIP legs, and a final ASCII SIP ladder for:
+B2BUA call logs can include a unified flow file named like `b2bua_<call-id>.log`. It records the route decision, both SIP legs, and a final ASCII SIP ladder for:
 
 ```text
 SIPp A -> B2BUA -> SIPp B
 ```
+
+The SIPp smoke runner enables ladder logs by default only for the basic one-call case. Load runs disable ladder logs by default so large tests do not create one ladder file per call.
 
 ## SIPp Regression Harness
 
@@ -276,13 +279,15 @@ Run the registrar-backed B2BUA SIPp smoke:
 python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000
 ```
 
+That basic call generates a unified B2BUA ladder log.
+
 Run a basic load shape at 5 cps with a one-minute hold:
 
 ```bash
 python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000
 ```
 
-That runner dynamically registers the callee contact, starts SIPp B as the UAS, starts SIPp A as the UAC, and writes a fresh artifact folder containing SIPp traces, server logs, summary JSON, and unified B2BUA ladder logs.
+That load run does not generate ladder logs unless you explicitly add `--ladder`. The runner dynamically registers the callee contact, starts SIPp B as the UAS, starts SIPp A as the UAC, and writes a fresh artifact folder containing SIPp traces, server logs, and summary JSON.
 
 The broader engineering path is documented in [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
 
