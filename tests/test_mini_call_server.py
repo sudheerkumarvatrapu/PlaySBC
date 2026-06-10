@@ -44,6 +44,11 @@ class SipParsingTests(unittest.TestCase):
         default = server.parse_sip_uri("sip:1003@example.test")
         self.assertEqual(default.address, ("example.test", 5060))
 
+    def test_register_expires_parsing_prefers_contact_parameter(self):
+        self.assertEqual(server.parse_register_expires("300", "<sip:bob@127.0.0.1>;expires=60"), 60)
+        self.assertEqual(server.parse_register_expires("120", "<sip:bob@127.0.0.1>"), 120)
+        self.assertEqual(server.parse_register_expires("", "<sip:bob@127.0.0.1>"), 300)
+
     def test_make_sdp_can_include_multiple_codecs_and_dtmf(self):
         sdp = server.make_sdp("127.0.0.1", 30000, server.PCMU, dtmf_payload_type=101, payloads=(0, 8, 101))
         self.assertIn("m=audio 30000 RTP/AVP 0 8 101", sdp)
@@ -98,7 +103,8 @@ class ConfigTests(unittest.TestCase):
                 (
                     '{"sip_port": 5062, "default_codec": "PCMA", '
                     '"users": {"1001": "secret"}, '
-                    '"b2bua_routes": {"1002": "sip:1002@127.0.0.1:25082"}}'
+                    '"b2bua_routes": {"1002": "sip:1002@127.0.0.1:25082"}, '
+                    '"route_policies": [{"name": "registered", "match": "*", "target": "registration"}]}'
                 ),
                 encoding="utf-8",
             )
@@ -121,6 +127,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.default_payload, server.PCMA)
             self.assertEqual(config.users["1001"], "secret")
             self.assertEqual(config.b2bua_routes["1002"], "sip:1002@127.0.0.1:25082")
+            self.assertEqual(config.route_policies[0]["name"], "registered")
 
     def test_resolve_artifact_dirs_creates_unique_run_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,6 +136,48 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(run_dir, Path(tmp) / "sanity")
             self.assertEqual(log_dir, Path(tmp) / "sanity" / "logs")
             self.assertEqual(recording_dir, Path(tmp) / "sanity" / "recordings")
+
+
+class RoutingEngineTests(unittest.TestCase):
+    def test_registrar_policy_resolves_registered_endpoint(self):
+        engine = server.RoutingEngine(
+            ({"name": "registered", "match": "*", "target": "registration"},),
+            {},
+        )
+        registrations = {
+            "sales": server.Registration(
+                user="sales",
+                contact_uri="sip:sales@127.0.0.1:25082",
+                source=("127.0.0.1", 25082),
+                expires_at=9999999999,
+            )
+        }
+
+        route = engine.resolve("sales", registrations)
+
+        self.assertIsNotNone(route)
+        self.assertEqual(route.target.address, ("127.0.0.1", 25082))
+        self.assertEqual(route.source, "registrar")
+
+    def test_route_policy_can_template_static_target(self):
+        engine = server.RoutingEngine(
+            ({"name": "lab", "match": "lab-*", "target": "sip:{user}@127.0.0.1:26000"},),
+            {},
+        )
+
+        route = engine.resolve("lab-123", {})
+
+        self.assertIsNotNone(route)
+        self.assertEqual(route.target.uri, "sip:lab-123@127.0.0.1:26000")
+
+    def test_legacy_b2bua_routes_are_static_fallback(self):
+        engine = server.RoutingEngine((), {"support": "sip:support@127.0.0.1:27000"})
+
+        route = engine.resolve("support", {})
+
+        self.assertIsNotNone(route)
+        self.assertEqual(route.source, "static")
+        self.assertEqual(route.target.address, ("127.0.0.1", 27000))
 
 
 if __name__ == "__main__":

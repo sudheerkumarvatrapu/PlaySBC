@@ -51,7 +51,7 @@
     ]]>
   </send>
 
-  <pause milliseconds="1000" />
+  <pause />
 
   <send retrans="500" start_rtd="bye">
     <![CDATA[

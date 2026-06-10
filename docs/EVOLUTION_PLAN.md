@@ -17,6 +17,10 @@ Implemented:
 - SIP dialog state tracking and UDP transaction cache
 - RTP analyzer metrics
 - Basic inbound two-leg bridge room
+- B2BUA outbound leg setup
+- Registrar-backed endpoint lookup
+- Route policies and legacy static-route fallback
+- Unified B2BUA SIP ladder logs
 
 ## Phase 1: SIP State Machine Cleanup
 
@@ -97,7 +101,7 @@ Added:
 
 ## Phase 5: Call Bridging
 
-Status: implemented inbound bridge-room baseline.
+Status: implemented inbound bridge-room baseline and outbound B2BUA baseline.
 
 Move from:
 
@@ -117,17 +121,45 @@ Add:
 - RTP relay between endpoint legs
 - PCMU/PCMA transcoding only where required
 
-The current bridge is a meet-me room: both endpoints call `sip:bridge@server`, then the media server pairs the legs and relays anchored RTP. Full outbound B2BUA setup, registrar-backed lookup, and route policies remain Phase 6 work.
+The meet-me bridge is still available: both endpoints call `sip:bridge@server`, then the media server pairs the legs and relays anchored RTP. The outbound B2BUA path now creates a separate outbound SIP leg and pairs inbound/outbound RTP sessions through the server.
 
 ## Phase 6: Routing Engine
 
-Add:
+Status: implemented educational baseline.
 
-- Registrar location service
-- Route policies
-- Routing-table config
-- Failover destinations
-- Hunt groups
+Added:
+
+- In-memory registrar location service from `REGISTER` Contact headers
+- Expiry and unregister handling for basic registrations
+- `route_policies` config with glob-style dialed-user matching
+- Registrar-backed policy target: `target="registration"`
+- Static route-policy templates such as `sip:{user}@127.0.0.1:25082`
+- Legacy `b2bua_routes` exact-match fallback
+- B2BUA outbound INVITE, ACK, and BYE leg setup
+- B2BUA response forwarding for provisional and final INVITE responses
+- Dynamic SIPp smoke runner that registers any callee name before running the call
+- Unified B2BUA call-flow log with an ASCII SIP ladder
+
+Current verified call path:
+
+```text
+SIPp A -> Mini Call Server B2BUA -> SIPp B
+```
+
+The 5 cps / 60 second hold smoke shape is supported by:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000
+```
+
+Remaining Phase 6 hardening:
+
+- Multiple contacts per Address of Record
+- Forking and hunt groups
+- Failover retry on non-2xx or timeout
+- Route metrics and policy counters
+- Persistent registrar database
+- CANCEL support and richer in-dialog request handling
 
 ## Phase 7: WebRTC Gateway
 
@@ -180,4 +212,4 @@ Before each larger phase:
 
 ## Recommended Next Implementation
 
-Begin Phase 6 routing engine work: registrar-backed endpoint lookup, route policies, and outbound leg setup for a fuller B2BUA path.
+Continue Phase 6 hardening with multi-contact registrar support, route failover, and hunt groups before moving to WebRTC gateway work.

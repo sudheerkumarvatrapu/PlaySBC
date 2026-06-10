@@ -20,7 +20,9 @@ It supports:
 - UDP server transaction cache and INVITE response retransmission timers
 - RTP jitter, packet-loss, silence, clock-drift, and MOS-style analyzer metrics
 - Basic two-leg bridge room for anchored RTP relay
-- Basic B2BUA outbound routing for configured SIP targets
+- B2BUA outbound routing with registrar-backed endpoint lookup
+- Route policies for dynamic registered endpoints and static fallback targets
+- Unified B2BUA call-flow logs with SIP ladder diagrams
 - SIPp regression scenarios and fresh per-run artifacts
 
 It is meant for local testing and learning. It is not a production SIP server.
@@ -70,6 +72,7 @@ Supported config keys:
   },
   "bridge_rooms": ["bridge"],
   "b2bua_routes": {},
+  "route_policies": [],
   "debug": false
 }
 ```
@@ -163,17 +166,62 @@ sip:bridge@127.0.0.1:5062
 
 The first leg waits in the `bridge` room. The second leg pairs with it, and RTP is relayed between the two server RTP sockets once both endpoints have sent media.
 
-For a basic B2BUA route, configure a dialed user to an outbound SIP URI:
+## B2BUA Routing
+
+The B2BUA path can route by live registrar contact. Start from:
+
+```bash
+python3 mini_call_server.py --config config.b2bua.example.json
+```
+
+The B2BUA example config uses an open lab registrar and a route policy:
+
+```json
+{
+  "users": {},
+  "route_policies": [
+    {
+      "name": "registered-endpoints",
+      "match": "*",
+      "target": "registration",
+      "priority": 10
+    }
+  ]
+}
+```
+
+With that policy, a call to `sip:any-user@server` routes to the current `Contact` registered for `any-user`.
+
+Legacy static routing is still available as a fallback:
 
 ```json
 {
   "b2bua_routes": {
-    "1002": "sip:1002@127.0.0.1:25082"
+    "support": "sip:support@127.0.0.1:25082"
   }
 }
 ```
 
-Then calls to `sip:1002@127.0.0.1:25062` are answered only after the server creates an outbound leg to `127.0.0.1:25082`. The inbound and outbound RTP sessions are paired through the server.
+You can also use route-policy templates:
+
+```json
+{
+  "route_policies": [
+    {
+      "name": "lab-static",
+      "match": "lab-*",
+      "target": "sip:{user}@127.0.0.1:25082",
+      "priority": 20
+    }
+  ]
+}
+```
+
+B2BUA call logs include a unified flow file named like `b2bua_<call-id>.log`. It records the route decision, both SIP legs, and a final ASCII SIP ladder for:
+
+```text
+SIPp A -> B2BUA -> SIPp B
+```
 
 ## SIPp Regression Harness
 
@@ -222,12 +270,25 @@ artifacts/
       call_echo/
 ```
 
+Run the registrar-backed B2BUA SIPp smoke:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000
+```
+
+Run a basic load shape at 5 cps with a one-minute hold:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000
+```
+
+That runner dynamically registers the callee contact, starts SIPp B as the UAS, starts SIPp A as the UAC, and writes a fresh artifact folder containing SIPp traces, server logs, summary JSON, and unified B2BUA ladder logs.
+
 The broader engineering path is documented in [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
 
 ## Notes
 
 - Open UDP SIP port `5062` and RTP ports `10000-10100` in your firewall.
-- NAT traversal, TLS, SRTP, and outbound B2BUA call setup are intentionally not included.
 - NAT traversal, TLS, and SRTP are intentionally not included.
 - Python 3.13 may not include `audioop`; in that case same-codec RTP echo still works, but PCMU/PCMA transcoding falls back to pass-through.
 - If `audioop` is unavailable, WAV recording is skipped with a per-call log warning.
