@@ -283,6 +283,14 @@ python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-m
 
 That basic call generates a unified B2BUA ladder log.
 
+Run a one-minute basic B2BUA call with G.711 RTP media replay:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --callee media-user --calls 1 --rate 1 --hold-ms 60000 --media-codec PCMU
+```
+
+Use `--media-codec PCMA` for G.711 A-law. The default media driver keeps SIPp responsible for SIP signaling and uses `tools/play_g711_pcap_rtp.py` to replay `sipp/scenarios/pcap/g711u_60s.pcap` or `sipp/scenarios/pcap/g711a_60s.pcap` over normal UDP. This avoids raw-socket permissions on macOS while still producing real RTP through the B2BUA media anchor.
+
 Run a basic load shape at 5 cps with a one-minute hold:
 
 ```bash
@@ -290,6 +298,8 @@ python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --ho
 ```
 
 That load run does not generate ladder logs unless you explicitly add `--ladder`. The runner dynamically registers the callee contact, starts SIPp B as the UAS, starts SIPp A as the UAC, and writes a fresh artifact folder containing SIPp traces, server logs, and summary JSON.
+
+If you want SIPp itself to execute `play_pcap_audio`, add `--media-driver sipp-pcap`; on macOS that mode requires a SIPp build with PCAP support and root/raw-socket permission.
 
 ### Manual SIPp Commands
 

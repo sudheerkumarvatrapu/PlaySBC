@@ -14,11 +14,15 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_DIR = ROOT / "sipp" / "scenarios"
+MEDIA_PCAPS = {
+    "PCMU": "pcap/g711u_60s.pcap",
+    "PCMA": "pcap/g711a_60s.pcap",
+}
 CRLF = "\r\n"
 
 
@@ -47,10 +51,15 @@ def call_limit(calls: int, rate: int, hold_ms: int) -> int:
 
 
 def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
-    return [
+    scenario = getattr(
+        args,
+        "uas_scenario",
+        SCENARIO_DIR / ("b2bua_uas_b_media.xml" if args.media_enabled else "b2bua_uas_b.xml"),
+    )
+    command = [
         sipp_binary,
         "-sf",
-        str(SCENARIO_DIR / "b2bua_uas_b.xml"),
+        str(scenario),
         "-s",
         args.callee,
         "-i",
@@ -77,14 +86,20 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-trace_counts",
         "-trace_logs",
     ]
+    return command
 
 
 def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
-    return [
+    scenario = getattr(
+        args,
+        "uac_scenario",
+        SCENARIO_DIR / ("b2bua_uac_a_media.xml" if args.media_enabled else "b2bua_uac_a.xml"),
+    )
+    command = [
         sipp_binary,
         f"{args.host}:{args.server_port}",
         "-sf",
-        str(SCENARIO_DIR / "b2bua_uac_a.xml"),
+        str(scenario),
         "-s",
         args.callee,
         "-i",
@@ -115,6 +130,7 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-trace_counts",
         "-trace_logs",
     ]
+    return command
 
 
 def build_server_command(args: argparse.Namespace, run_dir: Path) -> List[str]:
@@ -142,7 +158,7 @@ def write_dynamic_config(args: argparse.Namespace, run_dir: Path) -> Path:
         "recording_dir": "recordings",
         "artifact_root": "artifacts",
         "run_id": "",
-        "default_codec": "PCMU",
+        "default_codec": args.media_codec or "PCMU",
         "auth_realm": "mini-call-server",
         "users": {},
         "bridge_rooms": ["bridge"],
@@ -161,6 +177,56 @@ def write_dynamic_config(args: argparse.Namespace, run_dir: Path) -> Path:
     config_path = run_dir / "server-config.json"
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return config_path
+
+
+def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
+    if not args.media_enabled:
+        args.uac_scenario = SCENARIO_DIR / "b2bua_uac_a.xml"
+        args.uas_scenario = SCENARIO_DIR / "b2bua_uas_b.xml"
+        args.media_pcap_resolved = ""
+        return
+
+    pcap_path = Path(args.media_pcap)
+    if not pcap_path.is_absolute():
+        pcap_path = SCENARIO_DIR / pcap_path
+    if not pcap_path.exists():
+        raise SystemExit(f"Media PCAP not found: {pcap_path}")
+    args.media_pcap_resolved = str(pcap_path)
+
+    if args.media_driver == "python":
+        args.uac_scenario = SCENARIO_DIR / "b2bua_uac_a.xml"
+        args.uas_scenario = SCENARIO_DIR / "b2bua_uas_b.xml"
+        return
+
+    replacements = {
+        "uac_scenario": (SCENARIO_DIR / "b2bua_uac_a_media.xml", run_dir / "sipp-a-uac" / "b2bua_uac_a_media_resolved.xml"),
+        "uas_scenario": (SCENARIO_DIR / "b2bua_uas_b_media.xml", run_dir / "sipp-b-uas" / "b2bua_uas_b_media_resolved.xml"),
+    }
+    for attr_name, (template, destination) in replacements.items():
+        text = template.read_text(encoding="ISO-8859-1").replace("[media_pcap]", str(pcap_path))
+        destination.write_text(text, encoding="ISO-8859-1")
+        setattr(args, attr_name, destination.resolve())
+
+
+def build_media_player_commands(args: argparse.Namespace) -> List[Tuple[str, List[str]]]:
+    if not args.media_enabled or args.media_driver != "python":
+        return []
+
+    player = str(ROOT / "tools" / "play_g711_pcap_rtp.py")
+    base = [
+        sys.executable,
+        player,
+        "--pcap",
+        args.media_pcap_resolved,
+        "--host",
+        args.host,
+        "--duration-ms",
+        str(args.hold_ms),
+    ]
+    return [
+        ("media-a-to-b2bua", base + ["--port", str(args.server_rtp_min)]),
+        ("media-b-to-b2bua", base + ["--port", str(args.server_rtp_min + 2)]),
+    ]
 
 
 def start_process(command: List[str], cwd: Path, stdout_path: Path) -> subprocess.Popen:
@@ -228,6 +294,10 @@ def write_summary(run_dir: Path, args: argparse.Namespace, results: List[SmokeRe
         "calls": args.calls,
         "rate": args.rate,
         "hold_ms": args.hold_ms,
+        "media_enabled": args.media_enabled,
+        "media_codec": args.media_codec,
+        "media_driver": args.media_driver if args.media_enabled else "",
+        "media_pcap": args.media_pcap_resolved if args.media_enabled else "",
         "ladder_enabled": args.ladder_enabled,
         "flow_logs": flow_logs,
         "results": [asdict(result) for result in results],
@@ -252,6 +322,10 @@ def main() -> int:
     parser.add_argument("--calls", type=int, default=1)
     parser.add_argument("--rate", type=int, default=1)
     parser.add_argument("--hold-ms", type=int, default=1000)
+    parser.add_argument("--media-codec", choices=sorted(MEDIA_PCAPS), help="Play 60s RTP PCAP media using this G.711 codec")
+    parser.add_argument("--media-pcap", help="Override the RTP PCAP file used with --media-codec")
+    parser.add_argument("--media-driver", choices=("python", "sipp-pcap"), default="python", help="Use Python UDP replay or SIPp play_pcap_audio for media")
+    parser.add_argument("--media-start-delay", type=float, default=1.0, help="Seconds to wait after starting SIPp A before Python media replay starts")
     parser.add_argument("--ladder", dest="ladder", action="store_true", default=None, help="Force unified B2BUA ladder logs on")
     parser.add_argument("--no-ladder", dest="ladder", action="store_false", help="Force unified B2BUA ladder logs off")
     parser.add_argument("--output-root", default=str(ROOT / "artifacts" / "sipp"))
@@ -260,6 +334,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     args.ladder_enabled = args.ladder if args.ladder is not None else (args.calls == 1 and args.rate == 1)
+    args.media_enabled = bool(args.media_codec)
+    args.media_pcap = args.media_pcap or (MEDIA_PCAPS[args.media_codec] if args.media_codec else "")
 
     run_dir = Path(args.output_root) / (args.run_id or make_run_id())
     if run_dir.exists():
@@ -267,6 +343,7 @@ def main() -> int:
     run_dir.mkdir(parents=True)
     for name in ("server", "sipp-a-uac", "sipp-b-uas"):
         (run_dir / name).mkdir()
+    prepare_media_scenarios(args, run_dir)
 
     sipp_binary = resolve_binary(args.sipp_bin)
     if not sipp_binary and not args.dry_run:
@@ -275,19 +352,25 @@ def main() -> int:
     server_command = build_server_command(args, run_dir)
     uas_command = build_uas_command(args, sipp)
     uac_command = build_uac_command(args, sipp)
+    media_commands = build_media_player_commands(args)
 
     (run_dir / "server-command.txt").write_text(shlex.join(server_command) + "\n", encoding="utf-8")
     (run_dir / "uas-command.txt").write_text(shlex.join(uas_command) + "\n", encoding="utf-8")
     (run_dir / "uac-command.txt").write_text(shlex.join(uac_command) + "\n", encoding="utf-8")
+    for name, command in media_commands:
+        (run_dir / f"{name}-command.txt").write_text(shlex.join(command) + "\n", encoding="utf-8")
 
     results: List[SmokeResult] = []
     server_process: Optional[subprocess.Popen] = None
     uas_process: Optional[subprocess.Popen] = None
+    media_processes: List[Tuple[str, List[str], subprocess.Popen, float]] = []
     try:
         if args.dry_run:
             results.append(SmokeResult("server", server_command, None, "dry-run", 0.0))
             results.append(SmokeResult("sipp-b-uas", uas_command, None, "dry-run", 0.0))
             results.append(SmokeResult("sipp-a-uac", uac_command, None, "dry-run", 0.0))
+            for name, command in media_commands:
+                results.append(SmokeResult(name, command, None, "dry-run", 0.0))
             returncode = 0
             return returncode
 
@@ -304,16 +387,38 @@ def main() -> int:
         results.append(SmokeResult("registration", [], registration_rc, "passed" if registration_rc == 0 else "failed", time.monotonic() - started))
 
         started = time.monotonic()
-        completed = subprocess.run(uac_command, cwd=run_dir / "sipp-a-uac", text=True, capture_output=True)
-        (run_dir / "sipp-a-uac" / "stdout.log").write_text(completed.stdout, encoding="utf-8")
-        (run_dir / "sipp-a-uac" / "stderr.log").write_text(completed.stderr, encoding="utf-8")
-        results.append(SmokeResult("sipp-a-uac", uac_command, completed.returncode, "passed" if completed.returncode == 0 else "failed", time.monotonic() - started))
+        uac_stdout = (run_dir / "sipp-a-uac" / "stdout.log").open("w", encoding="utf-8")
+        uac_stderr = (run_dir / "sipp-a-uac" / "stderr.log").open("w", encoding="utf-8")
+        try:
+            uac_process = subprocess.Popen(uac_command, cwd=run_dir / "sipp-a-uac", stdout=uac_stdout, stderr=uac_stderr, text=True)
+            if media_commands:
+                time.sleep(args.media_start_delay)
+                for name, command in media_commands:
+                    media_started = time.monotonic()
+                    process = start_process(command, ROOT, run_dir / f"{name}.log")
+                    media_processes.append((name, command, process, media_started))
+            uac_rc = uac_process.wait()
+        finally:
+            uac_stdout.close()
+            uac_stderr.close()
+        results.append(SmokeResult("sipp-a-uac", uac_command, uac_rc, "passed" if uac_rc == 0 else "failed", time.monotonic() - started))
+
+        for name, command, process, media_started in media_processes:
+            try:
+                media_rc = process.wait(timeout=max(5, int(args.hold_ms / 1000) + 10))
+            except subprocess.TimeoutExpired:
+                stop_process(process)
+                media_rc = process.returncode if process.returncode is not None else 1
+            results.append(SmokeResult(name, command, media_rc, "passed" if media_rc == 0 else "failed", time.monotonic() - media_started))
+        media_processes = []
 
         started = time.monotonic()
         uas_rc = uas_process.wait(timeout=max(30, int(args.hold_ms / 1000) + 30))
         results.append(SmokeResult("sipp-b-uas", uas_command, uas_rc, "passed" if uas_rc == 0 else "failed", time.monotonic() - started))
         uas_process = None
     finally:
+        for _name, _command, process, _started in media_processes:
+            stop_process(process)
         stop_process(uas_process)
         stop_process(server_process)
         write_summary(run_dir, args, results)

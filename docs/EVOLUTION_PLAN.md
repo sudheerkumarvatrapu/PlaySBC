@@ -140,6 +140,7 @@ Added:
 - Dynamic SIPp smoke runner that registers any callee name before running the call
 - Unified B2BUA call-flow log with an ASCII SIP ladder for basic one-call SIPp smoke
 - SIPp B `100 Trying` is kept on the outbound leg to show the independent B2BUA-to-UAS INVITE transaction; it is not forwarded to SIPp A.
+- One-minute SIPp B2BUA media run with G.711u/G.711a RTP PCAP replay over the B2BUA media anchor.
 
 Current verified call path:
 
