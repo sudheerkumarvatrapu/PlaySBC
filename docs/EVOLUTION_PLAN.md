@@ -1,219 +1,139 @@
 # Mini Call Server Evolution Plan
 
-The project is growing from a SIP/RTP echo demo into an educational SBC and real-time communications lab. The work should progress in layers so each phase stays testable.
+This project is an educational SIP/RTP lab server. The goal is to grow it phase by phase into an enterprise-style SBC lab platform, not a production-certified SBC.
 
 ## Current Baseline
 
 Implemented:
 
-- SIP UDP handling for `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
-- Optional digest authentication for `REGISTER`
-- RTP echo for PCMU/PCMA
-- WAV recording and per-call logs
+- SIP over UDP for `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
+- Optional SIP digest authentication for `REGISTER`
+- PCMU/PCMA RTP echo, relay, recording, and basic transcoding
 - RFC 2833 DTMF detection
-- JSON config
-- Unit tests and Python smoke clients
-- SIPp regression harness
-- SIP dialog state tracking and UDP transaction cache
-- RTP analyzer metrics
-- Basic inbound two-leg bridge room
-- B2BUA outbound leg setup
-- Registrar-backed endpoint lookup
-- Route policies and legacy static-route fallback
-- Unified B2BUA SIP ladder logs
+- Dialog state tracking and UDP transaction cache
+- RTP metrics: packet loss, jitter, out-of-order, late packets, silence, clock drift, MOS-style score
+- Registrar-backed B2BUA routing
+- Route policies and static fallback routes
+- SIPp UAC/UAS scripts for B2BUA calls
+- 5 cps / 60 second SIPp load shape
+- 60 second G.711u/G.711a media replay through the B2BUA path
+- Unified B2BUA ladder logs for basic calls
+- Unit tests and SIPp regression harness
 
-## Phase 1: SIP State Machine Cleanup
+## Next Focus
 
-Status: implemented baseline.
+### Phase 1: Logging And Regression Reports
 
-Explicit dialog state tracking:
+Make logs clean and review-friendly:
 
-```python
-class CallState(Enum):
-    INIT = 0
-    RINGING = 1
-    ANSWERED = 2
-    TERMINATED = 3
+- One timestamped run folder per test run
+- Separate folders for unit tests, SIPp basic calls, registration auth, media, and load
+- Clear server, SIP, RTP/media, ladder, and SIPp trace logs
+- Single regression result document
+- Green/pass and red/fail status summary
+- No overwritten logs
+
+### Phase 2: SIPp Regression Expansion
+
+Add more SIPp cases:
+
+- `OPTIONS` keepalive
+- `REGISTER` with auth success and failure
+- Basic B2BUA call
+- 60 second G.711 media call
+- Invalid `BYE`
+- Unknown route
+- Failed outbound leg
+- `CANCEL`
+- Retransmission behavior
+- Small load and soak profiles
+
+### Phase 3: RTPengine Media Backend
+
+Add optional media backend selection:
+
+```json
+{
+  "media_backend": "internal",
+  "rtpengine_url": "udp://127.0.0.1:2223"
+}
 ```
 
-Tracked:
-
-- Call-ID
-- Local and remote tags
-- Branch IDs
-- Local and remote CSeq
-- Created, answered, and terminated timestamps
-
-Outcome:
-
-- Predictable dialog behavior
-- Clear validation for invalid method ordering
-- A stable foundation for bridging
-
-## Phase 2: Transaction Layer
-
-Status: implemented educational baseline.
-
-Added:
-
-- INVITE server transactions
-- Non-INVITE server transactions
-- Response caching
-- UDP final INVITE response retransmission timers until ACK or expiry
-- Transaction expiration
-
-The current layer is intentionally compact. Continue using RFC 3261 as the primary baseline and study RFC 6026 for INVITE transaction corrections before treating it as production signaling code. Future hardening should add transport-aware timer tuning, CANCEL handling, error-response transaction coverage, and richer transaction metrics.
-
-Regression coverage includes an async timer unit test, a Python UDP smoke client for byte-for-byte cached response replay, and a SIPp scenario for unknown-dialog `BYE` rejection.
-
-## Phase 3: RTP Jitter Buffer And Metrics
-
-Status: implemented baseline.
-
-Added:
-
-- RTP sequence tracking
-- Sequence gap detection
-- Out-of-order and duplicate packet detection
-- Late packet tracking
-- Basic jitter calculation
-
-Export per-call metrics:
+Target:
 
 ```text
-packet_loss
-jitter_ms
-out_of_order
-late_packets
+Python B2BUA = SIP, routing, policy, logs
+RTPengine    = RTP/SRTP anchoring, SDP rewrite, recording, DTMF/media controls
 ```
 
-## Phase 4: RTP Analyzer
+Keep the current internal RTP relay as a fallback.
 
-Status: implemented baseline.
+### Phase 4: Enterprise SBC Lab Features
 
-Added:
+Build lab-grade SBC features:
 
-- RTP clock drift estimation
-- Silence detection
-- DTMF event summary
-- Per-call media-session summary in call logs
-- A documented MOS-estimation approximation
+- Trunk profiles
+- SIP header normalization
+- E.164 number normalization
+- Route failover
+- Hunt groups
+- Call admission control
+- OPTIONS monitoring
+- TLS profile groundwork
+- Teams Direct Routing style lab profile
 
-## Phase 5: Call Bridging
+Example profile:
 
-Status: implemented inbound bridge-room baseline and outbound B2BUA baseline.
-
-Move from:
-
-```text
-UA -> server -> same UA echo
+```json
+{
+  "trunk_profiles": {
+    "teams-lab": {
+      "transport": "tls",
+      "media": "srtp",
+      "options_ping": true,
+      "require_e164": true,
+      "normalize_headers": true
+    }
+  }
+}
 ```
 
-To:
+This is for lab experimentation only, not Microsoft-certified production Direct Routing.
 
-```text
-UA-A <-> server <-> UA-B
-```
+### Phase 5: WebRTC Gateway
 
-Add:
-
-- Two inbound dialog legs
-- RTP relay between endpoint legs
-- PCMU/PCMA transcoding only where required
-
-The meet-me bridge is still available: both endpoints call `sip:bridge@server`, then the media server pairs the legs and relays anchored RTP. The outbound B2BUA path now creates a separate outbound SIP leg and pairs inbound/outbound RTP sessions through the server.
-
-## Phase 6: Routing Engine
-
-Status: implemented educational baseline.
-
-Added:
-
-- In-memory registrar location service from `REGISTER` Contact headers
-- Expiry and unregister handling for basic registrations
-- `route_policies` config with glob-style dialed-user matching
-- Registrar-backed policy target: `target="registration"`
-- Static route-policy templates such as `sip:{user}@127.0.0.1:25082`
-- Legacy `b2bua_routes` exact-match fallback
-- B2BUA outbound INVITE, ACK, and BYE leg setup
-- B2BUA response forwarding for provisional and final INVITE responses
-- Dynamic SIPp smoke runner that registers any callee name before running the call
-- Unified B2BUA call-flow log with an ASCII SIP ladder for basic one-call SIPp smoke
-- SIPp B `100 Trying` is kept on the outbound leg to show the independent B2BUA-to-UAS INVITE transaction; it is not forwarded to SIPp A.
-- One-minute SIPp B2BUA media run with G.711u/G.711a RTP PCAP replay over the B2BUA media anchor.
-
-Current verified call path:
-
-```text
-SIPp A -> Mini Call Server B2BUA -> SIPp B
-```
-
-The 5 cps / 60 second hold smoke shape is supported by:
-
-```bash
-python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000
-```
-
-The load shape disables ladder logs by default to avoid creating one ladder file per call. Use `--ladder` when a sampled ladder is needed during a short run.
-
-Remaining Phase 6 hardening:
-
-- Multiple contacts per Address of Record
-- Forking and hunt groups
-- Failover retry on non-2xx or timeout
-- Route metrics and policy counters
-- Persistent registrar database
-- CANCEL support and richer in-dialog request handling
-
-## Phase 7: WebRTC Gateway
-
-Treat this as a separate milestone:
+Add browser-call capability:
 
 - SIP over WebSocket
-- ICE
-- STUN
+- ICE/STUN
 - DTLS-SRTP
 - Browser demo client
+- RTPengine-assisted WebRTC media path
 
-## Phase 8: AI Voicebot Integration
+### Phase 6: AI Voice Gateway
 
-Build a media pipeline:
-
-```text
-caller -> SIP server -> RTP -> STT -> LLM -> TTS -> RTP
-```
-
-Keep AI voicebot code behind a clean media adapter boundary so it does not complicate SIP transaction correctness.
-
-## Cross-Cutting Work
-
-### Replace `audioop`
-
-`audioop` is unavailable in newer Python versions. Evaluate:
-
-- `g711`
-- `numpy`
-- `soundfile`
-- `PyAV`
-- `ffmpeg` subprocess integration
-
-### Structured Logging
-
-Move toward call-scoped structured context:
+Keep AI integration as a later media pipeline:
 
 ```text
-[call=abc123] [dialog=leg-a] RTP packet received seq=812
+Caller -> SIP/B2BUA -> RTP media -> STT -> LLM -> TTS -> RTP back
 ```
 
-### Regression Discipline
+Possible features:
 
-Before each larger phase:
+- AI IVR
+- Voicebot
+- Call transcription
+- Telecom troubleshooting assistant
+- Agent-assist media fork
 
-1. Run unit tests.
-2. Run Python smoke clients.
-3. Run SIPp regression scenarios.
-4. Keep each run in a fresh artifacts folder.
+Keep AI code behind a clean media adapter so SIP/B2BUA logic remains stable.
 
-## Recommended Next Implementation
+## Guiding Rule
 
-Continue Phase 6 hardening with multi-contact registrar support, route failover, and hunt groups before moving to WebRTC gateway work.
+Every phase should include:
+
+- Focused unit tests
+- SIPp regression coverage
+- Clear logs
+- A pass/fail result report
+- No regression artifact overwrite
