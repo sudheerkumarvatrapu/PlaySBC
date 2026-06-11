@@ -4,18 +4,80 @@ Educational SIP/RTP lab server focused on local SIPp regression for B2BUA and me
 
 For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
 
+## Download
+
+macOS or Linux:
+
+```bash
+git clone https://github.com/sudheerkumarvatrapu/Mini-Call-Server.git
+cd Mini-Call-Server
+python3 --version
+```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/sudheerkumarvatrapu/Mini-Call-Server.git
+cd Mini-Call-Server
+py -3 --version
+```
+
+For Windows SIPp regression, use WSL/Ubuntu:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Then inside Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y git python3 sipp
+git clone https://github.com/sudheerkumarvatrapu/Mini-Call-Server.git
+cd Mini-Call-Server
+```
+
 ## SIPp Setup
 
-Install SIPp on macOS:
+macOS:
 
 ```bash
 brew install sipp
 ```
 
-Check SIPp is available:
+Ubuntu/Debian Linux:
+
+```bash
+sudo apt update
+sudo apt install -y sipp
+```
+
+Windows:
+
+```text
+Use WSL/Ubuntu and install SIPp there.
+```
+
+Check SIPp:
 
 ```bash
 sipp -v
+```
+
+## Local Test Order
+
+Start with command generation only:
+
+```bash
+python3 tools/run_sipp_regression.py --dry-run
+python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000 --dry-run
+```
+
+Then run the local SIPp tests:
+
+```bash
+python3 tools/run_sipp_regression.py --start-server
+python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000
 ```
 
 ## Managed SIPp Regression
