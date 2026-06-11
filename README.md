@@ -1,245 +1,35 @@
 # Mini Python Call Server
 
-This is a small educational SIP + RTP media server written in Python.
+Educational SIP/RTP lab server focused on local SIPp regression for B2BUA and media experiments.
 
-It supports:
+For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
 
-- SIP over UDP
-- `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
-- Auto-answer calls
-- SDP answer generation
-- RTP media receive/send
-- RTP echo audio
-- Basic G.711 transcoding between PCMU and PCMA when Python `audioop` is available
-- Per-call log files
-- Inbound RTP recording to WAV for G.711 PCMU/PCMA calls
-- JSON config file support
-- Optional SIP digest authentication for `REGISTER`
-- RFC 2833 DTMF detection
-- Explicit SIP dialog state tracking
-- UDP server transaction cache and INVITE response retransmission timers
-- RTP jitter, packet-loss, silence, clock-drift, and MOS-style analyzer metrics
-- Basic two-leg bridge room for anchored RTP relay
-- B2BUA outbound routing with registrar-backed endpoint lookup
-- Route policies for dynamic registered endpoints and static fallback targets
-- Unified B2BUA call-flow logs with SIP ladder diagrams
-- SIPp regression scenarios and fresh per-run artifacts
+## SIPp Setup
 
-It is meant for local testing and learning. It is not a production SIP server.
-
-## Run
-
-Port `5060` often needs elevated permissions or may already be used, so this example uses `5062`:
-
-```bash
-python3 mini_call_server.py --ip 0.0.0.0 --sip-port 5062 --rtp-min 10000 --rtp-max 10100 --debug
-```
-
-If your softphone is on another machine, advertise the real LAN IP instead:
-
-```bash
-python3 mini_call_server.py --ip 192.168.1.50 --sip-port 5062 --rtp-min 10000 --rtp-max 10100
-```
-
-You can also run from the example config:
-
-```bash
-python3 mini_call_server.py --config config.example.json
-```
-
-Command-line flags override config values, so this is valid for quick tests:
-
-```bash
-python3 mini_call_server.py --config config.example.json --sip-port 15062 --rtp-min 12000 --rtp-max 12010 --debug
-```
-
-Supported config keys:
-
-```json
-{
-  "sip_ip": "0.0.0.0",
-  "sip_port": 5062,
-  "rtp_min": 10000,
-  "rtp_max": 10100,
-  "log_dir": "logs",
-  "recording_dir": "recordings",
-  "artifact_root": "artifacts",
-  "run_id": "",
-  "default_codec": "PCMU",
-  "auth_realm": "mini-call-server",
-  "users": {
-    "1001": "secret-password"
-  },
-  "bridge_rooms": ["bridge"],
-  "b2bua_routes": {},
-  "route_policies": [],
-  "b2bua_ladder_logs": true,
-  "debug": false
-}
-```
-
-When `artifact_root` is set, each server run creates a fresh folder such as:
-
-```text
-artifacts/
-  run-20260526-104238/
-    logs/
-    recordings/
-```
-
-This keeps sanity and soak test outputs from overwriting older logs.
-
-The smoke clients also default to a fresh transcript folder under `artifacts/`:
-
-```bash
-python3 smoke_register_client.py
-python3 smoke_call_client.py
-python3 smoke_transaction_client.py
-python3 smoke_bridge_client.py
-```
-
-Use `--output-dir` when you want both clients to write transcripts into the same run folder.
-
-If `users` is non-empty, `REGISTER` requires SIP digest authentication. Leave `users` empty for open demo registration:
-
-```json
-{
-  "users": {}
-}
-```
-
-## Call Artifacts
-
-Each answered call writes review artifacts under the current working directory:
-
-```text
-logs/
-  smoke-call-001_127.0.0.1.log
-recordings/
-  smoke-call-001_127.0.0.1.wav
-```
-
-You can choose different artifact folders:
-
-```bash
-python3 mini_call_server.py --sip-port 5062 --log-dir call-logs --recording-dir call-recordings
-```
-
-The per-call log includes SIP flow, SDP codec choice, RTP port, packet counts, byte counts, call duration, and recording path. WAV recording requires Python `audioop` so G.711 PCMU/PCMA packets can be converted to 16-bit PCM.
-
-## Softphone Test
-
-Use a softphone such as Linphone, Zoiper, or MicroSIP.
-
-Example account settings:
-
-- SIP server: your machine IP
-- SIP port: `5062`
-- Transport: UDP
-- Username: any value, for example `1001`
-- Password: use the configured password when `users` is enabled, for example `secret-password`
-
-Then call any SIP URI at the server, for example:
-
-```text
-sip:echo@127.0.0.1:5062
-```
-
-The server auto-answers and echoes received RTP audio back to the caller.
-
-DTMF digits sent as RFC 2833 `telephone-event/8000` are logged in the per-call log.
-
-Each call also tracks the dialog lifecycle:
-
-```text
-INIT -> RINGING -> ANSWERED -> TERMINATED
-```
-
-The dialog record keeps the `Call-ID`, local and remote tags, branch IDs, CSeq values, and lifecycle timestamps. UDP request retransmissions reuse cached responses. Final INVITE responses are retransmitted on timers until an ACK arrives or the transaction expires.
-
-The call summary also exports RTP analyzer metrics such as packet loss, jitter, late packets, silence percentage, clock drift, and a simple MOS-style estimate.
-
-For a basic anchored bridge test, have two callers dial:
-
-```text
-sip:bridge@127.0.0.1:5062
-```
-
-The first leg waits in the `bridge` room. The second leg pairs with it, and RTP is relayed between the two server RTP sockets once both endpoints have sent media.
-
-## B2BUA Routing
-
-The B2BUA path can route by live registrar contact. Start from:
-
-```bash
-python3 mini_call_server.py --config config.b2bua.example.json
-```
-
-The B2BUA example config uses an open lab registrar and a route policy:
-
-```json
-{
-  "users": {},
-  "route_policies": [
-    {
-      "name": "registered-endpoints",
-      "match": "*",
-      "target": "registration",
-      "priority": 10
-    }
-  ]
-}
-```
-
-With that policy, a call to `sip:any-user@server` routes to the current `Contact` registered for `any-user`.
-
-Legacy static routing is still available as a fallback:
-
-```json
-{
-  "b2bua_routes": {
-    "support": "sip:support@127.0.0.1:25082"
-  }
-}
-```
-
-You can also use route-policy templates:
-
-```json
-{
-  "route_policies": [
-    {
-      "name": "lab-static",
-      "match": "lab-*",
-      "target": "sip:{user}@127.0.0.1:25082",
-      "priority": 20
-    }
-  ]
-}
-```
-
-B2BUA call logs can include a unified flow file named like `b2bua_<call-id>.log`. It records the route decision, both SIP legs, and a final ASCII SIP ladder for:
-
-```text
-SIPp A -> B2BUA -> SIPp B
-```
-
-The SIPp smoke runner enables ladder logs by default only for the basic one-call case. Load runs disable ladder logs by default so large tests do not create one ladder file per call.
-
-In the basic B2BUA SIPp call, SIPp B may send its own `100 Trying` on the outbound leg. That is valid SIP behavior: the inbound `100 Trying` is generated by the B2BUA for SIPp A, while SIPp B's `100 Trying` belongs only to the separate B2BUA-to-SIPp-B INVITE transaction and is not forwarded back to SIPp A.
-
-## SIPp Regression Harness
-
-Install [SIPp](https://github.com/SIPp/sipp) on macOS:
+Install SIPp on macOS:
 
 ```bash
 brew install sipp
 ```
 
-Run the scenario harness against a managed local mini server:
+Check SIPp is available:
+
+```bash
+sipp -v
+```
+
+## Managed SIPp Regression
+
+Run all current SIPp regression scenarios against a managed local server:
 
 ```bash
 python3 tools/run_sipp_regression.py --start-server
+```
+
+Run one scenario:
+
+```bash
+python3 tools/run_sipp_regression.py --start-server --scenario options --calls 10 --rate 5
 ```
 
 Available scenarios:
@@ -251,121 +41,92 @@ call_echo
 invalid_bye
 ```
 
-Run a focused scenario:
-
-```bash
-python3 tools/run_sipp_regression.py --start-server --scenario options --calls 10 --rate 5
-```
-
-Prepare and inspect all SIPp commands without requiring SIPp to be installed:
+Preview the SIPp commands without running SIPp:
 
 ```bash
 python3 tools/run_sipp_regression.py --dry-run
 ```
 
-Every harness execution creates a new folder:
+## B2BUA SIPp Regression
 
-```text
-artifacts/
-  sipp/
-    sipp-20260602-120000/
-      summary.json
-      options/
-      register_digest/
-      call_echo/
-```
-
-Run the registrar-backed B2BUA SIPp smoke:
+Run a basic SIPp A -> B2BUA -> SIPp B call:
 
 ```bash
 python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000
 ```
 
-That basic call generates a unified B2BUA ladder log.
-
-Run a one-minute basic B2BUA call with G.711 RTP media replay:
+Run a one-minute G.711u media call:
 
 ```bash
 python3 tools/run_b2bua_sipp_smoke.py --callee media-user --calls 1 --rate 1 --hold-ms 60000 --media-codec PCMU
 ```
 
-Use `--media-codec PCMA` for G.711 A-law. The default media driver keeps SIPp responsible for SIP signaling and uses `tools/play_g711_pcap_rtp.py` to replay `sipp/scenarios/pcap/g711u_60s.pcap` or `sipp/scenarios/pcap/g711a_60s.pcap` over normal UDP. This avoids raw-socket permissions on macOS while still producing real RTP through the B2BUA media anchor.
-
-Run a basic load shape at 5 cps with a one-minute hold:
+Run a one-minute G.711a media call:
 
 ```bash
-python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000
+python3 tools/run_b2bua_sipp_smoke.py --callee media-user --calls 1 --rate 1 --hold-ms 60000 --media-codec PCMA
 ```
 
-That load run does not generate ladder logs unless you explicitly add `--ladder`. The runner dynamically registers the callee contact, starts SIPp B as the UAS, starts SIPp A as the UAC, and writes a fresh artifact folder containing SIPp traces, server logs, and summary JSON.
+Run the basic 5 cps / 60 second hold load shape:
 
-If you want SIPp itself to execute `play_pcap_audio`, add `--media-driver sipp-pcap`; on macOS that mode requires a SIPp build with PCAP support and root/raw-socket permission.
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000 --no-ladder
+```
 
-### Manual SIPp Commands
+Preview the B2BUA commands without running SIPp:
 
-The managed SIPp runners are the easiest path, but the server also works with manual SIPp commands.
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000 --dry-run
+```
 
-For a direct SIPp UAC call into the mini server, start the server:
+Notes:
+
+- The one-call B2BUA run generates a unified SIP ladder log by default.
+- Load runs should use `--no-ladder`.
+- The B2BUA runner dynamically registers the callee contact before starting the call.
+- G.711 media runs use Python UDP PCAP replay by default, so macOS raw-socket permission is not required.
+- `--media-driver sipp-pcap` can be used only when SIPp has PCAP support and the OS allows raw-socket packet replay.
+
+## Local Artifacts
+
+Every regression run writes a fresh folder under:
+
+```text
+artifacts/sipp/
+```
+
+Important files:
+
+```text
+summary.json
+server/stdout.log
+sipp-a-uac/
+sipp-b-uas/
+server-artifacts/server/logs/
+```
+
+## Manual SIPp Debug Commands
+
+For a direct SIPp UAC call into the mini server:
 
 ```bash
 python3 mini_call_server.py --ip 127.0.0.1 --sip-port 5062 --rtp-min 10000 --rtp-max 10100 --debug
 ```
 
-Then run SIPp UAC:
-
 ```bash
 sipp 127.0.0.1:5062 -sn uac -s 1001 -m 1 -r 1 -trace_msg -trace_err
 ```
 
-For a full manual B2BUA call, use the custom SIPp XML scenarios because they include PCMU, PCMA, RTP, and telephone-event payload `101`.
-
-Start SIPp B as the UAS:
+For manual B2BUA scenario debugging, start SIPp B:
 
 ```bash
 sipp -sf sipp/scenarios/b2bua_uas_b.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25082 -m 1 -trace_msg -trace_err -trace_logs -min_rtp_port 27000 -max_rtp_port 27200
 ```
 
-In another terminal, start the server with a route to SIPp B. This one-line config is useful for quick local manual testing:
-
-```bash
-python3 - <<'PY'
-import json
-
-config = {
-    "sip_ip": "127.0.0.1",
-    "sip_port": 25062,
-    "rtp_min": 25100,
-    "rtp_max": 25400,
-    "artifact_root": "artifacts",
-    "users": {},
-    "route_policies": [
-        {"name": "manual-sipp-b", "match": "alice", "target": "sip:alice@127.0.0.1:25082", "priority": 10}
-    ],
-    "b2bua_ladder_logs": True,
-    "debug": True,
-}
-
-with open("config.manual-sipp.json", "w", encoding="utf-8") as fh:
-    json.dump(config, fh, indent=2)
-    fh.write("\n")
-PY
-python3 mini_call_server.py --config config.manual-sipp.json
-```
-
-Then start SIPp A as the UAC:
+Then start SIPp A toward a running mini-call-server B2BUA on port `25062`:
 
 ```bash
 sipp 127.0.0.1:25062 -sf sipp/scenarios/b2bua_uac_a.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25081 -m 1 -r 1 -d 1000 -trace_msg -trace_err -trace_logs -min_rtp_port 26000 -max_rtp_port 26200
 ```
 
-The manual B2BUA call writes server artifacts under `artifacts/run-*/logs/`, including the unified `b2bua_*.log` ladder file when `b2bua_ladder_logs` is enabled.
-
-The broader engineering path is documented in [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
-
-## Notes
-
-- Open UDP SIP port `5062` and RTP ports `10000-10100` in your firewall.
-- NAT traversal, TLS, and SRTP are intentionally not included.
-- Python 3.13 may not include `audioop`; in that case same-codec RTP echo still works, but PCMU/PCMA transcoding falls back to pass-through.
-- If `audioop` is unavailable, WAV recording is skipped with a per-call log warning.
-- Use `config.local.json` for machine-specific config; it is ignored by Git.
+For full local B2BUA validation, prefer `tools/run_b2bua_sipp_smoke.py` because it starts SIPp B, registers the callee dynamically, starts the server, runs SIPp A, and collects logs in one run folder.
