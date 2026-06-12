@@ -18,6 +18,7 @@ Implemented:
 - 5 cps / 60 second SIPp load shape
 - 60 second G.711u/G.711a media replay through the B2BUA path
 - Unified B2BUA ladder logs for basic calls
+- Optional RTPengine NG control backend scaffold for B2BUA SDP offer/answer/delete
 - Unit tests and SIPp regression harness
 
 ## Next Focus
@@ -50,7 +51,7 @@ Add more SIPp cases:
 
 ### Phase 3: RTPengine Media Backend
 
-Add optional media backend selection:
+Status: started. Added optional media backend selection:
 
 ```json
 {
@@ -66,7 +67,7 @@ Python B2BUA = SIP, routing, policy, logs
 RTPengine    = RTP/SRTP anchoring, SDP rewrite, recording, DTMF/media controls
 ```
 
-Keep the current internal RTP relay as a fallback.
+Keep the current internal RTP relay as a fallback. Next step is local runtime validation with a real RTPengine process.
 
 ### Phase 4: Enterprise SBC Lab Features
 

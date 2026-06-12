@@ -193,6 +193,7 @@ class SippScenarioTests(unittest.TestCase):
             self.assertFalse(summary["ladder_enabled"])
             server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
             self.assertFalse(server_config["b2bua_ladder_logs"])
+            self.assertEqual(server_config["media_backend"], "internal")
             self.assertTrue((run_dir / "server-command.txt").exists())
             self.assertTrue((run_dir / "uac-command.txt").exists())
             self.assertTrue((run_dir / "uas-command.txt").exists())
@@ -266,6 +267,36 @@ class SippScenarioTests(unittest.TestCase):
             server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
             self.assertTrue(summary["ladder_enabled"])
             self.assertTrue(server_config["b2bua_ladder_logs"])
+
+    def test_b2bua_dry_run_can_generate_rtpengine_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "b2bua-rtpengine-dry-run",
+                    "--callee",
+                    "rtpcallee",
+                    "--media-backend",
+                    "rtpengine",
+                    "--rtpengine-url",
+                    "udp://127.0.0.1:2223",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            run_dir = Path(tmp) / "b2bua-rtpengine-dry-run"
+            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["media_backend"], "rtpengine")
+            self.assertEqual(server_config["media_backend"], "rtpengine")
+            self.assertEqual(server_config["rtpengine_url"], "udp://127.0.0.1:2223")
 
 
 def argparse_namespace(**values):

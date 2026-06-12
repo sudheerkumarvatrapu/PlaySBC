@@ -172,6 +172,9 @@ def write_dynamic_config(args: argparse.Namespace, run_dir: Path) -> Path:
             }
         ],
         "b2bua_ladder_logs": args.ladder_enabled,
+        "media_backend": args.media_backend,
+        "rtpengine_url": args.rtpengine_url,
+        "rtpengine_timeout": args.rtpengine_timeout,
         "debug": True,
     }
     config_path = run_dir / "server-config.json"
@@ -298,6 +301,8 @@ def write_summary(run_dir: Path, args: argparse.Namespace, results: List[SmokeRe
         "media_codec": args.media_codec,
         "media_driver": args.media_driver if args.media_enabled else "",
         "media_pcap": args.media_pcap_resolved if args.media_enabled else "",
+        "media_backend": args.media_backend,
+        "rtpengine_url": args.rtpengine_url if args.media_backend == "rtpengine" else "",
         "ladder_enabled": args.ladder_enabled,
         "flow_logs": flow_logs,
         "results": [asdict(result) for result in results],
@@ -326,6 +331,9 @@ def main() -> int:
     parser.add_argument("--media-pcap", help="Override the RTP PCAP file used with --media-codec")
     parser.add_argument("--media-driver", choices=("python", "sipp-pcap"), default="python", help="Use Python UDP replay or SIPp play_pcap_audio for media")
     parser.add_argument("--media-start-delay", type=float, default=1.0, help="Seconds to wait after starting SIPp A before Python media replay starts")
+    parser.add_argument("--media-backend", choices=("internal", "rtpengine"), default="internal")
+    parser.add_argument("--rtpengine-url", default="udp://127.0.0.1:2223")
+    parser.add_argument("--rtpengine-timeout", type=float, default=3.0)
     parser.add_argument("--ladder", dest="ladder", action="store_true", default=None, help="Force unified B2BUA ladder logs on")
     parser.add_argument("--no-ladder", dest="ladder", action="store_false", help="Force unified B2BUA ladder logs off")
     parser.add_argument("--output-root", default=str(ROOT / "artifacts" / "sipp"))

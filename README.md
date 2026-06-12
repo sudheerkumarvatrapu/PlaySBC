@@ -135,6 +135,12 @@ Run the basic 5 cps / 60 second hold load shape:
 python3 tools/run_b2bua_sipp_smoke.py --callee load-user --calls 5 --rate 5 --hold-ms 60000 --no-ladder
 ```
 
+Run the same B2BUA harness with RTPengine as the media backend:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000 --media-backend rtpengine --rtpengine-url udp://127.0.0.1:2223
+```
+
 Preview the B2BUA commands without running SIPp:
 
 ```bash
@@ -148,6 +154,7 @@ Notes:
 - The B2BUA runner dynamically registers the callee contact before starting the call.
 - G.711 media runs use Python UDP PCAP replay by default, so macOS raw-socket permission is not required.
 - `--media-driver sipp-pcap` can be used only when SIPp has PCAP support and the OS allows raw-socket packet replay.
+- RTPengine mode expects RTPengine NG control on `udp://127.0.0.1:2223`; internal media remains the default.
 
 ## Local Artifacts
 

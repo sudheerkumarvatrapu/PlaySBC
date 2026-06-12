@@ -105,7 +105,10 @@ class ConfigTests(unittest.TestCase):
                     '"users": {"1001": "secret"}, '
                     '"b2bua_routes": {"1002": "sip:1002@127.0.0.1:25082"}, '
                     '"route_policies": [{"name": "registered", "match": "*", "target": "registration"}], '
-                    '"b2bua_ladder_logs": false}'
+                    '"b2bua_ladder_logs": false, '
+                    '"media_backend": "rtpengine", '
+                    '"rtpengine_url": "udp://127.0.0.1:2223", '
+                    '"rtpengine_timeout": 1.5}'
                 ),
                 encoding="utf-8",
             )
@@ -130,6 +133,17 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.b2bua_routes["1002"], "sip:1002@127.0.0.1:25082")
             self.assertEqual(config.route_policies[0]["name"], "registered")
             self.assertFalse(config.b2bua_ladder_logs)
+            self.assertEqual(config.media_backend, "rtpengine")
+            self.assertEqual(config.rtpengine_url, "udp://127.0.0.1:2223")
+            self.assertEqual(config.rtpengine_timeout, 1.5)
+
+    def test_invalid_rtpengine_config_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text('{"media_backend": "rtpengine", "rtpengine_url": "tcp://127.0.0.1:2223"}', encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                server.load_config_file(str(config_path))
 
     def test_resolve_artifact_dirs_creates_unique_run_paths(self):
         with tempfile.TemporaryDirectory() as tmp:

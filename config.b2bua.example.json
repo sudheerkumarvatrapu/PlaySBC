@@ -21,5 +21,8 @@
     }
   ],
   "b2bua_ladder_logs": true,
+  "media_backend": "internal",
+  "rtpengine_url": "udp://127.0.0.1:2223",
+  "rtpengine_timeout": 3.0,
   "debug": true
 }

@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
+from rtp.rtpengine import RtpengineClient, RtpengineError, parse_rtpengine_url
 from sip.dialog import DialogError, DialogManager
 from sip.transaction import TransactionManager
 
@@ -76,6 +77,9 @@ class ServerConfig:
     b2bua_routes: Dict[str, str] = field(default_factory=dict)
     route_policies: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
     b2bua_ladder_logs: bool = True
+    media_backend: str = "internal"
+    rtpengine_url: str = "udp://127.0.0.1:2223"
+    rtpengine_timeout: float = 3.0
     debug: bool = False
 
     @property
@@ -99,8 +103,13 @@ SERVER_CONFIG_KEYS = {
     "b2bua_routes",
     "route_policies",
     "b2bua_ladder_logs",
+    "media_backend",
+    "rtpengine_url",
+    "rtpengine_timeout",
     "debug",
 }
+
+MEDIA_BACKENDS = {"internal", "rtpengine"}
 
 DTMF_EVENTS = {
     0: "0",
@@ -405,6 +414,10 @@ class B2BUACall:
     route_policy: str
     route_source: str
     flow_log: B2BUAFlowLog
+    media_backend: str = "internal"
+    rtpengine_call_id: str = ""
+    rtpengine_from_tag: str = ""
+    rtpengine_to_tag: str = ""
     outbound_to_header: str = ""
     outbound_contact_uri: str = ""
     outbound_cseq: int = 1
@@ -816,6 +829,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_routes: Dict[str, str],
         route_policies: Tuple[Dict[str, Any], ...],
         b2bua_ladder_logs: bool,
+        media_backend: str = "internal",
+        rtpengine_client: Optional[RtpengineClient] = None,
     ):
         self.local_ip = local_ip
         self.local_port = local_port
@@ -826,6 +841,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.bridge_rooms = set(bridge_rooms)
         self.b2bua_routes = b2bua_routes
         self.b2bua_ladder_logs = b2bua_ladder_logs
+        self.media_backend = media_backend
+        self.rtpengine_client = rtpengine_client
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, Registration] = {}
@@ -969,6 +986,16 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.cleanup_registrations()
             route = self.routing_engine.resolve(target_user, self.registrations)
             if route:
+                if self.media_backend == "rtpengine":
+                    await self.handle_b2bua_invite_rtpengine(
+                        message=message,
+                        dialog=dialog,
+                        to_header=to_header,
+                        inbound_call_id=call_id,
+                        target_user=target_user,
+                        route=route,
+                    )
+                    return
                 await self.handle_b2bua_invite(
                     message=message,
                     dialog=dialog,
@@ -1041,16 +1068,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if method == "ACK":
             call_id = message.header("call-id")
             session = self.media.get_session(call_id)
-            if session:
+            b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+            if session or b2bua_call:
                 try:
                     dialog = self.dialogs.acknowledge(call_id, message.header("cseq"))
                 except DialogError as exc:
                     logging.info("Ignored invalid ACK for %s: %s", call_id, exc)
                     return
                 self.transactions.acknowledge_invite(call_id, message.header("cseq"))
-                session.mark_ack()
-                session.log("DIALOG STATE", f"state={dialog.state.name} acknowledged=true")
-                b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+                if session:
+                    session.mark_ack()
+                    session.log("DIALOG STATE", f"state={dialog.state.name} acknowledged=true")
                 if b2bua_call:
                     b2bua_call.flow_log.sip("SIPp A", "B2BUA", "ACK")
                     self.send_outbound_ack(b2bua_call)
@@ -1249,12 +1277,141 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"inbound_call_id={inbound_call_id} outbound_payload={CODEC_NAMES.get(outbound_rtp.preferred_payload, outbound_rtp.preferred_payload)}",
         )
 
+    async def handle_b2bua_invite_rtpengine(
+        self,
+        message: SipMessage,
+        dialog: Any,
+        to_header: str,
+        inbound_call_id: str,
+        target_user: str,
+        route: RouteResult,
+    ) -> None:
+        if not self.rtpengine_client:
+            self.send_response(message, 500, "RTPengine Not Configured", to_header=to_header)
+            return
+
+        target = route.target
+        flow_log = B2BUAFlowLog(
+            self.media.log_dir,
+            inbound_call_id,
+            target_user,
+            route,
+            enabled=self.b2bua_ladder_logs,
+        )
+        flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
+        flow_log.sip("B2BUA", "SIPp A", "100 Trying")
+        flow_log.write("MEDIA BACKEND", f"backend=rtpengine target={target.uri}")
+
+        from_tag = extract_header_tag(message.header("from")) or dialog.remote_tag or secrets.token_hex(6)
+        try:
+            offer_response = await self.rtpengine_client.offer(
+                call_id=inbound_call_id,
+                from_tag=from_tag,
+                sdp=message.body,
+            )
+            outbound_body = str(offer_response.get("sdp") or "")
+            if not outbound_body:
+                raise RtpengineError("RTPengine offer response did not include SDP")
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            flow_log.write("RTPENGINE OFFER FAILED", str(exc))
+            self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
+            return
+
+        outbound_call_id = make_call_id()
+        outbound_from = f"Mini B2BUA <sip:b2bua@{self.local_ip}:{self.local_port}>;tag={secrets.token_hex(6)}"
+        b2bua_call = B2BUACall(
+            inbound_call_id=inbound_call_id,
+            outbound_call_id=outbound_call_id,
+            outbound_target=target,
+            outbound_from_header=outbound_from,
+            target_user=target_user,
+            route_policy=route.policy_name,
+            route_source=route.source,
+            flow_log=flow_log,
+            media_backend="rtpengine",
+            rtpengine_call_id=inbound_call_id,
+            rtpengine_from_tag=from_tag,
+        )
+        self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
+        self.b2bua_calls_by_outbound[outbound_call_id] = b2bua_call
+
+        response_queue: asyncio.Queue = asyncio.Queue()
+        self.pending_outbound_responses[outbound_call_id] = response_queue
+        flow_log.write(
+            "B2BUA ROUTE",
+            f"target_user={target_user} route={target.uri} outbound_call_id={outbound_call_id} route_source={route.source}",
+        )
+        self.send_outbound_invite(b2bua_call, outbound_body)
+
+        try:
+            final_response = await self.wait_for_outbound_invite(
+                response_queue,
+                message,
+                to_header,
+                None,
+                b2bua_call,
+            )
+        except asyncio.TimeoutError:
+            flow_log.write("B2BUA FAILURE", f"route={target.uri} reason=outbound_invite_timeout")
+            self.send_response(message, 480, "Temporarily Unavailable", to_header=to_header)
+            self.cleanup_b2bua_call(b2bua_call)
+            return
+        finally:
+            self.pending_outbound_responses.pop(outbound_call_id, None)
+
+        status = final_response.status_code
+        reason = final_response.reason_phrase or "Upstream Response"
+        b2bua_call.outbound_to_header = final_response.header("to")
+        b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
+        if status < 200 or status >= 300:
+            flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
+            self.send_outbound_ack(b2bua_call)
+            flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
+            self.send_response(message, status, reason, to_header=to_header)
+            self.cleanup_b2bua_call(b2bua_call)
+            return
+
+        to_tag = extract_header_tag(final_response.header("to")) or secrets.token_hex(6)
+        b2bua_call.rtpengine_to_tag = to_tag
+        try:
+            answer_response = await self.rtpengine_client.answer(
+                call_id=inbound_call_id,
+                from_tag=from_tag,
+                to_tag=to_tag,
+                sdp=final_response.body,
+            )
+            answer_sdp = str(answer_response.get("sdp") or "")
+            if not answer_sdp:
+                raise RtpengineError("RTPengine answer response did not include SDP")
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            flow_log.write("RTPENGINE ANSWER FAILED", str(exc))
+            self.send_outbound_ack(b2bua_call)
+            self.send_outbound_bye(b2bua_call)
+            self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
+            self.cleanup_b2bua_call(b2bua_call)
+            return
+
+        self.send_response(
+            message,
+            200,
+            "OK",
+            body=answer_sdp,
+            to_header=to_header,
+            extra_headers={
+                "Contact": f"<sip:python-call-server@{self.local_ip}:{self.local_port}>",
+                "Content-Type": "application/sdp",
+            },
+        )
+        flow_log.sip("B2BUA", "SIPp A", "200 OK")
+        flow_log.write("RTPENGINE ANSWER", f"call_id={inbound_call_id} from_tag={from_tag} to_tag={to_tag}")
+        dialog.mark_answered()
+
     async def wait_for_outbound_invite(
         self,
         response_queue: asyncio.Queue,
         inbound_request: SipMessage,
         to_header: str,
-        inbound_rtp: RtpSession,
+        inbound_rtp: Optional[RtpSession],
         b2bua_call: B2BUACall,
         timeout: float = 10.0,
     ) -> SipMessage:
@@ -1265,7 +1422,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             b2bua_call.flow_log.sip("SIPp B", "B2BUA", f"{status} {reason}")
             if status < 200:
                 if status != 100:
-                    body = response.body if response.body else ""
+                    body = ""
+                    if b2bua_call.media_backend != "rtpengine" and response.body:
+                        body = response.body
                     extra_headers = {"Content-Type": response.header("content-type")} if body else None
                     b2bua_call.flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
                     self.send_response(
@@ -1276,7 +1435,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                         to_header=to_header,
                         extra_headers=extra_headers,
                     )
-                    inbound_rtp.log("SIP RESPONSE", f"{status} {reason} from outbound")
+                    if inbound_rtp:
+                        inbound_rtp.log("SIP RESPONSE", f"{status} {reason} from outbound")
                 continue
             return response
 
@@ -1380,9 +1540,31 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_call.finalized = True
         b2bua_call.flow_log.write("CALL END", f"reason={reason}")
         b2bua_call.flow_log.render_ladder()
+        self.schedule_rtpengine_delete(b2bua_call)
         self.b2bua_calls_by_inbound.pop(b2bua_call.inbound_call_id, None)
         self.b2bua_calls_by_outbound.pop(b2bua_call.outbound_call_id, None)
         self.pending_outbound_responses.pop(b2bua_call.outbound_call_id, None)
+
+    def schedule_rtpengine_delete(self, b2bua_call: B2BUACall) -> None:
+        if b2bua_call.media_backend != "rtpengine" or not self.rtpengine_client:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._delete_rtpengine_call(b2bua_call))
+
+    async def _delete_rtpengine_call(self, b2bua_call: B2BUACall) -> None:
+        assert self.rtpengine_client is not None
+        try:
+            await self.rtpengine_client.delete(
+                call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
+                from_tag=b2bua_call.rtpengine_from_tag,
+                to_tag=b2bua_call.rtpengine_to_tag,
+            )
+            b2bua_call.flow_log.write("RTPENGINE DELETE", "status=ok")
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            b2bua_call.flow_log.write("RTPENGINE DELETE FAILED", str(exc))
 
     def cleanup_registrations(self) -> None:
         now = time.time()
@@ -1514,6 +1696,11 @@ def ensure_tag(to_header: str) -> str:
     if "tag=" in to_header.lower():
         return to_header
     return f"{to_header};tag={random.randint(100000, 999999)}"
+
+
+def extract_header_tag(header_value: str) -> str:
+    match = re.search(r"(?:^|;)\s*tag=([^;\s>]+)", header_value, re.IGNORECASE)
+    return match.group(1) if match else ""
 
 
 def extract_user(header_value: str) -> Optional[str]:
@@ -1743,6 +1930,8 @@ def load_config_file(path: Optional[str]) -> ServerConfig:
 def coerce_config_value(key: str, value: Any) -> Any:
     if key in {"sip_port", "rtp_min", "rtp_max"}:
         return int(value)
+    if key == "rtpengine_timeout":
+        return float(value)
     if key in {"debug", "b2bua_ladder_logs"}:
         if isinstance(value, bool):
             return value
@@ -1772,24 +1961,37 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if isinstance(value, list):
             return tuple(str(room) for room in value)
         raise ValueError("bridge_rooms must be a string or list of strings")
-    if key in {"sip_ip", "log_dir", "recording_dir", "artifact_root", "run_id", "default_codec", "auth_realm"}:
+    if key in {
+        "sip_ip",
+        "log_dir",
+        "recording_dir",
+        "artifact_root",
+        "run_id",
+        "default_codec",
+        "auth_realm",
+        "media_backend",
+        "rtpengine_url",
+    }:
         return str(value)
     return value
 
 
 def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> ServerConfig:
     overrides = {
-        "sip_ip": args.sip_ip,
-        "sip_port": args.sip_port,
-        "rtp_min": args.rtp_min,
-        "rtp_max": args.rtp_max,
-        "log_dir": args.log_dir,
-        "recording_dir": args.recording_dir,
-        "artifact_root": args.artifact_root,
-        "run_id": args.run_id,
-        "default_codec": args.default_codec,
-        "auth_realm": args.auth_realm,
-        "debug": args.debug,
+        "sip_ip": getattr(args, "sip_ip", None),
+        "sip_port": getattr(args, "sip_port", None),
+        "rtp_min": getattr(args, "rtp_min", None),
+        "rtp_max": getattr(args, "rtp_max", None),
+        "log_dir": getattr(args, "log_dir", None),
+        "recording_dir": getattr(args, "recording_dir", None),
+        "artifact_root": getattr(args, "artifact_root", None),
+        "run_id": getattr(args, "run_id", None),
+        "default_codec": getattr(args, "default_codec", None),
+        "auth_realm": getattr(args, "auth_realm", None),
+        "media_backend": getattr(args, "media_backend", None),
+        "rtpengine_url": getattr(args, "rtpengine_url", None),
+        "rtpengine_timeout": getattr(args, "rtpengine_timeout", None),
+        "debug": getattr(args, "debug", None),
     }
     for key, value in overrides.items():
         if value is not None:
@@ -1807,6 +2009,13 @@ def validate_config(config: ServerConfig) -> None:
         raise ValueError("RTP port range must be within 1-65535 and rtp_min must be <= rtp_max")
     if not config.auth_realm:
         raise ValueError("auth_realm must not be empty")
+    config.media_backend = config.media_backend.lower()
+    if config.media_backend not in MEDIA_BACKENDS:
+        raise ValueError(f"media_backend must be one of {', '.join(sorted(MEDIA_BACKENDS))}")
+    if config.rtpengine_timeout <= 0:
+        raise ValueError("rtpengine_timeout must be greater than 0")
+    if config.media_backend == "rtpengine":
+        parse_rtpengine_url(config.rtpengine_url)
     for user, route_uri in config.b2bua_routes.items():
         if not user:
             raise ValueError("b2bua_routes keys must not be empty")
@@ -1846,6 +2055,9 @@ async def main() -> None:
     parser.add_argument("--run-id", help="Run folder name when --artifact-root is used")
     parser.add_argument("--default-codec", type=str.upper, choices=sorted(CODEC_PAYLOADS), help="Preferred answer codec")
     parser.add_argument("--auth-realm", help="SIP digest authentication realm")
+    parser.add_argument("--media-backend", choices=sorted(MEDIA_BACKENDS), help="B2BUA media backend")
+    parser.add_argument("--rtpengine-url", help="RTPengine NG control URL, for example udp://127.0.0.1:2223")
+    parser.add_argument("--rtpengine-timeout", type=float, help="RTPengine control timeout in seconds")
     parser.add_argument("--debug", action="store_true", default=None, help="Enable debug logging")
     args = parser.parse_args()
 
@@ -1872,6 +2084,10 @@ async def main() -> None:
         log_dir,
         recording_dir,
     )
+    rtpengine_client = None
+    if config.media_backend == "rtpengine":
+        rtpengine_client = RtpengineClient(config.rtpengine_url, timeout=config.rtpengine_timeout)
+        logging.info("Using RTPengine media backend at %s", config.rtpengine_url)
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(
         lambda: SipServerProtocol(
@@ -1885,6 +2101,8 @@ async def main() -> None:
             config.b2bua_routes,
             config.route_policies,
             config.b2bua_ladder_logs,
+            config.media_backend,
+            rtpengine_client,
         ),
         local_addr=(config.sip_ip, config.sip_port),
     )
