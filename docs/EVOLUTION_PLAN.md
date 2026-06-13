@@ -20,6 +20,7 @@ Implemented:
 - SBC-style category logs: `log.sip`, `log.media`, `log.transcoding`, `log.platform`, `log.networking`, `log.call`, `log.sipp`, and transport logs such as `log.udp`
 - Consolidated B2BUA SIPp run folders with no separate saved SIPp A/B leg folders
 - Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine, registered inbound/outbound, and 5 cps / 60 second load
+- SIPp XML regression coverage for the former Python smoke scenarios: digest registration, transaction replay, invalid BYE, media call, and two-leg bridge
 - Optional RTPengine NG control backend scaffold for B2BUA SDP offer/answer/delete
 - Persistent project logs only for B2BUA SIPp call runs by default
 - Unit tests and SIPp regression harness

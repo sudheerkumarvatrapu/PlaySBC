@@ -90,20 +90,25 @@ python3 tools/run_sipp_regression.py --start-server
 
 By default this runner uses a temporary output directory and does not create project logs. Add `--output-root <dir>` only when you want to keep the generic regression output.
 
-Run one scenario:
+Run one smoke scenario:
 
 ```bash
-python3 tools/run_sipp_regression.py --start-server --scenario options --calls 10 --rate 5
+python3 tools/run_sipp_regression.py --start-server --scenario smoke_basic_call_media
 ```
 
-Available scenarios:
+Default smoke scenarios:
 
 ```text
-options
-register_digest
-call_echo
-invalid_bye
+smoke_register_digest
+smoke_transaction_cache
+smoke_invalid_bye
+smoke_basic_call_media
+smoke_bridge_two_leg
 ```
+
+These replace the older Python smoke clients. Legacy scenario names such as `options`, `register_digest`, `call_echo`, and `invalid_bye` are still accepted for targeted debugging.
+
+`smoke_basic_call_media` uses SIPp for the SIP dialog and a normal UDP PCAP sidecar for G.711 RTP echo verification, avoiding SIPp's root-only raw-socket PCAP playback requirement on macOS.
 
 Preview the SIPp commands without running SIPp:
 
@@ -211,7 +216,7 @@ log.sipp
 
 The SIP ladder is written into `log.sip`. B2BUA call lifecycle events are written into `log.call`. SIPp tool output is consolidated into `log.sipp`. The saved run folder does not contain separate SIPp A or SIPp B leg folders.
 
-Unit tests do not create log files. Legacy smoke clients do not write transcripts unless `--output-dir <dir>` is provided. The generic SIPp regression runner writes to a temporary directory unless `--output-root <dir>` is provided.
+Unit tests do not create log files. The generic SIPp regression runner writes to a temporary directory unless `--output-root <dir>` is provided.
 
 ## Manual SIPp Debug Commands
 

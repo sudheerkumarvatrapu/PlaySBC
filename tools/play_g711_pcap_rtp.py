@@ -75,13 +75,18 @@ def extract_rtp(packet: bytes) -> bytes:
     return packet[rtp_offset:]
 
 
-def replay(path: Path, host: str, port: int, duration_ms: int) -> int:
+def replay(path: Path, host: str, port: int, duration_ms: int, source_port: int = 0, expect_echo: bool = False) -> int:
     started = time.monotonic()
     sent = 0
+    echo_received = False
     max_seconds = duration_ms / 1000 if duration_ms > 0 else None
     destination = (host, port)
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        if source_port:
+            sock.bind(("", source_port))
+        if expect_echo:
+            sock.settimeout(1)
         for packet_time, rtp in iter_rtp_from_pcap(path):
             if max_seconds is not None and packet_time > max_seconds:
                 break
@@ -94,8 +99,16 @@ def replay(path: Path, host: str, port: int, duration_ms: int) -> int:
             sock.sendto(rtp, destination)
             sent += 1
 
-    print(f"sent_packets={sent} destination={host}:{port} pcap={path}")
-    return 0 if sent else 1
+        if expect_echo:
+            try:
+                data, addr = sock.recvfrom(2048)
+                echo_received = len(data) >= 12
+                print(f"echo_received={echo_received} source={addr[0]}:{addr[1]} bytes={len(data)}")
+            except socket.timeout:
+                print("echo_received=False")
+
+    print(f"sent_packets={sent} destination={host}:{port} source_port={source_port or 'auto'} pcap={path}")
+    return 0 if sent and (echo_received or not expect_echo) else 1
 
 
 def main() -> int:
@@ -104,8 +117,10 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--duration-ms", type=int, default=0)
+    parser.add_argument("--source-port", type=int, default=0, help="Optional local UDP source port")
+    parser.add_argument("--expect-echo", action="store_true", help="Fail unless at least one RTP packet is echoed back")
     args = parser.parse_args()
-    return replay(Path(args.pcap), args.host, args.port, args.duration_ms)
+    return replay(Path(args.pcap), args.host, args.port, args.duration_ms, args.source_port, args.expect_echo)
 
 
 if __name__ == "__main__":

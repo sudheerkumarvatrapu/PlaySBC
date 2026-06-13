@@ -51,7 +51,77 @@ class SippScenarioTests(unittest.TestCase):
                 ["dry-run"] * len(run_sipp_regression.DEFAULT_SCENARIOS),
             )
             for scenario in run_sipp_regression.DEFAULT_SCENARIOS:
-                self.assertTrue((run_dir / scenario / "command.txt").exists())
+                scenario_dir = run_dir / scenario
+                self.assertTrue(any(scenario_dir.glob("*command.txt")))
+
+    def test_smoke_regression_default_scenarios_cover_python_smoke_clients(self):
+        self.assertEqual(
+            run_sipp_regression.DEFAULT_SCENARIOS,
+            (
+                "smoke_register_digest",
+                "smoke_transaction_cache",
+                "smoke_invalid_bye",
+                "smoke_basic_call_media",
+                "smoke_bridge_two_leg",
+            ),
+        )
+
+    def test_bridge_smoke_scenario_builds_two_parallel_sipp_legs(self):
+        commands = run_sipp_regression.build_sipp_commands("sipp", "smoke_bridge_two_leg", "127.0.0.1", 15062, 1, 1)
+
+        self.assertEqual([name for name, _command in commands], ["bridge-a", "bridge-b"])
+        self.assertIn("smoke_bridge_leg.xml", " ".join(commands[0][1]))
+        self.assertIn("smoke_bridge_leg.xml", " ".join(commands[1][1]))
+        self.assertIn("bridge-a", commands[0][1])
+        self.assertIn("bridge-b", commands[1][1])
+
+    def test_transaction_cache_smoke_disables_sipp_udp_retransmission(self):
+        command = run_sipp_regression.build_sipp_command("sipp", "smoke_transaction_cache", "127.0.0.1", 15062, 1, 1)
+
+        self.assertIn("-nr", command)
+
+    def test_basic_call_smoke_scenario_uses_media_pcap_and_dtmf_offer(self):
+        command = run_sipp_regression.build_sipp_command("sipp", "smoke_basic_call_media", "127.0.0.1", 15062, 1, 1)
+        args = argparse_namespace(host="127.0.0.1", rtp_min=12000)
+        sidecars = run_sipp_regression.build_sidecar_commands("smoke_basic_call_media", args)
+        scenario_text = (ROOT / "sipp" / "scenarios" / "smoke_basic_call_media.xml").read_text(encoding="ISO-8859-1")
+
+        self.assertIn("smoke_basic_call_media.xml", " ".join(command))
+        self.assertNotIn("play_pcap_audio", scenario_text)
+        self.assertEqual([name for name, _command, _delay in sidecars], ["media-pcap"])
+        self.assertIn("play_g711_pcap_rtp.py", " ".join(sidecars[0][1]))
+        self.assertIn("g711u_60s.pcap", " ".join(sidecars[0][1]))
+        self.assertIn("12000", sidecars[0][1])
+        self.assertIn("0", sidecars[0][1])
+        self.assertIn("--expect-echo", sidecars[0][1])
+        self.assertIn("telephone-event/8000", scenario_text)
+
+    def test_basic_call_media_dry_run_writes_sidecar_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_sipp_regression.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "media-sidecar-dry-run",
+                    "--scenario",
+                    "smoke_basic_call_media",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            scenario_dir = Path(tmp) / "media-sidecar-dry-run" / "smoke_basic_call_media"
+            command_text = (scenario_dir / "media-pcap-command.txt").read_text(encoding="utf-8")
+
+            self.assertIn("delay_seconds=0.5", command_text)
+            self.assertIn("play_g711_pcap_rtp.py", command_text)
+            self.assertIn("--source-port 0", command_text)
+            self.assertIn("--expect-echo", command_text)
 
     def test_b2bua_sipp_commands_support_load_and_hold_time(self):
         args = argparse_namespace(
