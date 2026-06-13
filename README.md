@@ -234,10 +234,10 @@ Notes:
 
 ## Local Logs
 
-Only the B2BUA SIPp runner writes persistent project logs by default. All B2BUA runs append into one local regression folder:
+Only the B2BUA SIPp runner writes persistent project logs by default. Each B2BUA testcase gets one log bundle under the local regression folder:
 
 ```text
-logs/b2bua-Regression/
+logs/b2bua-Regression/<run-id-or-profile-run-id>/
 ```
 
 Important files:
@@ -255,7 +255,7 @@ log.call
 log.sipp
 ```
 
-The SIP ladder is written into `log.sip`. B2BUA call lifecycle events are written into `log.call`. SIPp tool output is consolidated into `log.sipp`. The saved folder does not contain separate SIPp A or SIPp B leg folders. Use `--run-id <label>` to label a run inside the same files, or `--log-folder <name>` only when you intentionally want a different consolidated folder.
+The SIP ladder and registration ladder are written into `log.sip` for single-call profiles. Load profiles keep ladder generation disabled. B2BUA call lifecycle events are written into `log.call`. SIPp tool output is consolidated into `log.sipp`. Media packet samples and media summaries are written into `log.media`; transcoding expectation and observation summaries are written into `log.transcoding`. The saved bundle does not contain separate SIPp A or SIPp B leg folders and does not create separate `*-runner.log` files.
 
 Unit tests do not create log files. The generic SIPp regression runner writes to a temporary directory unless `--output-root <dir>` is provided.
 

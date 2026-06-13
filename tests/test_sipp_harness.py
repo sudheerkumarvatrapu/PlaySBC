@@ -278,7 +278,7 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("25100", commands[0][1])
             self.assertIn("25102", commands[1][1])
 
-    def test_b2bua_sipp_dry_run_writes_consolidated_log_folder(self):
+    def test_b2bua_sipp_dry_run_writes_log_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             completed = subprocess.run(
                 [
@@ -303,7 +303,7 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "b2bua-dry-run"
             self.assertEqual({path.name for path in log_dir.iterdir()}, set(run_b2bua_sipp_smoke.LOG_FILES))
             self.assertIn("run_id=b2bua-dry-run", (log_dir / "log.platform").read_text(encoding="utf-8"))
             self.assertIn("callee=drycallee", (log_dir / "log.platform").read_text(encoding="utf-8"))
@@ -315,6 +315,7 @@ class SippScenarioTests(unittest.TestCase):
             self.assertFalse((log_dir / "server-command.txt").exists())
             self.assertFalse((log_dir / "sipp-a-uac").exists())
             self.assertFalse((log_dir / "sipp-b-uas").exists())
+            self.assertFalse(any((Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER).glob("*runner.log")))
 
     def test_b2bua_media_dry_run_sets_server_codec_and_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -343,7 +344,7 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "b2bua-media-dry-run"
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
             self.assertIn("media_enabled=True", platform)
@@ -353,7 +354,68 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("b2bua_uac_a.xml", sipp)
             self.assertIn("media-a-to-b2bua:", sipp)
             self.assertIn("media-b-to-b2bua:", sipp)
+            self.assertIn("MEDIA OBSERVATION", (log_dir / "log.media").read_text(encoding="utf-8"))
+            self.assertIn("expected_rtp=True", (log_dir / "log.media").read_text(encoding="utf-8"))
             self.assertFalse((log_dir / "media-a-to-b2bua-command.txt").exists())
+
+    def test_b2bua_platform_result_labels_uas_process_lifetime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "bundle"
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            run_b2bua_sipp_smoke.append_log_section(
+                log_dir,
+                "log.media",
+                "CALL SUMMARY",
+                (
+                    "duration_seconds=60.500 media_mode=bridge "
+                    "rtp_packets_received=3000 rtp_packets_sent=0 rtp_packets_relayed=3000"
+                ),
+            )
+            run_b2bua_sipp_smoke.append_log_section(
+                log_dir,
+                "log.media",
+                "CALL SUMMARY",
+                (
+                    "duration_seconds=60.250 media_mode=bridge "
+                    "rtp_packets_received=3000 rtp_packets_sent=0 rtp_packets_relayed=3000"
+                ),
+            )
+            args = argparse_namespace(
+                resolved_run_id="unit-media-run",
+                log_folder="b2bua-Regression",
+                profile="basic-media",
+                caller="sipp-a",
+                callee="sipp-b",
+                register_caller=False,
+                registration_driver="sipp",
+                calls=1,
+                rate=1,
+                hold_ms=60000,
+                server_codec="PCMU",
+                media_enabled=True,
+                media_codec="PCMU",
+                media_driver="sipp-pcap",
+                sipp_pcap_sudo=True,
+                media_pcap_resolved=ROOT / "sipp" / "scenarios" / "pcap" / "g711u_60s.pcap",
+                media_backend="internal",
+                rtpengine_url="",
+                ladder_enabled=True,
+            )
+            results = [
+                run_b2bua_sipp_smoke.SmokeResult("sipp-a-uac", [], 0, "passed", 60.9),
+                run_b2bua_sipp_smoke.SmokeResult("sipp-b-uas", [], 0, "passed", 61.7),
+            ]
+
+            run_b2bua_sipp_smoke.append_results(log_dir, args, results)
+
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            self.assertIn("sipp-b-uas: passed returncode=0 process_lifetime_seconds=61.700", platform)
+            self.assertNotIn("sipp-b-uas: passed returncode=0 duration_seconds", platform)
+            self.assertIn("MEDIA DURATION SUMMARY", platform)
+            self.assertIn("media_call_summary_count=2", platform)
+            self.assertIn("media_call_duration_seconds_max=60.500", platform)
+            self.assertIn("media_rtp_packets_received_total=6000", platform)
+            self.assertIn("media_rtp_packets_relayed_total=6000", platform)
 
     def test_b2bua_basic_dry_run_enables_ladder_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -380,8 +442,18 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "b2bua-basic-dry-run"
             self.assertIn("ladder_enabled=True", (log_dir / "log.platform").read_text(encoding="utf-8"))
+
+    def test_registration_ladder_text_is_clear(self):
+        ladder = run_b2bua_sipp_smoke.registration_ladder_text("SIPp B", "registered-b")
+
+        self.assertIn("REGISTRATION LADDER", ladder)
+        self.assertIn("user=registered-b", ladder)
+        self.assertIn("REGISTER", ladder)
+        self.assertIn("200 OK", ladder)
+        self.assertIn("SIPp B", ladder)
+        self.assertIn("B2BUA", ladder)
 
     def test_b2bua_dry_run_can_generate_rtpengine_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -406,7 +478,7 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "b2bua-rtpengine-dry-run"
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("media_backend=rtpengine", platform)
             self.assertIn("rtpengine_url=udp://127.0.0.1:2223", platform)
@@ -448,13 +520,17 @@ class SippScenarioTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "transcoding-profile"
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("profile=transcoding", platform)
             self.assertIn("media_codec=PCMU", platform)
             self.assertIn("server_codec=PCMA", platform)
+            self.assertIn("hold_ms=60000", platform)
             self.assertIn("transcoding_expected=True", platform)
             self.assertIn("transcoding_owner=internal", platform)
+            transcoding = (log_dir / "log.transcoding").read_text(encoding="utf-8")
+            self.assertIn("TRANSCODING OBSERVATION", transcoding)
+            self.assertIn("expected=True", transcoding)
 
     def test_b2bua_registered_outbound_profile_registers_caller_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -476,7 +552,7 @@ class SippScenarioTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "registered-outbound-profile"
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
             self.assertIn("profile=registered-outbound", platform)
@@ -509,7 +585,7 @@ class SippScenarioTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "registered-inbound-profile"
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
             self.assertIn("profile=registered-inbound", platform)
@@ -552,6 +628,113 @@ class SippScenarioTests(unittest.TestCase):
         self.assertEqual(row.name, "rtpengine-preflight")
         self.assertIn("RTPengine not reachable at udp://127.0.0.1:2223", row.command)
 
+    def test_b2bua_stdout_parser_uses_profile_bundle_path(self):
+        rows = run_regression_suite.parse_b2bua_stdout(
+            "basic-media",
+            "B2BUA SIPp logs: /tmp/playsbc/basic-media-bundle\nregistration: passed\nsipp-a-uac: passed\n",
+            0,
+            0.2,
+            Path("/tmp/playsbc/default"),
+            "cmd",
+        )
+
+        self.assertEqual({row.log_path for row in rows}, {"/tmp/playsbc/basic-media-bundle"})
+
+    def test_cleanup_non_failed_b2bua_bundles_keeps_failed_and_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_root = Path(tmp) / "b2bua-Regression"
+            report_dir = Path(tmp) / "reports"
+            passed = log_root / "passed-bundle"
+            failed = log_root / "failed-bundle"
+            blocked = log_root / "blocked-bundle"
+            unknown = log_root / "unknown-bundle"
+
+            run_regression_suite.append_bundle_log(
+                passed,
+                "log.platform",
+                "B2BUA SIPP RUN RESULT",
+                "registration: passed\nsipp-a-uac: passed\nsipp-b-uas: passed",
+            )
+            run_regression_suite.append_bundle_log(
+                failed,
+                "log.platform",
+                "B2BUA SIPP RUN RESULT",
+                "registration: passed\nsipp-a-uac: failed\nsipp-b-uas: passed",
+            )
+            run_regression_suite.append_bundle_log(
+                blocked,
+                "log.platform",
+                "RTPENGINE PREFLIGHT BLOCKED",
+                "reason=connection refused",
+            )
+            unknown.mkdir(parents=True)
+
+            deleted = run_regression_suite.cleanup_non_failed_b2bua_log_bundles(log_root, report_dir)
+
+            self.assertEqual(deleted, [blocked, passed])
+            self.assertFalse(passed.exists())
+            self.assertFalse(blocked.exists())
+            self.assertTrue(failed.exists())
+            self.assertTrue(unknown.exists())
+
+    def test_cleanup_non_failed_b2bua_bundles_can_use_previous_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_root = Path(tmp) / "b2bua-Regression"
+            report_dir = Path(tmp) / "reports"
+            report_dir.mkdir()
+            passed = log_root / "reported-passed"
+            blocked = log_root / "reported-blocked"
+            failed = log_root / "reported-failed"
+            passed.mkdir(parents=True)
+            blocked.mkdir(parents=True)
+            failed.mkdir(parents=True)
+            report = [
+                {
+                    "suite": "B2BUA basic-media",
+                    "name": "registration",
+                    "status": "passed",
+                    "returncode": 0,
+                    "duration_seconds": 0,
+                    "log_path": str(passed),
+                    "command": "cmd",
+                },
+                {
+                    "suite": "B2BUA basic-media",
+                    "name": "sipp-a-uac",
+                    "status": "passed",
+                    "returncode": 0,
+                    "duration_seconds": 0,
+                    "log_path": str(passed),
+                    "command": "cmd",
+                },
+                {
+                    "suite": "B2BUA rtpengine",
+                    "name": "rtpengine-preflight",
+                    "status": "blocked",
+                    "returncode": None,
+                    "duration_seconds": 0,
+                    "log_path": str(blocked),
+                    "command": "cmd",
+                },
+                {
+                    "suite": "B2BUA transcoding",
+                    "name": "sipp-a-uac",
+                    "status": "failed",
+                    "returncode": 1,
+                    "duration_seconds": 0,
+                    "log_path": str(failed),
+                    "command": "cmd",
+                },
+            ]
+            (report_dir / "previous.json").write_text(json.dumps(report), encoding="utf-8")
+
+            deleted = run_regression_suite.cleanup_non_failed_b2bua_log_bundles(log_root, report_dir)
+
+            self.assertEqual(deleted, [blocked, passed])
+            self.assertFalse(passed.exists())
+            self.assertFalse(blocked.exists())
+            self.assertTrue(failed.exists())
+
     def test_regression_suite_can_target_all_b2bua_profiles(self):
         self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 8)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -577,7 +760,7 @@ class SippScenarioTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "load-rtpengine-transcoding-profile"
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("profile=load-5cps-60s-rtpengine-transcoding", platform)
             self.assertIn("calls=5", platform)

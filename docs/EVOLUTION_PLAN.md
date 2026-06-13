@@ -18,7 +18,7 @@ Implemented:
 - 5 cps / 60 second SIPp load shape
 - 60 second G.711u/G.711a media replay profiles through the B2BUA path
 - SBC-style category logs: `log.sip`, `log.media`, `log.transcoding`, `log.platform`, `log.networking`, `log.call`, `log.sipp`, and transport logs such as `log.udp`
-- Single consolidated B2BUA SIPp regression folder with no separate saved SIPp A/B leg folders
+- Per-testcase B2BUA SIPp log bundles with no separate saved SIPp A/B leg folders
 - Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine, registered inbound/outbound, and 5 cps / 60 second load
 - SIPp XML regression coverage for the former Python smoke scenarios: digest registration, transaction replay, invalid BYE, media call, and two-leg bridge
 - Optional RTPengine NG control backend scaffold for B2BUA SDP offer/answer/delete

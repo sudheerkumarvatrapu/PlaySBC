@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -83,11 +84,13 @@ B2BUA_PROFILES = {
     "basic-media": {
         "callee": "basic-media",
         "media_codec": "PCMU",
+        "hold_ms": 60000,
     },
     "transcoding": {
         "callee": "transcode-user",
         "media_codec": "PCMU",
         "server_codec": "PCMA",
+        "hold_ms": 60000,
     },
     "rtpengine": {
         "callee": "rtpengine-user",
@@ -127,8 +130,8 @@ B2BUA_PROFILES = {
 }
 PROFILE_DESCRIPTIONS = {
     "basic-signalling": "One SIPp A -> B2BUA -> registered SIPp B call without RTP replay.",
-    "basic-media": "One registered B2BUA call with PCMU RTP replay.",
-    "transcoding": "One registered B2BUA media call with PCMU media and PCMA server codec preference.",
+    "basic-media": "One registered 60 second B2BUA call with PCMU RTP replay.",
+    "transcoding": "One registered 60 second B2BUA media call with PCMU media and PCMA server codec preference.",
     "rtpengine": "One registered B2BUA signalling call using RTPengine as the media backend.",
     "registered-inbound": "Register SIPp B, then call that registered number through the B2BUA.",
     "registered-outbound": "Register SIPp A and SIPp B, then originate from the registered SIPp A user.",
@@ -449,8 +452,186 @@ def append_commands(log_dir: Path, commands: List[Tuple[str, List[str]]]) -> Non
     append_log_section(log_dir, "log.sipp", "B2BUA SIPP COMMANDS", "\n".join(lines))
 
 
+def registration_ladder_text(participant: str, user: str) -> str:
+    step_width = 6
+    column_width = 28
+
+    def row(step: str = "") -> List[str]:
+        text = list(" " * (step_width + (column_width * 2)))
+        for offset, char in enumerate(f"{step:<{step_width}}"):
+            text[offset] = char
+        for position in positions:
+            text[position] = "|"
+        return text
+
+    def put(text: List[str], start: int, value: str) -> None:
+        for offset, char in enumerate(value):
+            position = start + offset
+            if 0 <= position < len(text):
+                text[position] = char
+
+    positions = [step_width + (column_width // 2), step_width + column_width + (column_width // 2)]
+    header = f"{'Step':<{step_width}}{participant:^{column_width}}{'B2BUA':^{column_width}}".rstrip()
+    separator = "-" * (step_width + (column_width * 2))
+    lines = ["REGISTRATION LADDER", f"user={user}", header, separator, "".join(row()).rstrip()]
+
+    label = row("01")
+    put(label, positions[0] + 2, "REGISTER")
+    lines.append("".join(label).rstrip())
+    arrow = row()
+    for position in range(positions[0] + 1, positions[1] - 1):
+        arrow[position] = "-"
+    arrow[positions[1] - 1] = ">"
+    lines.append("".join(arrow).rstrip())
+
+    label = row("02")
+    put(label, positions[0] + 2, "200 OK")
+    lines.append("".join(label).rstrip())
+    arrow = row()
+    arrow[positions[0] + 1] = "<"
+    for position in range(positions[0] + 2, positions[1]):
+        arrow[position] = "-"
+    lines.append("".join(arrow).rstrip())
+    lines.append("".join(row()).rstrip())
+    return "\n".join(lines)
+
+
+def append_registration_ladders(log_dir: Path, args: argparse.Namespace, results: List[SmokeResult]) -> None:
+    if not args.ladder_enabled:
+        return
+    statuses = {result.name: result.status for result in results}
+    if statuses.get("registration") == "passed":
+        append_log_section(
+            log_dir,
+            "log.sip",
+            "CALLEE REGISTRATION LADDER",
+            registration_ladder_text("SIPp B", args.callee),
+        )
+    if args.register_caller and statuses.get("caller-registration") == "passed":
+        append_log_section(
+            log_dir,
+            "log.sip",
+            "CALLER REGISTRATION LADDER",
+            registration_ladder_text("SIPp A", args.caller),
+        )
+
+
+def total_logged_rtp_packets(log_dir: Path) -> int:
+    path = log_dir / "log.media"
+    if not path.exists():
+        return 0
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return sum(int(value) for value in re.findall(r"rtp_packets_received=(\d+)", text))
+
+
+def media_summary_stats(log_dir: Path) -> dict:
+    path = log_dir / "log.media"
+    stats = {
+        "summary_count": 0,
+        "duration_seconds_max": 0.0,
+        "rtp_packets_received_total": 0,
+        "rtp_packets_sent_total": 0,
+        "rtp_packets_relayed_total": 0,
+    }
+    if not path.exists():
+        return stats
+
+    pending_summary = False
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "CALL SUMMARY" in line:
+            pending_summary = True
+        if not pending_summary:
+            continue
+        stats["summary_count"] += 1
+        duration = re.search(r"duration_seconds=([0-9.]+)", line)
+        received = re.search(r"rtp_packets_received=(\d+)", line)
+        sent = re.search(r"rtp_packets_sent=(\d+)", line)
+        relayed = re.search(r"rtp_packets_relayed=(\d+)", line)
+        if not any((duration, received, sent, relayed)):
+            stats["summary_count"] -= 1
+            continue
+        pending_summary = False
+        if duration:
+            stats["duration_seconds_max"] = max(stats["duration_seconds_max"], float(duration.group(1)))
+        if received:
+            stats["rtp_packets_received_total"] += int(received.group(1))
+        if sent:
+            stats["rtp_packets_sent_total"] += int(sent.group(1))
+        if relayed:
+            stats["rtp_packets_relayed_total"] += int(relayed.group(1))
+    return stats
+
+
+def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
+    if not args.media_enabled:
+        append_log_section(
+            log_dir,
+            "log.media",
+            "MEDIA OBSERVATION",
+            "expected_rtp=False reason=media_disabled",
+        )
+        return
+
+    packets = total_logged_rtp_packets(log_dir)
+    status = "rtp_observed" if packets > 0 else "no_rtp_observed"
+    append_log_section(
+        log_dir,
+        "log.media",
+        "MEDIA OBSERVATION",
+        "\n".join(
+            [
+                f"expected_rtp=True status={status}",
+                f"media_driver={args.media_driver}",
+                f"media_codec={args.media_codec}",
+                f"media_pcap={args.media_pcap_resolved}",
+                f"hold_ms={args.hold_ms}",
+                f"server_rtp_received_packets_total={packets}",
+            ]
+        ),
+    )
+
+
+def append_transcoding_observation(log_dir: Path, args: argparse.Namespace) -> None:
+    transcoding_expected = bool(args.media_codec and args.server_codec and args.media_codec != args.server_codec)
+    if not transcoding_expected:
+        append_log_section(
+            log_dir,
+            "log.transcoding",
+            "TRANSCODING OBSERVATION",
+            "expected=False reason=codec_match_or_media_disabled",
+        )
+        return
+
+    path = log_dir / "log.transcoding"
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    active = "TRANSCODE ACTIVE" in text
+    bypass = "TRANSCODE BYPASS" in text
+    packets = total_logged_rtp_packets(log_dir)
+    if active:
+        status = "active"
+    elif bypass:
+        status = "bypassed"
+    else:
+        status = "not_observed"
+    append_log_section(
+        log_dir,
+        "log.transcoding",
+        "TRANSCODING OBSERVATION",
+        "\n".join(
+            [
+                f"expected=True status={status}",
+                f"src={args.media_codec} dst={args.server_codec}",
+                f"owner={'rtpengine' if args.media_backend == 'rtpengine' else 'internal'}",
+                f"server_rtp_received_packets_total={packets}",
+                "note=TRANSCODE ACTIVE appears only after RTP packets arrive with a payload type that must be converted",
+            ]
+        ),
+    )
+
+
 def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeResult]) -> None:
     transcoding_expected = bool(args.media_codec and args.server_codec and args.media_codec != args.server_codec)
+    media_stats = media_summary_stats(log_dir) if args.media_enabled else None
     lines = [
         f"run_id={args.resolved_run_id}",
         f"log_folder={args.log_folder}",
@@ -477,7 +658,21 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
     ]
     for result in results:
         code = "" if result.returncode is None else f" returncode={result.returncode}"
-        lines.append(f"{result.name}: {result.status}{code} duration_seconds={result.duration_seconds:.3f}")
+        duration_label = "process_lifetime_seconds" if result.name == "sipp-b-uas" else "duration_seconds"
+        lines.append(f"{result.name}: {result.status}{code} {duration_label}={result.duration_seconds:.3f}")
+    if media_stats:
+        lines.extend(
+            [
+                "",
+                "MEDIA DURATION SUMMARY",
+                f"media_call_summary_count={media_stats['summary_count']}",
+                f"media_call_duration_seconds_max={media_stats['duration_seconds_max']:.3f}",
+                f"media_rtp_packets_received_total={media_stats['rtp_packets_received_total']}",
+                f"media_rtp_packets_sent_total={media_stats['rtp_packets_sent_total']}",
+                f"media_rtp_packets_relayed_total={media_stats['rtp_packets_relayed_total']}",
+                "media_duration_source=log.media CALL SUMMARY",
+            ]
+        )
     append_log_section(log_dir, "log.platform", "B2BUA SIPP RUN RESULT", "\n".join(lines))
 
 
@@ -559,11 +754,12 @@ def run_sipp_registration(command: List[str], work_dir: Path, label: str) -> int
 
 def resolve_log_dir(args: argparse.Namespace, run_id: str) -> Tuple[Path, bool]:
     log_folder = args.log_folder or DEFAULT_LOG_FOLDER
+    bundle_name = run_id.replace(os.sep, "-")
     if args.output_root:
-        return Path(args.output_root) / log_folder, True
+        return Path(args.output_root) / log_folder / bundle_name, True
     if args.dry_run:
-        return Path(tempfile.mkdtemp(prefix=f"{run_id}-")) / log_folder, True
-    return ROOT / "logs" / log_folder, True
+        return Path(tempfile.mkdtemp(prefix=f"{run_id}-")) / log_folder / bundle_name, True
+    return ROOT / "logs" / log_folder / bundle_name, True
 
 
 def apply_profile(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -626,7 +822,7 @@ def main() -> int:
     parser.add_argument(
         "--log-folder",
         default=BASE_DEFAULTS["log_folder"],
-        help="Single folder name used under the log root for consolidated B2BUA regression logs",
+        help="Folder name used under logs/ as the parent for per-testcase B2BUA log bundles",
     )
     parser.add_argument("--run-id", default=BASE_DEFAULTS["run_id"])
     parser.add_argument("--sipp-bin", default=BASE_DEFAULTS["sipp_bin"])
@@ -678,6 +874,7 @@ def main() -> int:
 
         server_process: Optional[subprocess.Popen] = None
         uas_process: Optional[subprocess.Popen] = None
+        uas_started: Optional[float] = None
         media_processes: List[Tuple[str, List[str], subprocess.Popen, float]] = []
         try:
             if args.dry_run:
@@ -707,6 +904,7 @@ def main() -> int:
                 registration_rc = register_endpoint(args, log_dir)
             results.append(SmokeResult("registration", [], registration_rc, "passed" if registration_rc == 0 else "failed", time.monotonic() - started))
 
+            uas_started = time.monotonic()
             uas_process = start_process(uas_command, work_dir / "sipp-b-uas", work_dir / "sipp-b-uas" / "stdout.log")
             time.sleep(0.75)
 
@@ -752,9 +950,9 @@ def main() -> int:
                 results.append(SmokeResult(name, command, media_rc, "passed" if media_rc == 0 else "failed", time.monotonic() - media_started))
             media_processes = []
 
-            started = time.monotonic()
             uas_rc = uas_process.wait(timeout=max(30, int(args.hold_ms / 1000) + 30))
-            results.append(SmokeResult("sipp-b-uas", uas_command, uas_rc, "passed" if uas_rc == 0 else "failed", time.monotonic() - started))
+            uas_duration = time.monotonic() - uas_started if uas_started is not None else 0.0
+            results.append(SmokeResult("sipp-b-uas", uas_command, uas_rc, "passed" if uas_rc == 0 else "failed", uas_duration))
             uas_process = None
         finally:
             for _name, _command, process, _started in media_processes:
@@ -763,6 +961,9 @@ def main() -> int:
             stop_process(server_process)
             append_commands(log_dir, all_commands)
             collect_work_logs(log_dir, work_dir)
+            append_registration_ladders(log_dir, args, results)
+            append_media_observation(log_dir, args)
+            append_transcoding_observation(log_dir, args)
             append_results(log_dir, args, results)
 
     print(f"B2BUA SIPp logs: {log_dir}")

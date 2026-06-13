@@ -42,6 +42,18 @@ RTPENGINE_B2BUA_PROFILES = (
     "rtpengine",
     "load-5cps-60s-rtpengine-transcoding",
 )
+B2BUA_LOG_FILES = (
+    "log.sip",
+    "log.media",
+    "log.transcoding",
+    "log.platform",
+    "log.networking",
+    "log.udp",
+    "log.tcp",
+    "log.tls",
+    "log.call",
+    "log.sipp",
+)
 
 
 @dataclass
@@ -94,6 +106,102 @@ def rtpengine_blocked_row(profile: str, url: str, detail: str, duration: float, 
     )
 
 
+def initialize_b2bua_log_bundle(log_path: Path) -> None:
+    log_path.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    for filename in B2BUA_LOG_FILES:
+        (log_path / filename).write_text(f"{timestamp} | LOG START | file={filename}\n", encoding="utf-8")
+
+
+def append_bundle_log(log_path: Path, filename: str, title: str, body: str = "") -> None:
+    initialize = not (log_path / filename).exists()
+    if initialize:
+        initialize_b2bua_log_bundle(log_path)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    with (log_path / filename).open("a", encoding="utf-8") as log_file:
+        log_file.write(f"{timestamp} | {title}\n")
+        if body:
+            log_file.write(body.rstrip() + "\n")
+
+
+def extract_b2bua_log_path(stdout: str, fallback: Path) -> Path:
+    for line in stdout.splitlines():
+        if line.startswith("B2BUA SIPp logs: "):
+            return Path(line.split(": ", 1)[1].strip())
+    return fallback
+
+
+def summarize_statuses(statuses: List[str]) -> str:
+    normalized = [status for status in statuses if status]
+    if not normalized:
+        return "unknown"
+    if any(status == "failed" for status in normalized):
+        return "failed"
+    if any(status == "blocked" for status in normalized):
+        return "blocked"
+    if all(status in {"passed", "dry-run"} for status in normalized):
+        return "passed"
+    return "unknown"
+
+
+def report_statuses_by_log_path(report_dir: Path) -> dict[str, List[str]]:
+    statuses: dict[str, List[str]] = {}
+    if not report_dir.exists():
+        return statuses
+    for report in sorted(report_dir.glob("*.json")):
+        try:
+            rows = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict) or not str(row.get("suite", "")).startswith("B2BUA"):
+                continue
+            log_path = str(row.get("log_path", ""))
+            status = str(row.get("status", ""))
+            if log_path and status:
+                statuses.setdefault(log_path, []).append(status)
+    return statuses
+
+
+def b2bua_bundle_status(log_path: Path, report_statuses: dict[str, List[str]]) -> str:
+    report_status = summarize_statuses(report_statuses.get(str(log_path), []))
+    if report_status != "unknown":
+        return report_status
+
+    platform = log_path / "log.platform"
+    if not platform.exists():
+        return "unknown"
+    text = platform.read_text(encoding="utf-8", errors="replace")
+    if "RTPENGINE PREFLIGHT BLOCKED" in text:
+        return "blocked"
+    statuses = []
+    for line in text.splitlines():
+        if ": " not in line:
+            continue
+        _name, status_text = line.split(": ", 1)
+        status = status_text.split(maxsplit=1)[0].strip()
+        if status in {"passed", "failed", "dry-run", "blocked"}:
+            statuses.append(status)
+    return summarize_statuses(statuses)
+
+
+def cleanup_non_failed_b2bua_log_bundles(log_root: Path, report_dir: Path) -> List[Path]:
+    if not log_root.exists():
+        return []
+    report_statuses = report_statuses_by_log_path(report_dir)
+    deleted = []
+    for candidate in sorted(log_root.iterdir()):
+        if not candidate.is_dir():
+            continue
+        if b2bua_bundle_status(candidate, report_statuses) not in {"passed", "blocked"}:
+            continue
+        shutil.rmtree(candidate)
+        deleted.append(candidate)
+    return deleted
+
+
 def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[ReportRow]:
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     rows = []
@@ -116,6 +224,7 @@ def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[
 
 
 def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: float, log_path: Path, command: str) -> List[ReportRow]:
+    log_path = extract_b2bua_log_path(stdout, log_path)
     rows = []
     for line in stdout.splitlines():
         if ": " not in line:
@@ -287,15 +396,20 @@ def main() -> int:
 
     if not args.skip_b2bua:
         profiles = ALL_B2BUA_PROFILES if args.all_b2bua_profiles else tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
-        b2bua_log_path = ROOT / "logs" / args.b2bua_log_folder
+        b2bua_log_root = ROOT / "logs" / args.b2bua_log_folder
+        deleted_bundles = cleanup_non_failed_b2bua_log_bundles(b2bua_log_root, Path(args.report_dir))
+        if deleted_bundles:
+            print(f"Deleted {len(deleted_bundles)} passed/blocked B2BUA log bundle(s) before this run.")
         for profile in profiles:
+            profile_run_id = f"{run_id}-{profile}"
+            profile_log_path = b2bua_log_root / profile_run_id
             command = [
                 sys.executable,
                 str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
                 "--profile",
                 profile,
                 "--run-id",
-                f"{run_id}-{profile}",
+                profile_run_id,
                 "--log-folder",
                 args.b2bua_log_folder,
             ]
@@ -311,18 +425,22 @@ def main() -> int:
                 ready, detail = probe_rtpengine(args.b2bua_rtpengine_url, args.rtpengine_preflight_timeout)
                 duration = time.monotonic() - started
                 if not ready:
-                    rows.append(rtpengine_blocked_row(profile, args.b2bua_rtpengine_url, detail, duration, b2bua_log_path, command_text))
-                    profile_log = b2bua_log_path / f"{profile}-{run_id}-runner.log"
-                    profile_log.parent.mkdir(parents=True, exist_ok=True)
-                    profile_log.write_text(
-                        f"BLOCKED: RTPengine not reachable at {args.b2bua_rtpengine_url}\n{detail}\n",
-                        encoding="utf-8",
+                    initialize_b2bua_log_bundle(profile_log_path)
+                    append_bundle_log(
+                        profile_log_path,
+                        "log.platform",
+                        "RTPENGINE PREFLIGHT BLOCKED",
+                        f"rtpengine_url={args.b2bua_rtpengine_url}\nreason={detail}",
                     )
+                    rows.append(rtpengine_blocked_row(profile, args.b2bua_rtpengine_url, detail, duration, profile_log_path, command_text))
                     continue
             returncode, duration, stdout, stderr = run_command(command, args.timeout)
-            rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, b2bua_log_path, command_text))
-            profile_log = b2bua_log_path / f"{profile}-{run_id}-runner.log"
-            profile_log.write_text(stdout + ("\n--- stderr ---\n" + stderr if stderr.strip() else ""), encoding="utf-8")
+            actual_log_path = extract_b2bua_log_path(stdout, profile_log_path)
+            if stderr.strip():
+                append_bundle_log(actual_log_path, "log.platform", "RUNNER STDERR", stderr)
+            if returncode != 0 and stdout.strip():
+                append_bundle_log(actual_log_path, "log.platform", "RUNNER STDOUT", stdout)
+            rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, actual_log_path, command_text))
 
     report_path = write_reports(rows, Path(args.report_dir), run_id)
     failed = [row for row in rows if row.status != "passed"]

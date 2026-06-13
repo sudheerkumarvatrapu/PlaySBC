@@ -567,6 +567,16 @@ class RtpSession:
         self.log("ACK RECEIVED")
 
     def record_rtp_packet(self, packet: RtpPacket, record_audio: bool = True) -> None:
+        packet_index = self.packets_received + 1
+        if packet_index <= 5 or packet_index % 500 == 0:
+            self.log(
+                "RTP PACKET RX",
+                (
+                    f"count={packet_index} seq={packet.sequence} timestamp={packet.timestamp} "
+                    f"payload_type={CODEC_NAMES.get(packet.payload_type, packet.payload_type)} "
+                    f"marker={int(packet.marker)} payload_bytes={len(packet.payload)}"
+                ),
+            )
         self.analyzer.observe(packet, record_audio=record_audio)
         self.record_rtp(packet.payload_type, packet.payload, record_audio=record_audio)
 
@@ -598,6 +608,11 @@ class RtpSession:
     def record_relay(self, payload: bytes) -> None:
         self.relayed_packets += 1
         self.relayed_bytes += len(payload)
+        if self.relayed_packets <= 5 or self.relayed_packets % 500 == 0:
+            self.log(
+                "RTP PACKET RELAY",
+                f"count={self.relayed_packets} payload_bytes={len(payload)}",
+            )
 
     def handle_dtmf_payload(self, payload: bytes) -> None:
         event = parse_dtmf_event(payload)
