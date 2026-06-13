@@ -4,6 +4,12 @@ Educational SIP/RTP lab server focused on local SIPp regression for B2BUA and me
 
 For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
 
+## Contributors
+
+- [Sudheer Kumar Vatrapu](https://github.com/sudheerkumarvatrapu) - Project owner and maintainer
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md).
+
 ## Download
 
 macOS or Linux:
