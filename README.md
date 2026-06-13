@@ -5,7 +5,7 @@
 <h1 align="center">PlaySBC</h1>
 
 <p align="center">
-  <strong>Educational SIP/RTP lab server for B2BUA, media, transcoding, and SIPp regression experiments.</strong>
+  <strong>SIP, RTP, B2BUA and regression play ground.</strong>
 </p>
 
 <p align="center">

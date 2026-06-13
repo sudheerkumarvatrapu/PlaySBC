@@ -1,6 +1,6 @@
 <svg width="960" height="280" viewBox="0 0 960 280" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">PlaySBC logo</title>
-  <desc id="desc">A colorful PlaySBC logo showing SIP signaling, RTP media, and a B2BUA bridge.</desc>
+  <desc id="desc">A colorful PlaySBC logo for SIP, RTP, B2BUA and regression play ground.</desc>
   <defs>
     <linearGradient id="bg" x1="40" y1="30" x2="920" y2="250" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#12355B"/>
@@ -40,7 +40,7 @@
 
   <g fill="#F8FAFC">
     <text x="312" y="126" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="68" font-weight="800" letter-spacing="0">PlaySBC</text>
-    <text x="316" y="169" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600" opacity="0.88">SIP, RTP, B2BUA, and media regression playground</text>
+    <text x="316" y="169" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600" opacity="0.88">SIP, RTP, B2BUA and regression play ground</text>
   </g>
 
   <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" font-weight="700">
