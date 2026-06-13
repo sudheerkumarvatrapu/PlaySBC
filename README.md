@@ -156,6 +156,14 @@ python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-m
 
 B2BUA dry-runs use a temporary output directory unless `--output-root <dir>` is provided. Inside that root, B2BUA logs are written to the single `b2bua-Regression` folder.
 
+Run the combined regression suite and generate an HTML pass/fail report:
+
+```bash
+python3 tools/run_regression_suite.py
+```
+
+The combined suite runs the SIPp smoke scenarios plus these B2BUA profiles: `basic-signalling`, `basic-media`, `transcoding`, `registered-inbound`, and `registered-outbound`.
+
 List the named B2BUA SIPp test profiles:
 
 ```bash
@@ -184,7 +192,9 @@ Notes:
 
 - The one-call B2BUA run generates a unified SIP ladder log by default.
 - Load runs should use `--no-ladder`.
-- The B2BUA runner dynamically registers the callee contact before starting the call.
+- The B2BUA runner uses SIPp REGISTER before starting registered call flows.
+- Registered inbound uses `uac-reg-inbound.xml` and `uas-reg-inbound.xml`.
+- Registered outbound uses `uac-reg-outbound.xml` and `uas-reg-outbound.xml`.
 - The `registered-outbound` profile also registers SIPp A and originates with that registered caller identity.
 - The `transcoding` profile uses PCMU RTP media with server codec preference set to PCMA.
 - G.711 media runs use Python UDP PCAP replay by default, so macOS raw-socket permission is not required.
@@ -217,6 +227,14 @@ log.sipp
 The SIP ladder is written into `log.sip`. B2BUA call lifecycle events are written into `log.call`. SIPp tool output is consolidated into `log.sipp`. The saved folder does not contain separate SIPp A or SIPp B leg folders. Use `--run-id <label>` to label a run inside the same files, or `--log-folder <name>` only when you intentionally want a different consolidated folder.
 
 Unit tests do not create log files. The generic SIPp regression runner writes to a temporary directory unless `--output-root <dir>` is provided.
+
+Combined regression reports are written under:
+
+```text
+logs/reports/
+```
+
+The latest HTML report is also copied to `logs/reports/latest.html`.
 
 ## Manual SIPp Debug Commands
 

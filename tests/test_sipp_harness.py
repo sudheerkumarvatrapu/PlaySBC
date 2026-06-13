@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tools import run_sipp_regression
 from tools import run_b2bua_sipp_smoke
+from tools import run_regression_suite
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -437,7 +438,56 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("caller=registered-a", platform)
             self.assertIn("callee=registered-b", platform)
             self.assertIn("register_caller=True", platform)
+            self.assertIn("registration_driver=sipp", platform)
+            self.assertIn("register_contact.xml", sipp)
+            self.assertIn("uac-reg-outbound.xml", sipp)
+            self.assertIn("uas-reg-outbound.xml", sipp)
             self.assertIn("-key caller registered-a", sipp)
+
+    def test_b2bua_registered_inbound_profile_uses_named_sipp_scripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "registered-inbound-profile",
+                    "--profile",
+                    "registered-inbound",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
+            self.assertIn("profile=registered-inbound", platform)
+            self.assertIn("caller=reg-inbound-a", platform)
+            self.assertIn("callee=registered-b", platform)
+            self.assertIn("registration_driver=sipp", platform)
+            self.assertIn("register_contact.xml", sipp)
+            self.assertIn("uac-reg-inbound.xml", sipp)
+            self.assertIn("uas-reg-inbound.xml", sipp)
+
+    def test_regression_report_html_marks_pass_and_fail(self):
+        rows = [
+            run_regression_suite.ReportRow("SIPp Smoke", "options", "passed", 0, 0.1, "/tmp/logs", "cmd"),
+            run_regression_suite.ReportRow("B2BUA", "media", "failed", 1, 0.2, "/tmp/logs", "cmd"),
+        ]
+
+        report = run_regression_suite.render_html(rows, "2026-06-13 10:00:00 IST", "unit-report")
+
+        self.assertIn("PlaySBC Regression Report", report)
+        self.assertIn("PASSED", report)
+        self.assertIn("FAILED", report)
+        self.assertIn("badge pass", report)
+        self.assertIn("badge fail", report)
 
     def test_b2bua_load_rtpengine_transcoding_profile_sets_load_shape(self):
         with tempfile.TemporaryDirectory() as tmp:

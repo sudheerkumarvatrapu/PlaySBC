@@ -65,6 +65,9 @@ BASE_DEFAULTS = {
     "media_backend": "internal",
     "rtpengine_url": "udp://127.0.0.1:2223",
     "rtpengine_timeout": 3.0,
+    "registration_driver": "sipp",
+    "uac_scenario": "",
+    "uas_scenario": "",
     "ladder": None,
     "output_root": "",
     "log_folder": DEFAULT_LOG_FOLDER,
@@ -90,12 +93,17 @@ B2BUA_PROFILES = {
         "media_backend": "rtpengine",
     },
     "registered-inbound": {
+        "caller": "reg-inbound-a",
         "callee": "registered-b",
+        "uac_scenario": "uac-reg-inbound.xml",
+        "uas_scenario": "uas-reg-inbound.xml",
     },
     "registered-outbound": {
         "caller": "registered-a",
         "callee": "registered-b",
         "register_caller": True,
+        "uac_scenario": "uac-reg-outbound.xml",
+        "uas_scenario": "uas-reg-outbound.xml",
     },
     "load-5cps-60s": {
         "callee": "load-user",
@@ -152,12 +160,15 @@ def call_limit(calls: int, rate: int, hold_ms: int) -> int:
     return max(calls, estimated_concurrent, 3)
 
 
+def resolve_scenario_path(value: str, fallback: Path) -> Path:
+    if not value:
+        return fallback
+    path = Path(value)
+    return path if path.is_absolute() else SCENARIO_DIR / path
+
+
 def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
-    scenario = getattr(
-        args,
-        "uas_scenario",
-        SCENARIO_DIR / ("b2bua_uas_b_media.xml" if args.media_enabled else "b2bua_uas_b.xml"),
-    )
+    scenario = getattr(args, "uas_scenario", SCENARIO_DIR / ("b2bua_uas_b_media.xml" if args.media_enabled else "b2bua_uas_b.xml"))
     command = [
         sipp_binary,
         "-sf",
@@ -192,11 +203,7 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
 
 
 def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
-    scenario = getattr(
-        args,
-        "uac_scenario",
-        SCENARIO_DIR / ("b2bua_uac_a_media.xml" if args.media_enabled else "b2bua_uac_a.xml"),
-    )
+    scenario = getattr(args, "uac_scenario", SCENARIO_DIR / ("b2bua_uac_a_media.xml" if args.media_enabled else "b2bua_uac_a.xml"))
     command = [
         sipp_binary,
         f"{args.host}:{args.server_port}",
@@ -282,8 +289,8 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
 
 def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
     if not args.media_enabled:
-        args.uac_scenario = SCENARIO_DIR / "b2bua_uac_a.xml"
-        args.uas_scenario = SCENARIO_DIR / "b2bua_uas_b.xml"
+        args.uac_scenario = resolve_scenario_path(args.uac_scenario, SCENARIO_DIR / "b2bua_uac_a.xml")
+        args.uas_scenario = resolve_scenario_path(args.uas_scenario, SCENARIO_DIR / "b2bua_uas_b.xml")
         args.media_pcap_resolved = ""
         return
 
@@ -327,6 +334,36 @@ def build_media_player_commands(args: argparse.Namespace) -> List[Tuple[str, Lis
     return [
         ("media-a-to-b2bua", base + ["--port", str(args.server_rtp_min)]),
         ("media-b-to-b2bua", base + ["--port", str(args.server_rtp_min + 2)]),
+    ]
+
+
+def build_register_command(args: argparse.Namespace, sipp_binary: str, user: str, contact_port: int) -> List[str]:
+    return [
+        sipp_binary,
+        f"{args.host}:{args.server_port}",
+        "-sf",
+        str(SCENARIO_DIR / "register_contact.xml"),
+        "-s",
+        user,
+        "-i",
+        args.host,
+        "-mi",
+        args.host,
+        "-p",
+        str(contact_port),
+        "-m",
+        "1",
+        "-r",
+        "1",
+        "-timeout",
+        "10",
+        "-timeout_error",
+        "-nostdin",
+        "-trace_err",
+        "-trace_msg",
+        "-trace_stat",
+        "-trace_counts",
+        "-trace_logs",
     ]
 
 
@@ -395,6 +432,7 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"caller={args.caller}",
         f"callee={args.callee}",
         f"register_caller={args.register_caller}",
+        f"registration_driver={args.registration_driver}",
         f"calls={args.calls}",
         f"rate={args.rate}",
         f"hold_ms={args.hold_ms}",
@@ -419,7 +457,7 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
 def collect_work_logs(log_dir: Path, work_dir: Path) -> None:
     append_file_section(log_dir, "log.platform", "SERVER STDOUT", work_dir / "server" / "stdout.log")
 
-    for leg in ("sipp-a-uac", "sipp-b-uas"):
+    for leg in ("registration-callee", "registration-caller", "sipp-a-uac", "sipp-b-uas"):
         leg_dir = work_dir / leg
         append_file_section(log_dir, "log.sipp", f"{leg.upper()} STDOUT", leg_dir / "stdout.log")
         append_file_section(log_dir, "log.sipp", f"{leg.upper()} STDERR", leg_dir / "stderr.log")
@@ -483,6 +521,15 @@ def register_caller(args: argparse.Namespace, log_dir: Path) -> int:
     return register_user(args, log_dir, args.caller, args.uac_port, args.caller_register_port, "caller")
 
 
+def run_sipp_registration(command: List[str], work_dir: Path, label: str) -> int:
+    step_dir = work_dir / label
+    step_dir.mkdir(exist_ok=True)
+    completed = subprocess.run(command, cwd=step_dir, text=True, capture_output=True)
+    (step_dir / "stdout.log").write_text(completed.stdout, encoding="utf-8")
+    (step_dir / "stderr.log").write_text(completed.stderr, encoding="utf-8")
+    return completed.returncode
+
+
 def resolve_log_dir(args: argparse.Namespace, run_id: str) -> Tuple[Path, bool]:
     log_folder = args.log_folder or DEFAULT_LOG_FOLDER
     if args.output_root:
@@ -497,7 +544,7 @@ def apply_profile(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         return
     defaults = parser.get_default
     for key, value in B2BUA_PROFILES[args.profile].items():
-        if getattr(args, key) == defaults(key):
+        if getattr(args, key, defaults(key)) == defaults(key):
             setattr(args, key, value)
 
 
@@ -537,6 +584,9 @@ def main() -> int:
     parser.add_argument("--media-backend", choices=("internal", "rtpengine"), default=BASE_DEFAULTS["media_backend"])
     parser.add_argument("--rtpengine-url", default=BASE_DEFAULTS["rtpengine_url"])
     parser.add_argument("--rtpengine-timeout", type=float, default=BASE_DEFAULTS["rtpengine_timeout"])
+    parser.add_argument("--registration-driver", choices=("sipp", "python"), default=BASE_DEFAULTS["registration_driver"])
+    parser.add_argument("--uac-scenario", default=BASE_DEFAULTS["uac_scenario"], help="Override SIPp UAC scenario XML")
+    parser.add_argument("--uas-scenario", default=BASE_DEFAULTS["uas_scenario"], help="Override SIPp UAS scenario XML")
     parser.add_argument("--ladder", dest="ladder", action="store_true", default=BASE_DEFAULTS["ladder"], help="Force unified B2BUA ladder logs on")
     parser.add_argument("--no-ladder", dest="ladder", action="store_false", help="Force unified B2BUA ladder logs off")
     parser.add_argument("--output-root", default=BASE_DEFAULTS["output_root"])
@@ -581,7 +631,15 @@ def main() -> int:
         uas_command = build_uas_command(args, sipp)
         uac_command = build_uac_command(args, sipp)
         media_commands = build_media_player_commands(args)
-        all_commands = [("server", server_command), ("sipp-b-uas", uas_command), ("sipp-a-uac", uac_command)]
+        callee_register_command = build_register_command(args, sipp, args.callee, args.uas_port)
+        caller_register_command = build_register_command(args, sipp, args.caller, args.uac_port) if args.register_caller else []
+        all_commands = [("server", server_command)]
+        if args.registration_driver == "sipp":
+            all_commands.append(("registration-callee", callee_register_command))
+        all_commands.append(("sipp-b-uas", uas_command))
+        if args.registration_driver == "sipp" and caller_register_command:
+            all_commands.append(("registration-caller", caller_register_command))
+        all_commands.append(("sipp-a-uac", uac_command))
         all_commands.extend(media_commands)
 
         server_process: Optional[subprocess.Popen] = None
@@ -590,7 +648,11 @@ def main() -> int:
         try:
             if args.dry_run:
                 results.append(SmokeResult("server", server_command, None, "dry-run", 0.0))
+                if args.registration_driver == "sipp":
+                    results.append(SmokeResult("registration-callee", callee_register_command, None, "dry-run", 0.0))
                 results.append(SmokeResult("sipp-b-uas", uas_command, None, "dry-run", 0.0))
+                if args.registration_driver == "sipp" and caller_register_command:
+                    results.append(SmokeResult("registration-caller", caller_register_command, None, "dry-run", 0.0))
                 results.append(SmokeResult("sipp-a-uac", uac_command, None, "dry-run", 0.0))
                 for name, command in media_commands:
                     results.append(SmokeResult(name, command, None, "dry-run", 0.0))
@@ -604,16 +666,22 @@ def main() -> int:
             if server_process.poll() is not None:
                 raise RuntimeError(f"Mini call server exited early. See {log_dir / 'log.platform'}")
 
+            started = time.monotonic()
+            if args.registration_driver == "sipp":
+                registration_rc = run_sipp_registration(callee_register_command, work_dir, "registration-callee")
+            else:
+                registration_rc = register_endpoint(args, log_dir)
+            results.append(SmokeResult("registration", [], registration_rc, "passed" if registration_rc == 0 else "failed", time.monotonic() - started))
+
             uas_process = start_process(uas_command, work_dir / "sipp-b-uas", work_dir / "sipp-b-uas" / "stdout.log")
             time.sleep(0.75)
 
-            started = time.monotonic()
-            registration_rc = register_endpoint(args, log_dir)
-            results.append(SmokeResult("registration", [], registration_rc, "passed" if registration_rc == 0 else "failed", time.monotonic() - started))
-
             if args.register_caller:
                 started = time.monotonic()
-                caller_registration_rc = register_caller(args, log_dir)
+                if args.registration_driver == "sipp":
+                    caller_registration_rc = run_sipp_registration(caller_register_command, work_dir, "registration-caller")
+                else:
+                    caller_registration_rc = register_caller(args, log_dir)
                 results.append(
                     SmokeResult(
                         "caller-registration",
