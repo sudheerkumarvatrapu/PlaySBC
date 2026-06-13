@@ -1,4 +1,4 @@
-# Mini Call Server Evolution Plan
+# PlaySBC Evolution Plan
 
 This project is an educational SIP/RTP lab server. The goal is to grow it phase by phase into an enterprise-style SBC lab platform, not a production-certified SBC.
 

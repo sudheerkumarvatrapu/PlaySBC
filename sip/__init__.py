@@ -1,2 +1,1 @@
-"""SIP dialog and transaction helpers for the mini call server."""
-
+"""SIP dialog and transaction helpers for PlaySBC."""

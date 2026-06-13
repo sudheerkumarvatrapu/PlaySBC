@@ -68,7 +68,7 @@ class CodecTests(unittest.TestCase):
 class DigestAuthTests(unittest.TestCase):
     def test_parse_digest_header_and_response(self):
         header = (
-            'Digest username="1001", realm="mini-call-server", nonce="abc", '
+            'Digest username="1001", realm="playsbc", nonce="abc", '
             'uri="sip:127.0.0.1:15062", response="placeholder", algorithm=MD5, '
             'qop=auth, nc=00000001, cnonce="client"'
         )
@@ -77,7 +77,7 @@ class DigestAuthTests(unittest.TestCase):
         self.assertEqual(parsed["qop"], "auth")
         response = server.make_digest_response(
             username="1001",
-            realm="mini-call-server",
+            realm="playsbc",
             password="secret-password",
             method="REGISTER",
             uri="sip:127.0.0.1:15062",

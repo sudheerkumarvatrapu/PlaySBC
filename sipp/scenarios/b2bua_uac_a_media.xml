@@ -12,7 +12,7 @@
       CSeq: 1 INVITE
       Contact: <sip:[caller]@[local_ip]:[local_port]>
       Max-Forwards: 70
-      Subject: SIPp A to mini-call-server B2BUA with RTP media
+      Subject: SIPp A to PlaySBC B2BUA with RTP media
       Content-Type: application/sdp
       Content-Length: [len]
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Small educational SIP + RTP media server with basic G.711 transcoding.
+PlaySBC educational SIP + RTP media server with basic G.711 transcoding.
 
 What it does:
   - Listens for SIP over UDP.
@@ -67,7 +67,7 @@ class ServerConfig:
     rtp_max: int = 10100
     log_dir: str = ""
     default_codec: str = "PCMU"
-    auth_realm: str = "mini-call-server"
+    auth_realm: str = "playsbc"
     users: Dict[str, str] = field(default_factory=dict)
     bridge_rooms: Tuple[str, ...] = ("bridge",)
     b2bua_routes: Dict[str, str] = field(default_factory=dict)
@@ -1727,7 +1727,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "To": to_header or ensure_tag(request.header("to")),
             "Call-ID": request.header("call-id"),
             "CSeq": request.header("cseq"),
-            "Server": "mini-python-call-server/0.1",
+            "Server": "PlaySBC/0.1",
             "Content-Length": str(len(body.encode("utf-8"))),
         }
         if extra_headers:
@@ -1999,8 +1999,8 @@ def make_sdp(
     }
     lines = [
         "v=0",
-        f"o=mini-call-server {int(time.time())} 1 IN IP4 {local_ip}",
-        "s=Mini Python Call Server",
+        f"o=playsbc {int(time.time())} 1 IN IP4 {local_ip}",
+        "s=PlaySBC",
         f"c=IN IP4 {local_ip}",
         "t=0 0",
         f"m=audio {rtp_port} RTP/AVP {' '.join(str(payload) for payload in offered_payloads)}",

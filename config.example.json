@@ -4,7 +4,7 @@
   "rtp_min": 10000,
   "rtp_max": 10100,
   "default_codec": "PCMU",
-  "auth_realm": "mini-call-server",
+  "auth_realm": "playsbc",
   "users": {
     "1001": "secret-password"
   },

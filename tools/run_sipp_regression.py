@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run SIPp regression scenarios against the mini call server."""
+"""Run SIPp regression scenarios against PlaySBC."""
 
 from __future__ import annotations
 
@@ -451,7 +451,7 @@ def main() -> int:
     parser.add_argument("--output-root", default="", help="Optional parent directory for persistent regression output")
     parser.add_argument("--run-id", default="", help="Run directory name; defaults to a timestamp")
     parser.add_argument("--sipp-bin", default="sipp", help="SIPp executable name or path")
-    parser.add_argument("--start-server", action="store_true", help="Start and stop the mini call server around the run")
+    parser.add_argument("--start-server", action="store_true", help="Start and stop PlaySBC around the run")
     parser.add_argument("--debug-server", action="store_true", help="Enable debug logging for the managed server")
     parser.add_argument("--dry-run", action="store_true", help="Write commands and validate scenarios without running SIPp")
     args = parser.parse_args()

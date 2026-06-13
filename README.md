@@ -1,4 +1,4 @@
-# Mini Python Call Server
+# PlaySBC
 
 Educational SIP/RTP lab server focused on local SIPp regression for B2BUA and media experiments.
 
@@ -9,16 +9,16 @@ For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
 macOS or Linux:
 
 ```bash
-git clone https://github.com/sudheerkumarvatrapu/Mini-Call-Server.git
-cd Mini-Call-Server
+git clone https://github.com/sudheerkumarvatrapu/PlaySBC.git
+cd PlaySBC
 python3 --version
 ```
 
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/sudheerkumarvatrapu/Mini-Call-Server.git
-cd Mini-Call-Server
+git clone https://github.com/sudheerkumarvatrapu/PlaySBC.git
+cd PlaySBC
 py -3 --version
 ```
 
@@ -33,8 +33,8 @@ Then inside Ubuntu:
 ```bash
 sudo apt update
 sudo apt install -y git python3 sipp
-git clone https://github.com/sudheerkumarvatrapu/Mini-Call-Server.git
-cd Mini-Call-Server
+git clone https://github.com/sudheerkumarvatrapu/PlaySBC.git
+cd PlaySBC
 ```
 
 ## SIPp Setup
@@ -220,7 +220,7 @@ Unit tests do not create log files. The generic SIPp regression runner writes to
 
 ## Manual SIPp Debug Commands
 
-For a direct SIPp UAC call into the mini server:
+For a direct SIPp UAC call into PlaySBC:
 
 ```bash
 python3 mini_call_server.py --ip 127.0.0.1 --sip-port 5062 --rtp-min 10000 --rtp-max 10100 --debug
@@ -236,7 +236,7 @@ For manual B2BUA scenario debugging, start SIPp B:
 sipp -sf sipp/scenarios/b2bua_uas_b.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25082 -m 1 -trace_msg -trace_err -trace_logs -min_rtp_port 27000 -max_rtp_port 27200
 ```
 
-Then start SIPp A toward a running mini-call-server B2BUA on port `25062`:
+Then start SIPp A toward a running PlaySBC B2BUA on port `25062`:
 
 ```bash
 sipp 127.0.0.1:25062 -sf sipp/scenarios/b2bua_uac_a.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25081 -m 1 -r 1 -d 1000 -trace_msg -trace_err -trace_logs -min_rtp_port 26000 -max_rtp_port 26200

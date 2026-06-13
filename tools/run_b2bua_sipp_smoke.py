@@ -257,7 +257,7 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "rtp_max": args.server_rtp_max,
         "log_dir": str(log_dir),
         "default_codec": args.server_codec,
-        "auth_realm": "mini-call-server",
+        "auth_realm": "playsbc",
         "users": {},
         "bridge_rooms": ["bridge"],
         "b2bua_routes": {},
