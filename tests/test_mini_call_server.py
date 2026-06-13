@@ -119,9 +119,6 @@ class ConfigTests(unittest.TestCase):
                 rtp_min=None,
                 rtp_max=None,
                 log_dir=None,
-                recording_dir=None,
-                artifact_root=None,
-                run_id=None,
                 default_codec=None,
                 auth_realm=None,
                 debug=None,
@@ -145,13 +142,13 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 server.load_config_file(str(config_path))
 
-    def test_resolve_artifact_dirs_creates_unique_run_paths(self):
+    def test_resolve_log_dir_uses_configured_path(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config = server.ServerConfig(artifact_root=tmp, run_id="sanity")
-            log_dir, recording_dir, run_dir = server.resolve_artifact_dirs(config)
-            self.assertEqual(run_dir, Path(tmp) / "sanity")
-            self.assertEqual(log_dir, Path(tmp) / "sanity" / "logs")
-            self.assertEqual(recording_dir, Path(tmp) / "sanity" / "recordings")
+            config = server.ServerConfig(log_dir=str(Path(tmp) / "server-logs"))
+            self.assertEqual(server.resolve_log_dir(config), Path(tmp) / "server-logs")
+
+    def test_resolve_log_dir_is_disabled_by_default(self):
+        self.assertIsNone(server.resolve_log_dir(server.ServerConfig()))
 
 
 class RoutingEngineTests(unittest.TestCase):
@@ -197,6 +194,35 @@ class RoutingEngineTests(unittest.TestCase):
 
 
 class B2BUAFlowLogTests(unittest.TestCase):
+    def test_sbc_logger_creates_category_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = server.SbcLogger(Path(tmp))
+            logger.sip("SIP TEST", "method=OPTIONS", call_id="call-1")
+            logger.media("MEDIA TEST", "rtp_packets=1", call_id="call-1")
+            logger.transcoding("TRANSCODING TEST", "src=PCMU dst=PCMA")
+            logger.udp("UDP TEST", "protocol=sip")
+
+            self.assertTrue((Path(tmp) / "log.sip").exists())
+            self.assertTrue((Path(tmp) / "log.media").exists())
+            self.assertTrue((Path(tmp) / "log.transcoding").exists())
+            self.assertTrue((Path(tmp) / "log.platform").exists())
+            self.assertTrue((Path(tmp) / "log.networking").exists())
+            self.assertTrue((Path(tmp) / "log.udp").exists())
+            self.assertTrue((Path(tmp) / "log.tcp").exists())
+            self.assertTrue((Path(tmp) / "log.tls").exists())
+            self.assertTrue((Path(tmp) / "log.call").exists())
+            self.assertTrue((Path(tmp) / "log.sipp").exists())
+            self.assertIn("SIP TEST", (Path(tmp) / "log.sip").read_text(encoding="utf-8"))
+            self.assertIn("MEDIA TEST", (Path(tmp) / "log.media").read_text(encoding="utf-8"))
+            self.assertIn("TRANSCODING TEST", (Path(tmp) / "log.transcoding").read_text(encoding="utf-8"))
+
+    def test_sbc_logger_is_noop_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = server.SbcLogger(None)
+            logger.sip("SIP TEST", "method=OPTIONS")
+            logger.media("MEDIA TEST", "rtp_packets=1")
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def test_ladder_renderer_uses_clear_three_column_format(self):
         with tempfile.TemporaryDirectory() as tmp:
             route = server.RouteResult(
@@ -204,13 +230,15 @@ class B2BUAFlowLogTests(unittest.TestCase):
                 policy_name="registered",
                 source="registrar",
             )
-            flow = server.B2BUAFlowLog(Path(tmp), "call-123", "callee", route)
+            logger = server.SbcLogger(Path(tmp))
+            flow = server.B2BUAFlowLog(Path(tmp), "call-123", "callee", route, logger=logger)
             flow.sip("SIPp A", "B2BUA", "INVITE")
             flow.sip("B2BUA", "SIPp B", "INVITE")
             flow.sip("SIPp B", "B2BUA", "200 OK")
             flow.sip("B2BUA", "SIPp A", "200 OK")
             flow.render_ladder()
 
+            self.assertEqual(flow.path, Path(tmp) / "log.call")
             text = flow.path.read_text(encoding="utf-8")
             self.assertIn("SIP LADDER", text)
             self.assertIn("SIPp A", text)
@@ -221,6 +249,11 @@ class B2BUAFlowLogTests(unittest.TestCase):
             self.assertIn("                    |-------------------------->|", text)
             self.assertIn("03                  |                           |          200 OK", text)
             self.assertIn("                    |                           |<--------------------------|", text)
+
+            sip_log = (Path(tmp) / "log.sip").read_text(encoding="utf-8")
+            self.assertIn("B2BUA SIP FLOW", sip_log)
+            self.assertIn("B2BUA SIP LADDER", sip_log)
+            self.assertIn("SIP LADDER", sip_log)
 
 
 if __name__ == "__main__":

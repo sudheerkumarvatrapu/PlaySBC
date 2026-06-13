@@ -3,10 +3,6 @@
   "sip_port": 5062,
   "rtp_min": 10000,
   "rtp_max": 10100,
-  "log_dir": "logs",
-  "recording_dir": "recordings",
-  "artifact_root": "artifacts",
-  "run_id": "",
   "default_codec": "PCMU",
   "auth_realm": "mini-call-server",
   "users": {

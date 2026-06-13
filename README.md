@@ -88,6 +88,8 @@ Run all current SIPp regression scenarios against a managed local server:
 python3 tools/run_sipp_regression.py --start-server
 ```
 
+By default this runner uses a temporary output directory and does not create project logs. Add `--output-root <dir>` only when you want to keep the generic regression output.
+
 Run one scenario:
 
 ```bash
@@ -147,32 +149,69 @@ Preview the B2BUA commands without running SIPp:
 python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000 --dry-run
 ```
 
+B2BUA dry-runs use a temporary output directory unless `--output-root <dir>` is provided.
+
+List the named B2BUA SIPp test profiles:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --list-profiles
+```
+
+Run named profiles:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --profile basic-signalling
+python3 tools/run_b2bua_sipp_smoke.py --profile basic-media
+python3 tools/run_b2bua_sipp_smoke.py --profile transcoding
+python3 tools/run_b2bua_sipp_smoke.py --profile registered-inbound
+python3 tools/run_b2bua_sipp_smoke.py --profile registered-outbound
+python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s
+```
+
+RTPengine-backed profiles require RTPengine NG control to be reachable at `--rtpengine-url`:
+
+```bash
+python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine --rtpengine-url udp://127.0.0.1:2223
+python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s-rtpengine-transcoding --rtpengine-url udp://127.0.0.1:2223
+```
+
 Notes:
 
 - The one-call B2BUA run generates a unified SIP ladder log by default.
 - Load runs should use `--no-ladder`.
 - The B2BUA runner dynamically registers the callee contact before starting the call.
+- The `registered-outbound` profile also registers SIPp A and originates with that registered caller identity.
+- The `transcoding` profile uses PCMU RTP media with server codec preference set to PCMA.
 - G.711 media runs use Python UDP PCAP replay by default, so macOS raw-socket permission is not required.
 - `--media-driver sipp-pcap` can be used only when SIPp has PCAP support and the OS allows raw-socket packet replay.
 - RTPengine mode expects RTPengine NG control on `udp://127.0.0.1:2223`; internal media remains the default.
 
-## Local Artifacts
+## Local Logs
 
-Every regression run writes a fresh folder under:
+Only the B2BUA SIPp runner writes persistent project logs by default. Each run creates a fresh folder under:
 
 ```text
-artifacts/sipp/
+logs/
 ```
 
 Important files:
 
 ```text
-summary.json
-server/stdout.log
-sipp-a-uac/
-sipp-b-uas/
-server-artifacts/server/logs/
+log.sip
+log.media
+log.transcoding
+log.platform
+log.networking
+log.udp
+log.tcp
+log.tls
+log.call
+log.sipp
 ```
+
+The SIP ladder is written into `log.sip`. B2BUA call lifecycle events are written into `log.call`. SIPp tool output is consolidated into `log.sipp`. The saved run folder does not contain separate SIPp A or SIPp B leg folders.
+
+Unit tests do not create log files. Legacy smoke clients do not write transcripts unless `--output-dir <dir>` is provided. The generic SIPp regression runner writes to a temporary directory unless `--output-root <dir>` is provided.
 
 ## Manual SIPp Debug Commands
 

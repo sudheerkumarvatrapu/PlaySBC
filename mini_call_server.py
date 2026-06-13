@@ -29,7 +29,6 @@ import secrets
 import socket
 import struct
 import time
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,10 +65,7 @@ class ServerConfig:
     sip_port: int = 5060
     rtp_min: int = 10000
     rtp_max: int = 10100
-    log_dir: str = "logs"
-    recording_dir: str = "recordings"
-    artifact_root: str = ""
-    run_id: str = ""
+    log_dir: str = ""
     default_codec: str = "PCMU"
     auth_realm: str = "mini-call-server"
     users: Dict[str, str] = field(default_factory=dict)
@@ -93,9 +89,6 @@ SERVER_CONFIG_KEYS = {
     "rtp_min",
     "rtp_max",
     "log_dir",
-    "recording_dir",
-    "artifact_root",
-    "run_id",
     "default_codec",
     "auth_realm",
     "users",
@@ -266,6 +259,80 @@ class RoutingEngine:
         return None
 
 
+class SbcLogger:
+    CATEGORY_FILES = {
+        "sip": "log.sip",
+        "media": "log.media",
+        "transcoding": "log.transcoding",
+        "platform": "log.platform",
+        "networking": "log.networking",
+        "udp": "log.udp",
+        "tcp": "log.tcp",
+        "tls": "log.tls",
+        "call": "log.call",
+        "sipp": "log.sipp",
+    }
+
+    def __init__(self, log_dir: Optional[Path]):
+        self.log_dir = log_dir
+        self.enabled = log_dir is not None
+        self.paths = {category: log_dir / filename for category, filename in self.CATEGORY_FILES.items()} if log_dir else {}
+        if not self.enabled:
+            return
+        assert log_dir is not None
+        log_dir.mkdir(parents=True, exist_ok=True)
+        for category, path in self.paths.items():
+            path.write_text("", encoding="utf-8")
+            self.write(category, "LOG START", f"file={path.name}")
+
+    def write(self, category: str, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        if not self.enabled:
+            return
+        category = category.lower()
+        path = self.paths.get(category) or self.paths["platform"]
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        parts = [timestamp, event]
+        if call_id:
+            parts.append(f"call_id={call_id}")
+        if leg:
+            parts.append(f"leg={leg}")
+        if detail:
+            parts.append(detail)
+        with path.open("a", encoding="utf-8") as log_file:
+            log_file.write(" | ".join(parts) + "\n")
+
+    def sip(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("sip", event, detail, call_id=call_id, leg=leg)
+
+    def media(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("media", event, detail, call_id=call_id, leg=leg)
+
+    def transcoding(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("transcoding", event, detail, call_id=call_id, leg=leg)
+
+    def platform(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("platform", event, detail, call_id=call_id, leg=leg)
+
+    def networking(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("networking", event, detail, call_id=call_id, leg=leg)
+
+    def udp(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("udp", event, detail, call_id=call_id, leg=leg)
+
+    def write_block(self, category: str, title: str, block: str, call_id: str = "") -> None:
+        if not self.enabled:
+            return
+        category = category.lower()
+        path = self.paths.get(category) or self.paths["platform"]
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        header = f"{timestamp} | {title}"
+        if call_id:
+            header += f" | call_id={call_id}"
+        with path.open("a", encoding="utf-8") as log_file:
+            log_file.write(header + "\n")
+            log_file.write(block.rstrip() + "\n")
+
+
 class B2BUAFlowLog:
     LADDER_PARTICIPANTS = ("SIPp A", "B2BUA", "SIPp B")
     LADDER_STEP_WIDTH = 6
@@ -273,17 +340,20 @@ class B2BUAFlowLog:
 
     def __init__(
         self,
-        log_dir: Path,
+        log_dir: Optional[Path],
         inbound_call_id: str,
         target_user: str,
         route: RouteResult,
         enabled: bool = True,
+        logger: Optional[SbcLogger] = None,
     ):
         self.enabled = enabled
+        self.logger = logger
+        self.inbound_call_id = inbound_call_id
         self.events: List[Tuple[str, str, str, str]] = []
-        self.path = log_dir / f"b2bua_{safe_filename(inbound_call_id)}.log" if enabled else None
+        self.path = log_dir / "log.call" if enabled and log_dir else None
         if self.path:
-            self.path.write_text("", encoding="utf-8")
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.write(
             "CALL START",
             (
@@ -301,6 +371,13 @@ class B2BUAFlowLog:
             line += f" {detail}"
         with self.path.open("a", encoding="utf-8") as log_file:
             log_file.write(line + "\n")
+        if self.logger and event != "SIP FLOW":
+            self.logger.write(
+                log_category_for_flow_event(event),
+                f"B2BUA {event}",
+                detail,
+                call_id=self.inbound_call_id,
+            )
 
     def sip(self, sender: str, receiver: str, message: str, detail: str = "") -> None:
         if not self.enabled:
@@ -308,19 +385,34 @@ class B2BUAFlowLog:
         self.events.append((sender, receiver, message, detail))
         suffix = f" {detail}" if detail else ""
         self.write("SIP FLOW", f"{sender} -> {receiver}: {message}{suffix}")
+        if self.logger:
+            self.logger.sip(
+                "B2BUA SIP FLOW",
+                f"{sender} -> {receiver}: {message}{suffix}",
+                call_id=self.inbound_call_id,
+                leg=f"{sender}->{receiver}",
+            )
 
     def render_ladder(self) -> None:
         if not self.path:
             return
+        ladder = self.render_ladder_text()
         with self.path.open("a", encoding="utf-8") as log_file:
-            log_file.write("\nSIP LADDER\n")
-            log_file.write(self._ladder_header() + "\n")
-            log_file.write(self._ladder_separator() + "\n")
-            log_file.write(self._ladder_lifeline() + "\n")
-            for index, (sender, receiver, message, detail) in enumerate(self.events, start=1):
-                for line in self._ladder_event(index, sender, receiver, message):
-                    log_file.write(line + "\n")
-            log_file.write(self._ladder_lifeline() + "\n")
+            log_file.write("\n" + ladder + "\n")
+        if self.logger:
+            self.logger.write_block("sip", "B2BUA SIP LADDER", ladder, call_id=self.inbound_call_id)
+
+    def render_ladder_text(self) -> str:
+        lines = [
+            "SIP LADDER",
+            self._ladder_header(),
+            self._ladder_separator(),
+            self._ladder_lifeline(),
+        ]
+        for index, (sender, receiver, message, detail) in enumerate(self.events, start=1):
+            lines.extend(self._ladder_event(index, sender, receiver, message))
+        lines.append(self._ladder_lifeline())
+        return "\n".join(lines)
 
     def _ladder_header(self) -> str:
         columns = [f"{participant:^{self.LADDER_COLUMN_WIDTH}}" for participant in self.LADDER_PARTICIPANTS]
@@ -426,70 +518,6 @@ class B2BUACall:
 
 
 @dataclass
-class CallArtifacts:
-    call_id: str
-    log_dir: Path
-    recording_dir: Path
-    log_path: Path = field(init=False)
-    wav_path: Path = field(init=False)
-    wav_file: Optional[wave.Wave_write] = field(default=None, init=False)
-    recording_warning_logged: bool = field(default=False, init=False)
-    unsupported_payloads_logged: set = field(default_factory=set, init=False)
-
-    def __post_init__(self) -> None:
-        safe_call_id = safe_filename(self.call_id)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.recording_dir.mkdir(parents=True, exist_ok=True)
-        self.log_path = self.log_dir / f"{safe_call_id}.log"
-        self.wav_path = self.recording_dir / f"{safe_call_id}.wav"
-        self.log_path.write_text("", encoding="utf-8")
-        self.log("CALL START", f"call_id={self.call_id}")
-
-    def log(self, event: str, detail: str = "") -> None:
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        line = f"{timestamp} {event}"
-        if detail:
-            line += f" {detail}"
-        with self.log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(line + "\n")
-
-    def record_payload(self, payload_type: int, payload: bytes) -> None:
-        if not payload:
-            return
-
-        if audioop is None:
-            if not self.recording_warning_logged:
-                self.log("RECORDING SKIPPED", "audioop unavailable; cannot convert G.711 to WAV")
-                self.recording_warning_logged = True
-            return
-
-        if payload_type == PCMU:
-            pcm = audioop.ulaw2lin(payload, 2)
-        elif payload_type == PCMA:
-            pcm = audioop.alaw2lin(payload, 2)
-        else:
-            if payload_type not in self.unsupported_payloads_logged:
-                self.log("RECORDING SKIPPED", f"unsupported_payload_type={payload_type}")
-                self.unsupported_payloads_logged.add(payload_type)
-            return
-
-        if self.wav_file is None:
-            self.wav_file = wave.open(str(self.wav_path), "wb")
-            self.wav_file.setnchannels(1)
-            self.wav_file.setsampwidth(2)
-            self.wav_file.setframerate(8000)
-            self.log("RECORDING START", f"path={self.wav_path}")
-
-        self.wav_file.writeframes(pcm)
-
-    def close(self) -> None:
-        if self.wav_file:
-            self.wav_file.close()
-            self.wav_file = None
-            self.log("RECORDING CLOSED", f"path={self.wav_path}")
-
-
-@dataclass
 class RtpSession:
     call_id: str
     local_ip: str
@@ -497,7 +525,8 @@ class RtpSession:
     preferred_payload: int = PCMU
     remote_payloads: Tuple[int, ...] = field(default_factory=tuple)
     dtmf_payload_type: Optional[int] = None
-    artifacts: Optional[CallArtifacts] = None
+    logger: Optional[SbcLogger] = None
+    leg_label: str = ""
     remote_addr: Optional[Tuple[str, int]] = None
     transport: Optional[asyncio.DatagramTransport] = None
     sequence: int = field(default_factory=lambda: random.randint(0, 65535))
@@ -523,9 +552,15 @@ class RtpSession:
     relay_wait_logged: bool = False
     closed: bool = False
 
-    def log(self, event: str, detail: str = "") -> None:
-        if self.artifacts:
-            self.artifacts.log(event, detail)
+    def log(self, event: str, detail: str = "", category: Optional[str] = None) -> None:
+        if self.logger:
+            self.logger.write(
+                category or log_category_for_session_event(event),
+                event,
+                detail,
+                call_id=self.call_id,
+                leg=self.leg_label or self.media_mode,
+            )
 
     def mark_ack(self) -> None:
         self.acknowledged_at = time.time()
@@ -540,8 +575,6 @@ class RtpSession:
         self.bytes_received += len(payload)
         self.payload_types_received[payload_type] = self.payload_types_received.get(payload_type, 0) + 1
         self.last_rtp_at = time.time()
-        if record_audio and self.artifacts:
-            self.artifacts.record_payload(payload_type, payload)
 
     def record_rtp_sent(self, payload: bytes) -> None:
         self.packets_sent += 1
@@ -612,34 +645,54 @@ class RtpSession:
                 f"{self.analyzer.summary_text()}"
             ),
         )
-        if self.artifacts:
-            self.artifacts.close()
 
 
 class G711Transcoder:
     """Converts RTP payloads between PCMU and PCMA."""
 
+    def __init__(self, logger: Optional[SbcLogger] = None):
+        self.logger = logger
+        self.logged_pairs: set = set()
+
     def convert(self, payload: bytes, src_pt: int, dst_pt: int) -> bytes:
         if src_pt == dst_pt:
             return payload
 
+        pair = (src_pt, dst_pt)
         if audioop is None:
             logging.warning(
                 "audioop is unavailable; cannot transcode payload type %s to %s",
                 src_pt,
                 dst_pt,
             )
+            if self.logger and pair not in self.logged_pairs:
+                self.logger.transcoding(
+                    "TRANSCODE BYPASS",
+                    f"reason=audioop_unavailable src={CODEC_NAMES.get(src_pt, src_pt)} dst={CODEC_NAMES.get(dst_pt, dst_pt)}",
+                )
+                self.logged_pairs.add(pair)
             return payload
 
         if src_pt == PCMU and dst_pt == PCMA:
+            self._log_conversion(src_pt, dst_pt)
             linear = audioop.ulaw2lin(payload, 2)
             return audioop.lin2alaw(linear, 2)
 
         if src_pt == PCMA and dst_pt == PCMU:
+            self._log_conversion(src_pt, dst_pt)
             linear = audioop.alaw2lin(payload, 2)
             return audioop.lin2ulaw(linear, 2)
 
         return payload
+
+    def _log_conversion(self, src_pt: int, dst_pt: int) -> None:
+        pair = (src_pt, dst_pt)
+        if self.logger and pair not in self.logged_pairs:
+            self.logger.transcoding(
+                "TRANSCODE ACTIVE",
+                f"src={CODEC_NAMES.get(src_pt, src_pt)} dst={CODEC_NAMES.get(dst_pt, dst_pt)}",
+            )
+            self.logged_pairs.add(pair)
 
 
 class RtpProtocol(asyncio.DatagramProtocol):
@@ -650,17 +703,38 @@ class RtpProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.session.transport = transport  # type: ignore[assignment]
         logging.info("RTP listening on %s:%s", self.session.local_ip, self.session.local_port)
+        if self.session.logger:
+            self.session.logger.udp(
+                "UDP LISTENING",
+                f"protocol=rtp local={self.session.local_ip}:{self.session.local_port}",
+                call_id=self.session.call_id,
+                leg=self.session.leg_label or self.session.media_mode,
+            )
         self.session.log("RTP LISTENING", f"local={self.session.local_ip}:{self.session.local_port}")
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
         try:
             packet = RtpPacket.parse(data)
         except ValueError:
+            if self.session.logger:
+                self.session.logger.networking(
+                    "RTP PARSE FAILED",
+                    f"source={addr[0]}:{addr[1]} bytes={len(data)}",
+                    call_id=self.session.call_id,
+                    leg=self.session.leg_label or self.session.media_mode,
+                )
             return
 
         first_packet = self.session.remote_addr is None
         self.session.remote_addr = addr
         if first_packet:
+            if self.session.logger:
+                self.session.logger.udp(
+                    "UDP RX FIRST RTP",
+                    f"source={addr[0]}:{addr[1]} bytes={len(data)} payload_type={packet.payload_type}",
+                    call_id=self.session.call_id,
+                    leg=self.session.leg_label or self.session.media_mode,
+                )
             self.session.log(
                 "RTP REMOTE",
                 f"remote={addr[0]}:{addr[1]} first_payload_type={CODEC_NAMES.get(packet.payload_type, packet.payload_type)}",
@@ -722,15 +796,15 @@ class RtpProtocol(asyncio.DatagramProtocol):
 
 
 class MediaServer:
-    def __init__(self, local_ip: str, port_min: int, port_max: int, log_dir: Path, recording_dir: Path):
+    def __init__(self, local_ip: str, port_min: int, port_max: int, log_dir: Optional[Path], logger: SbcLogger):
         self.local_ip = local_ip
         self.port_min = port_min if port_min % 2 == 0 else port_min + 1
         self.port_max = port_max
         self.log_dir = log_dir
-        self.recording_dir = recording_dir
+        self.logger = logger
         self.sessions: Dict[str, RtpSession] = {}
         self.bridge_waiting: Dict[str, RtpSession] = {}
-        self.transcoder = G711Transcoder()
+        self.transcoder = G711Transcoder(logger)
         self._next_port = self.port_min
 
     async def create_session(
@@ -741,13 +815,13 @@ class MediaServer:
         dtmf_payload_type: Optional[int],
         bridge_id: str = "",
         media_mode: str = "echo",
+        leg_label: str = "",
     ) -> RtpSession:
         if call_id in self.sessions:
             return self.sessions[call_id]
 
         loop = asyncio.get_running_loop()
         local_port = self._allocate_port()
-        artifacts = CallArtifacts(call_id=call_id, log_dir=self.log_dir, recording_dir=self.recording_dir)
         session = RtpSession(
             call_id=call_id,
             local_ip=self.local_ip,
@@ -755,7 +829,8 @@ class MediaServer:
             preferred_payload=preferred_payload,
             remote_payloads=remote_payloads,
             dtmf_payload_type=dtmf_payload_type,
-            artifacts=artifacts,
+            logger=self.logger,
+            leg_label=leg_label,
             media_mode="bridge" if bridge_id else media_mode,
             bridge_id=bridge_id,
         )
@@ -822,6 +897,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         local_ip: str,
         local_port: int,
         media: MediaServer,
+        logger: SbcLogger,
         default_payload: int,
         auth_realm: str,
         users: Dict[str, str],
@@ -835,6 +911,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.local_ip = local_ip
         self.local_port = local_port
         self.media = media
+        self.logger = logger
         self.default_payload = default_payload
         self.auth_realm = auth_realm
         self.users = users
@@ -856,6 +933,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
         logging.info("SIP listening on udp:%s:%s", self.local_ip, self.local_port)
+        self.logger.platform("SIP SERVER STARTED", f"transport=udp local={self.local_ip}:{self.local_port}")
+        self.logger.udp("UDP LISTENING", f"protocol=sip local={self.local_ip}:{self.local_port}")
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
         try:
@@ -863,14 +942,26 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             message = parse_sip_message(text, addr)
         except Exception:
             logging.exception("Could not parse SIP message from %s:%s", *addr)
+            self.logger.networking("SIP PARSE FAILED", f"source={addr[0]}:{addr[1]} bytes={len(data)}")
             return
 
+        self.logger.udp("UDP RX", f"protocol=sip source={addr[0]}:{addr[1]} bytes={len(data)}")
         if message.is_response:
             logging.info("SIP response %s from %s:%s", message.status_code, *addr)
+            self.logger.sip(
+                "SIP RX RESPONSE",
+                f"status={message.status_code} reason={message.reason_phrase} source={addr[0]}:{addr[1]} cseq={message.header('cseq')}",
+                call_id=message.header("call-id"),
+            )
             self.handle_response(message)
             return
 
         logging.info("SIP %s from %s:%s", message.method, *addr)
+        self.logger.sip(
+            "SIP RX REQUEST",
+            f"method={message.method} source={addr[0]}:{addr[1]} target={message.start_line} cseq={message.header('cseq')}",
+            call_id=message.header("call-id"),
+        )
         asyncio.create_task(self.handle_message(message))
 
     def handle_response(self, message: SipMessage) -> None:
@@ -1143,6 +1234,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             target_user,
             route,
             enabled=self.b2bua_ladder_logs,
+            logger=self.logger,
         )
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
@@ -1153,6 +1245,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             remote_payloads,
             dtmf_payload_type,
             media_mode="b2bua",
+            leg_label="inbound",
         )
         inbound_remote = parse_sdp_remote_addr(message.body, message.source[0])
         if inbound_remote:
@@ -1166,6 +1259,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             remote_payloads,
             dtmf_payload_type,
             media_mode="b2bua",
+            leg_label="outbound",
         )
 
         outbound_from = f"Mini B2BUA <sip:b2bua@{self.local_ip}:{self.local_port}>;tag={secrets.token_hex(6)}"
@@ -1297,6 +1391,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             target_user,
             route,
             enabled=self.b2bua_ladder_logs,
+            logger=self.logger,
         )
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
@@ -1641,6 +1736,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         lines = [f"SIP/2.0 {status} {reason}"]
         lines.extend(f"{name}: {value}" for name, value in headers.items() if value)
         packet = (CRLF.join(lines) + CRLF + CRLF + body).encode("utf-8")
+        self.logger.sip(
+            "SIP TX RESPONSE",
+            f"status={status} reason={reason} destination={request.source[0]}:{request.source[1]} cseq={request.header('cseq')}",
+            call_id=request.header("call-id"),
+        )
         self._send_packet(packet, request.source)
         self.transactions.cache_response(
             request.method,
@@ -1654,6 +1754,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     def _send_packet(self, packet: bytes, destination: Tuple[str, int]) -> None:
         if self.transport:
+            self.logger.udp("UDP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
             self.transport.sendto(packet, destination)
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
@@ -1798,6 +1899,28 @@ def codec_payload(codec_name: str) -> int:
 
 def format_payloads(payloads: Tuple[int, ...]) -> str:
     return ",".join(CODEC_NAMES.get(payload, str(payload)) for payload in payloads) or "none"
+
+
+def log_category_for_session_event(event: str) -> str:
+    upper = event.upper()
+    if upper.startswith(("SIP", "SDP", "INVITE", "BYE", "ACK", "DIALOG")):
+        return "sip"
+    if "TRANSCOD" in upper:
+        return "transcoding"
+    if upper.startswith("RTP") or "DTMF" in upper or "BRIDGE" in upper or "B2BUA" in upper or "CALL SUMMARY" in upper:
+        return "media"
+    if "NETWORK" in upper:
+        return "networking"
+    return "platform"
+
+
+def log_category_for_flow_event(event: str) -> str:
+    upper = event.upper()
+    if "RTPENGINE" in upper or "MEDIA" in upper:
+        return "media"
+    if "CALL" in upper or "ROUTE" in upper or "FAILURE" in upper:
+        return "sip"
+    return "platform"
 
 
 def safe_filename(value: str) -> str:
@@ -1964,9 +2087,6 @@ def coerce_config_value(key: str, value: Any) -> Any:
     if key in {
         "sip_ip",
         "log_dir",
-        "recording_dir",
-        "artifact_root",
-        "run_id",
         "default_codec",
         "auth_realm",
         "media_backend",
@@ -1983,9 +2103,6 @@ def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> Serve
         "rtp_min": getattr(args, "rtp_min", None),
         "rtp_max": getattr(args, "rtp_max", None),
         "log_dir": getattr(args, "log_dir", None),
-        "recording_dir": getattr(args, "recording_dir", None),
-        "artifact_root": getattr(args, "artifact_root", None),
-        "run_id": getattr(args, "run_id", None),
         "default_codec": getattr(args, "default_codec", None),
         "auth_realm": getattr(args, "auth_realm", None),
         "media_backend": getattr(args, "media_backend", None),
@@ -2028,18 +2145,8 @@ def validate_config(config: ServerConfig) -> None:
             parse_sip_uri(format_route_target(policy.target, "test-user"))
 
 
-def resolve_artifact_dirs(config: ServerConfig) -> Tuple[Path, Path, Optional[Path]]:
-    if not config.artifact_root:
-        return Path(config.log_dir), Path(config.recording_dir), None
-
-    run_id = config.run_id or time.strftime("run-%Y%m%d-%H%M%S", time.localtime())
-    root = Path(config.artifact_root)
-    run_dir = root / safe_filename(run_id)
-    suffix = 2
-    while run_dir.exists() and not config.run_id:
-        run_dir = root / f"{safe_filename(run_id)}-{suffix}"
-        suffix += 1
-    return run_dir / "logs", run_dir / "recordings", run_dir
+def resolve_log_dir(config: ServerConfig) -> Optional[Path]:
+    return Path(config.log_dir) if config.log_dir else None
 
 
 async def main() -> None:
@@ -2050,9 +2157,6 @@ async def main() -> None:
     parser.add_argument("--rtp-min", type=int, help="First RTP UDP port")
     parser.add_argument("--rtp-max", type=int, help="Last RTP UDP port")
     parser.add_argument("--log-dir", help="Directory for per-call log files")
-    parser.add_argument("--recording-dir", help="Directory for inbound RTP WAV recordings")
-    parser.add_argument("--artifact-root", help="Create a fresh run folder under this directory for logs and recordings")
-    parser.add_argument("--run-id", help="Run folder name when --artifact-root is used")
     parser.add_argument("--default-codec", type=str.upper, choices=sorted(CODEC_PAYLOADS), help="Preferred answer codec")
     parser.add_argument("--auth-realm", help="SIP digest authentication realm")
     parser.add_argument("--media-backend", choices=sorted(MEDIA_BACKENDS), help="B2BUA media backend")
@@ -2071,29 +2175,37 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    log_dir, recording_dir, run_dir = resolve_artifact_dirs(config)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    recording_dir.mkdir(parents=True, exist_ok=True)
-    if run_dir:
-        logging.info("Writing run artifacts under %s", run_dir)
+    log_dir = resolve_log_dir(config)
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logging.info("Writing call logs under %s", log_dir)
+    else:
+        logging.info("Persistent call logs disabled")
+    sbc_logger = SbcLogger(log_dir)
+    sbc_logger.platform(
+        "SERVER CONFIG",
+        f"sip={config.sip_ip}:{config.sip_port} rtp_range={config.rtp_min}-{config.rtp_max} media_backend={config.media_backend}",
+    )
 
     media = MediaServer(
         config.sip_ip,
         config.rtp_min,
         config.rtp_max,
         log_dir,
-        recording_dir,
+        sbc_logger,
     )
     rtpengine_client = None
     if config.media_backend == "rtpengine":
         rtpengine_client = RtpengineClient(config.rtpengine_url, timeout=config.rtpengine_timeout)
         logging.info("Using RTPengine media backend at %s", config.rtpengine_url)
+        sbc_logger.platform("RTPENGINE BACKEND ENABLED", f"url={config.rtpengine_url} timeout={config.rtpengine_timeout}")
     loop = asyncio.get_running_loop()
     await loop.create_datagram_endpoint(
         lambda: SipServerProtocol(
             config.sip_ip,
             config.sip_port,
             media,
+            sbc_logger,
             config.default_payload,
             config.auth_realm,
             config.users,

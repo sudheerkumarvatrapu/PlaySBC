@@ -116,7 +116,9 @@ class SippScenarioTests(unittest.TestCase):
 
         self.assertIn("b2bua_uac_a_media.xml", " ".join(uac))
         self.assertIn("b2bua_uas_b_media.xml", " ".join(uas))
-        self.assertNotIn("-key", uac)
+        self.assertIn("-key", uac)
+        self.assertIn("caller", uac)
+        self.assertIn("sipp-a", uac)
         self.assertNotIn("-key", uas)
 
     def test_b2bua_media_scenarios_resolve_pcap_path_per_run(self):
@@ -160,7 +162,7 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("25100", commands[0][1])
             self.assertIn("25102", commands[1][1])
 
-    def test_b2bua_sipp_dry_run_writes_summary_and_commands(self):
+    def test_b2bua_sipp_dry_run_writes_consolidated_log_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             completed = subprocess.run(
                 [
@@ -185,18 +187,17 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            run_dir = Path(tmp) / "b2bua-dry-run"
-            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-            self.assertEqual(summary["callee"], "drycallee")
-            self.assertEqual(summary["rate"], 5)
-            self.assertEqual(summary["hold_ms"], 60000)
-            self.assertFalse(summary["ladder_enabled"])
-            server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
-            self.assertFalse(server_config["b2bua_ladder_logs"])
-            self.assertEqual(server_config["media_backend"], "internal")
-            self.assertTrue((run_dir / "server-command.txt").exists())
-            self.assertTrue((run_dir / "uac-command.txt").exists())
-            self.assertTrue((run_dir / "uas-command.txt").exists())
+            log_dir = Path(tmp) / "b2bua-dry-run"
+            self.assertEqual({path.name for path in log_dir.iterdir()}, set(run_b2bua_sipp_smoke.LOG_FILES))
+            self.assertIn("callee=drycallee", (log_dir / "log.platform").read_text(encoding="utf-8"))
+            self.assertIn("rate=5", (log_dir / "log.platform").read_text(encoding="utf-8"))
+            self.assertIn("hold_ms=60000", (log_dir / "log.platform").read_text(encoding="utf-8"))
+            self.assertIn("ladder_enabled=False", (log_dir / "log.platform").read_text(encoding="utf-8"))
+            self.assertIn("sipp-a-uac:", (log_dir / "log.sipp").read_text(encoding="utf-8"))
+            self.assertFalse((log_dir / "summary.json").exists())
+            self.assertFalse((log_dir / "server-command.txt").exists())
+            self.assertFalse((log_dir / "sipp-a-uac").exists())
+            self.assertFalse((log_dir / "sipp-b-uas").exists())
 
     def test_b2bua_media_dry_run_sets_server_codec_and_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,17 +226,17 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            run_dir = Path(tmp) / "b2bua-media-dry-run"
-            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-            server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
-            self.assertTrue(summary["media_enabled"])
-            self.assertEqual(summary["media_codec"], "PCMU")
-            self.assertEqual(summary["media_driver"], "python")
-            self.assertEqual(summary["media_pcap"], str(ROOT / "sipp" / "scenarios" / "pcap" / "g711u_60s.pcap"))
-            self.assertEqual(server_config["default_codec"], "PCMU")
-            self.assertIn("b2bua_uac_a.xml", (run_dir / "uac-command.txt").read_text(encoding="utf-8"))
-            self.assertTrue((run_dir / "media-a-to-b2bua-command.txt").exists())
-            self.assertTrue((run_dir / "media-b-to-b2bua-command.txt").exists())
+            log_dir = Path(tmp) / "b2bua-media-dry-run"
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
+            self.assertIn("media_enabled=True", platform)
+            self.assertIn("media_codec=PCMU", platform)
+            self.assertIn("media_driver=python", platform)
+            self.assertIn(f"media_pcap={ROOT / 'sipp' / 'scenarios' / 'pcap' / 'g711u_60s.pcap'}", platform)
+            self.assertIn("b2bua_uac_a.xml", sipp)
+            self.assertIn("media-a-to-b2bua:", sipp)
+            self.assertIn("media-b-to-b2bua:", sipp)
+            self.assertFalse((log_dir / "media-a-to-b2bua-command.txt").exists())
 
     def test_b2bua_basic_dry_run_enables_ladder_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -262,11 +263,8 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            run_dir = Path(tmp) / "b2bua-basic-dry-run"
-            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-            server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
-            self.assertTrue(summary["ladder_enabled"])
-            self.assertTrue(server_config["b2bua_ladder_logs"])
+            log_dir = Path(tmp) / "b2bua-basic-dry-run"
+            self.assertIn("ladder_enabled=True", (log_dir / "log.platform").read_text(encoding="utf-8"))
 
     def test_b2bua_dry_run_can_generate_rtpengine_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -291,12 +289,117 @@ class SippScenarioTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            run_dir = Path(tmp) / "b2bua-rtpengine-dry-run"
-            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-            server_config = json.loads((run_dir / "server-config.json").read_text(encoding="utf-8"))
-            self.assertEqual(summary["media_backend"], "rtpengine")
-            self.assertEqual(server_config["media_backend"], "rtpengine")
-            self.assertEqual(server_config["rtpengine_url"], "udp://127.0.0.1:2223")
+            log_dir = Path(tmp) / "b2bua-rtpengine-dry-run"
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            self.assertIn("media_backend=rtpengine", platform)
+            self.assertIn("rtpengine_url=udp://127.0.0.1:2223", platform)
+
+    def test_b2bua_profiles_are_listed(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                "--list-profiles",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("transcoding", completed.stdout)
+        self.assertIn("registered-outbound", completed.stdout)
+        self.assertIn("load-5cps-60s-rtpengine-transcoding", completed.stdout)
+
+    def test_b2bua_transcoding_profile_sets_codec_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "transcoding-profile",
+                    "--profile",
+                    "transcoding",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            log_dir = Path(tmp) / "transcoding-profile"
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            self.assertIn("profile=transcoding", platform)
+            self.assertIn("media_codec=PCMU", platform)
+            self.assertIn("server_codec=PCMA", platform)
+            self.assertIn("transcoding_expected=True", platform)
+            self.assertIn("transcoding_owner=internal", platform)
+
+    def test_b2bua_registered_outbound_profile_registers_caller_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "registered-outbound-profile",
+                    "--profile",
+                    "registered-outbound",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            log_dir = Path(tmp) / "registered-outbound-profile"
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
+            self.assertIn("profile=registered-outbound", platform)
+            self.assertIn("caller=registered-a", platform)
+            self.assertIn("callee=registered-b", platform)
+            self.assertIn("register_caller=True", platform)
+            self.assertIn("-key caller registered-a", sipp)
+
+    def test_b2bua_load_rtpengine_transcoding_profile_sets_load_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "load-rtpengine-transcoding-profile",
+                    "--profile",
+                    "load-5cps-60s-rtpengine-transcoding",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            log_dir = Path(tmp) / "load-rtpengine-transcoding-profile"
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            self.assertIn("profile=load-5cps-60s-rtpengine-transcoding", platform)
+            self.assertIn("calls=5", platform)
+            self.assertIn("rate=5", platform)
+            self.assertIn("hold_ms=60000", platform)
+            self.assertIn("media_backend=rtpengine", platform)
+            self.assertIn("media_driver=sipp-pcap", platform)
+            self.assertIn("server_codec=PCMA", platform)
+            self.assertIn("transcoding_expected=True", platform)
+            self.assertIn("transcoding_owner=rtpengine", platform)
+            self.assertIn("ladder_enabled=False", platform)
 
 
 def argparse_namespace(**values):

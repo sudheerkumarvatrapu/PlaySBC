@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -79,7 +80,9 @@ def build_sipp_command(
 
 
 def start_server(args: argparse.Namespace, run_dir: Path) -> subprocess.Popen:
-    server_log = (run_dir / "server.log").open("w", encoding="utf-8")
+    server_dir = run_dir / "server"
+    server_dir.mkdir(exist_ok=True)
+    server_log = (server_dir / "stdout.log").open("w", encoding="utf-8")
     command = [
         sys.executable,
         str(ROOT / "mini_call_server.py"),
@@ -93,10 +96,6 @@ def start_server(args: argparse.Namespace, run_dir: Path) -> subprocess.Popen:
         str(args.rtp_min),
         "--rtp-max",
         str(args.rtp_max),
-        "--artifact-root",
-        str(run_dir / "server-artifacts"),
-        "--run-id",
-        "server",
     ]
     if args.debug_server:
         command.append("--debug")
@@ -105,7 +104,7 @@ def start_server(args: argparse.Namespace, run_dir: Path) -> subprocess.Popen:
     process.server_log = server_log  # type: ignore[attr-defined]
     time.sleep(0.5)
     if process.poll() is not None:
-        raise RuntimeError(f"Mini call server exited early. See {run_dir / 'server.log'}")
+        raise RuntimeError(f"Mini call server exited early. See {server_dir / 'stdout.log'}")
     return process
 
 
@@ -137,7 +136,7 @@ def write_summary(run_dir: Path, args: argparse.Namespace, results: List[Scenari
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run SIPp regression scenarios with fresh artifacts")
+    parser = argparse.ArgumentParser(description="Run SIPp regression scenarios with fresh logs")
     parser.add_argument("--host", default="127.0.0.1", help="SIP server host")
     parser.add_argument("--port", type=int, default=15062, help="SIP server UDP port")
     parser.add_argument("--rtp-min", type=int, default=12000, help="Server RTP range start when --start-server is used")
@@ -145,7 +144,7 @@ def main() -> int:
     parser.add_argument("--calls", type=int, default=1, help="Calls per scenario")
     parser.add_argument("--rate", type=int, default=1, help="New calls per second")
     parser.add_argument("--scenario", action="append", choices=DEFAULT_SCENARIOS, help="Scenario to run; repeat as needed")
-    parser.add_argument("--output-root", default=str(ROOT / "artifacts" / "sipp"), help="Parent directory for fresh run artifacts")
+    parser.add_argument("--output-root", default="", help="Optional parent directory for persistent regression output")
     parser.add_argument("--run-id", default="", help="Run directory name; defaults to a timestamp")
     parser.add_argument("--sipp-bin", default="sipp", help="SIPp executable name or path")
     parser.add_argument("--start-server", action="store_true", help="Start and stop the mini call server around the run")
@@ -153,10 +152,14 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Write commands and validate scenarios without running SIPp")
     args = parser.parse_args()
 
-    run_dir = Path(args.output_root) / (args.run_id or make_run_id())
-    if run_dir.exists():
-        raise SystemExit(f"Run directory already exists: {run_dir}")
-    run_dir.mkdir(parents=True)
+    run_id = args.run_id or make_run_id()
+    if args.output_root:
+        run_dir = Path(args.output_root) / run_id
+        if run_dir.exists():
+            raise SystemExit(f"Run directory already exists: {run_dir}")
+        run_dir.mkdir(parents=True)
+    else:
+        run_dir = Path(tempfile.mkdtemp(prefix=f"{run_id}-"))
 
     sipp_binary = resolve_sipp_binary(args.sipp_bin)
     if not sipp_binary and not args.dry_run:
@@ -193,7 +196,7 @@ def main() -> int:
         write_summary(run_dir, args, results)
 
     failed = [result for result in results if result.status == "failed"]
-    print(f"SIPp regression artifacts: {run_dir}")
+    print(f"SIPp regression output: {run_dir}")
     for result in results:
         print(f"{result.scenario}: {result.status}")
     return 1 if failed else 0

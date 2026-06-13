@@ -6,11 +6,11 @@
     <![CDATA[
       INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-      From: SIPp-A <sip:sipp-a@[local_ip]:[local_port]>;tag=[call_number]
+      From: [caller] <sip:[caller]@[local_ip]:[local_port]>;tag=[call_number]
       To: <sip:[service]@[remote_ip]:[remote_port]>
       Call-ID: [call_id]
       CSeq: 1 INVITE
-      Contact: <sip:sipp-a@[local_ip]:[local_port]>
+      Contact: <sip:[caller]@[local_ip]:[local_port]>
       Max-Forwards: 70
       Subject: SIPp A to mini-call-server B2BUA with RTP media
       Content-Type: application/sdp
@@ -44,7 +44,7 @@
       [last_To:]
       [last_Call-ID:]
       CSeq: 1 ACK
-      Contact: <sip:sipp-a@[local_ip]:[local_port]>
+      Contact: <sip:[caller]@[local_ip]:[local_port]>
       Max-Forwards: 70
       Content-Length: 0
 
@@ -67,7 +67,7 @@
       [last_To:]
       [last_Call-ID:]
       CSeq: 2 BYE
-      Contact: <sip:sipp-a@[local_ip]:[local_port]>
+      Contact: <sip:[caller]@[local_ip]:[local_port]>
       Max-Forwards: 70
       Content-Length: 0
 

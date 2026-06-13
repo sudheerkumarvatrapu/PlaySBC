@@ -8,7 +8,7 @@ Implemented:
 
 - SIP over UDP for `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
 - Optional SIP digest authentication for `REGISTER`
-- PCMU/PCMA RTP echo, relay, recording, and basic transcoding
+- PCMU/PCMA RTP echo, relay, and basic transcoding
 - RFC 2833 DTMF detection
 - Dialog state tracking and UDP transaction cache
 - RTP metrics: packet loss, jitter, out-of-order, late packets, silence, clock drift, MOS-style score
@@ -17,8 +17,11 @@ Implemented:
 - SIPp UAC/UAS scripts for B2BUA calls
 - 5 cps / 60 second SIPp load shape
 - 60 second G.711u/G.711a media replay through the B2BUA path
-- Unified B2BUA ladder logs for basic calls
+- SBC-style category logs: `log.sip`, `log.media`, `log.transcoding`, `log.platform`, `log.networking`, `log.call`, `log.sipp`, and transport logs such as `log.udp`
+- Consolidated B2BUA SIPp run folders with no separate saved SIPp A/B leg folders
+- Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine, registered inbound/outbound, and 5 cps / 60 second load
 - Optional RTPengine NG control backend scaffold for B2BUA SDP offer/answer/delete
+- Persistent project logs only for B2BUA SIPp call runs by default
 - Unit tests and SIPp regression harness
 
 ## Next Focus
@@ -28,10 +31,9 @@ Implemented:
 Make logs clean and review-friendly:
 
 - One timestamped run folder per test run
-- Separate folders for unit tests, SIPp basic calls, registration auth, media, and load
-- Clear server, SIP, RTP/media, ladder, and SIPp trace logs
-- Single regression result document
-- Green/pass and red/fail status summary
+- Persistent logs only for B2BUA SIPp basic calls, registration-to-callee setup, media, and load
+- Clear category logs and SIPp trace logs
+- Pass/fail run result in `log.platform`
 - No overwritten logs
 
 ### Phase 2: SIPp Regression Expansion
@@ -42,6 +44,10 @@ Add more SIPp cases:
 - `REGISTER` with auth success and failure
 - Basic B2BUA call
 - 60 second G.711 media call
+- B2BUA transcoding call
+- Registered caller origination
+- RTPengine-backed B2BUA call
+- 5 cps / 60 second CHT RTPengine/transcoding load profile
 - Invalid `BYE`
 - Unknown route
 - Failed outbound leg
@@ -64,7 +70,7 @@ Target:
 
 ```text
 Python B2BUA = SIP, routing, policy, logs
-RTPengine    = RTP/SRTP anchoring, SDP rewrite, recording, DTMF/media controls
+RTPengine    = RTP/SRTP anchoring, SDP rewrite, DTMF/media controls
 ```
 
 Keep the current internal RTP relay as a fallback. Next step is local runtime validation with a real RTPengine process.
@@ -137,4 +143,4 @@ Every phase should include:
 - SIPp regression coverage
 - Clear logs
 - A pass/fail result report
-- No regression artifact overwrite
+- No regression log overwrite

@@ -8,11 +8,10 @@ import re
 import socket
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from mini_call_server import CRLF
 from rtp.packet import RtpPacket
-from smoke_utils import default_transcript_dir
+from smoke_utils import default_transcript_dir, write_transcript
 
 
 SERVER_IP = "127.0.0.1"
@@ -154,7 +153,7 @@ class BridgeLeg:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Two-leg SIP bridge smoke client")
-    parser.add_argument("--output-dir", default=str(default_transcript_dir()), help="Directory for the SIP transcript")
+    parser.add_argument("--output-dir", default=default_transcript_dir(), help="Optional directory for the SIP transcript")
     args = parser.parse_args()
 
     leg_a = BridgeLeg("bridge-a", 25064, 26010, "smoke-bridge-a@127.0.0.1", "z9hG4bK-smoke-bridge-a", "tag-bridge-a")
@@ -190,11 +189,8 @@ def main() -> None:
         leg_a.close()
         leg_b.close()
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "sip_bridge_call.log").write_text("\n".join(transcript), encoding="utf-8")
+    write_transcript(args.output_dir, "sip_bridge_call.log", transcript)
 
 
 if __name__ == "__main__":
     main()
-

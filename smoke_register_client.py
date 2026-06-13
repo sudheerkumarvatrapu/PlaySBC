@@ -5,10 +5,9 @@ from __future__ import annotations
 
 import argparse
 import socket
-from pathlib import Path
 
 from mini_call_server import CRLF, make_digest_response, parse_digest_header
-from smoke_utils import default_transcript_dir
+from smoke_utils import default_transcript_dir, write_transcript
 
 
 SERVER_IP = "127.0.0.1"
@@ -52,7 +51,7 @@ def status_line(message: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SIP REGISTER digest auth smoke client")
-    parser.add_argument("--output-dir", default=str(default_transcript_dir()), help="Directory for the SIP transcript")
+    parser.add_argument("--output-dir", default=default_transcript_dir(), help="Optional directory for the SIP transcript")
     args = parser.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -99,9 +98,7 @@ def main() -> None:
         raise RuntimeError(f"Expected 200 OK, got {status_line(second_response)}")
 
     transcript += ["--- RESULT ---", "PASS: digest REGISTER completed successfully.", ""]
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "sip_register_auth.log").write_text("\n".join(transcript), encoding="utf-8")
+    write_transcript(args.output_dir, "sip_register_auth.log", transcript)
     print("PASS")
     print("REGISTER digest authentication completed")
 
