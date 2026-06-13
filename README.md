@@ -5,7 +5,7 @@
 <h1 align="center">PlaySBC</h1>
 
 <p align="center">
-  <strong>SIP, RTP, B2BUA and regression play ground.</strong>
+  <strong>SIP, RTP, B2BUA, Transcoding and regression play ground.</strong>
 </p>
 
 <p align="center">
