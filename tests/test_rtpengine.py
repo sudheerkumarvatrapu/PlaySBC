@@ -40,6 +40,14 @@ class RtpengineEncodingTests(unittest.TestCase):
         self.assertEqual(decoded["result"], "ok")
         self.assertEqual(decoded["sdp"], "v=0\r\n")
 
+    def test_client_builds_ping_packet(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        packet = client.build_packet("ping", {}, cookie="cookie1")
+
+        self.assertTrue(packet.startswith(b"cookie1 "))
+        self.assertIn(b"7:command4:ping", packet)
+
     def test_parse_url_requires_udp_host_and_port(self):
         endpoint = parse_rtpengine_url("udp://127.0.0.1:2223")
         self.assertEqual(endpoint.host, "127.0.0.1")

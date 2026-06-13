@@ -524,6 +524,7 @@ class SippScenarioTests(unittest.TestCase):
         rows = [
             run_regression_suite.ReportRow("SIPp Smoke", "options", "passed", 0, 0.1, "/tmp/logs", "cmd"),
             run_regression_suite.ReportRow("B2BUA", "media", "failed", 1, 0.2, "/tmp/logs", "cmd"),
+            run_regression_suite.ReportRow("B2BUA", "rtpengine-preflight", "blocked", None, 0.01, "/tmp/logs", "cmd"),
         ]
 
         report = run_regression_suite.render_html(rows, "2026-06-13 10:00:00 IST", "unit-report")
@@ -531,8 +532,25 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("PlaySBC Regression Report", report)
         self.assertIn("PASSED", report)
         self.assertIn("FAILED", report)
+        self.assertIn("BLOCKED", report)
+        self.assertIn("Blocked: 1", report)
         self.assertIn("badge pass", report)
         self.assertIn("badge fail", report)
+        self.assertIn("badge blocked", report)
+
+    def test_rtpengine_blocked_row_has_actionable_detail(self):
+        row = run_regression_suite.rtpengine_blocked_row(
+            "rtpengine",
+            "udp://127.0.0.1:2223",
+            "TimeoutError",
+            0.01,
+            Path("/tmp/playsbc-logs"),
+            "python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine",
+        )
+
+        self.assertEqual(row.status, "blocked")
+        self.assertEqual(row.name, "rtpengine-preflight")
+        self.assertIn("RTPengine not reachable at udp://127.0.0.1:2223", row.command)
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
         self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 8)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import html
 import json
 import shutil
@@ -16,6 +17,10 @@ from typing import List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from rtp.rtpengine import RtpengineClient
+
 DEFAULT_B2BUA_PROFILES = (
     "basic-signalling",
     "basic-media",
@@ -31,6 +36,10 @@ ALL_B2BUA_PROFILES = (
     "registered-inbound",
     "registered-outbound",
     "load-5cps-60s",
+    "load-5cps-60s-rtpengine-transcoding",
+)
+RTPENGINE_B2BUA_PROFILES = (
+    "rtpengine",
     "load-5cps-60s-rtpengine-transcoding",
 )
 
@@ -58,6 +67,31 @@ def run_command(command: List[str], timeout: int) -> tuple[int, float, str, str]
 
 def status_from_returncode(returncode: int) -> str:
     return "passed" if returncode == 0 else "failed"
+
+
+def probe_rtpengine(url: str, timeout: float) -> tuple[bool, str]:
+    try:
+        response = asyncio.run(RtpengineClient(url, timeout=timeout).ping())
+    except Exception as exc:
+        detail = str(exc) or type(exc).__name__
+        return False, detail
+
+    result = str(response.get("result", "")).lower()
+    if result in {"ok", "pong"}:
+        return True, f"RTPengine replied with result={response.get('result')}"
+    return False, f"unexpected RTPengine ping response: {response}"
+
+
+def rtpengine_blocked_row(profile: str, url: str, detail: str, duration: float, log_path: Path, command: str) -> ReportRow:
+    return ReportRow(
+        suite=f"B2BUA {profile}",
+        name="rtpengine-preflight",
+        status="blocked",
+        returncode=None,
+        duration_seconds=duration,
+        log_path=str(log_path),
+        command=f"{command} # blocked: RTPengine not reachable at {url}: {detail}",
+    )
 
 
 def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[ReportRow]:
@@ -88,7 +122,7 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
             continue
         name, status = line.split(": ", 1)
         status = status.strip()
-        if status not in {"passed", "failed", "dry-run"}:
+        if status not in {"passed", "failed", "dry-run", "blocked"}:
             continue
         rows.append(
             ReportRow(
@@ -118,11 +152,12 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
 
 def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
     passed = sum(1 for row in rows if row.status == "passed")
-    failed = sum(1 for row in rows if row.status != "passed")
-    summary_class = "pass" if failed == 0 else "fail"
+    blocked = sum(1 for row in rows if row.status == "blocked")
+    failed = sum(1 for row in rows if row.status not in {"passed", "blocked"})
+    summary_class = "pass" if failed == 0 and blocked == 0 else "blocked" if failed == 0 else "fail"
     row_html = []
     for row in rows:
-        status_class = "pass" if row.status == "passed" else "fail"
+        status_class = "pass" if row.status == "passed" else "blocked" if row.status == "blocked" else "fail"
         row_html.append(
             "<tr>"
             f"<td>{html.escape(row.suite)}</td>"
@@ -146,6 +181,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
     .meta {{ color: #4b5563; margin: 0 0 20px; }}
     .summary {{ display: inline-flex; gap: 16px; padding: 12px 14px; border-radius: 8px; margin-bottom: 22px; }}
     .summary.pass {{ background: #ecfdf5; border: 1px solid #16a34a; }}
+    .summary.blocked {{ background: #fffbeb; border: 1px solid #f59e0b; }}
     .summary.fail {{ background: #fef2f2; border: 1px solid #dc2626; }}
     table {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
     th, td {{ border-bottom: 1px solid #e5e7eb; padding: 10px; text-align: left; vertical-align: top; word-wrap: break-word; }}
@@ -153,6 +189,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
     code {{ font-size: 12px; white-space: pre-wrap; }}
     .badge {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 4px 8px; font-weight: 700; font-size: 12px; }}
     .badge.pass {{ color: #166534; background: #dcfce7; border: 1px solid #16a34a; }}
+    .badge.blocked {{ color: #92400e; background: #fef3c7; border: 1px solid #f59e0b; }}
     .badge.fail {{ color: #991b1b; background: #fee2e2; border: 1px solid #dc2626; }}
   </style>
 </head>
@@ -162,6 +199,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
   <div class="summary {summary_class}">
     <strong>Total: {len(rows)}</strong>
     <strong>Passed: {passed}</strong>
+    <strong>Blocked: {blocked}</strong>
     <strong>Failed: {failed}</strong>
   </div>
   <table>
@@ -208,6 +246,9 @@ def main() -> int:
     parser.add_argument("--all-b2bua-profiles", action="store_true", help="Run all B2BUA profiles, including load and RTPengine profiles")
     parser.add_argument("--b2bua-media-driver", choices=("python", "sipp-pcap"), default="", help="Override B2BUA media driver for media-enabled profiles")
     parser.add_argument("--b2bua-sipp-pcap-sudo", action="store_true", help="Pass --sipp-pcap-sudo to B2BUA profile runs")
+    parser.add_argument("--b2bua-rtpengine-url", default="udp://127.0.0.1:2223", help="RTPengine NG control URL for RTPengine-backed B2BUA profiles")
+    parser.add_argument("--rtpengine-preflight-timeout", type=float, default=1.0, help="Seconds to wait for RTPengine preflight ping")
+    parser.add_argument("--skip-rtpengine-preflight", action="store_true", help="Run RTPengine-backed profiles without checking RTPengine availability first")
     parser.add_argument("--skip-sipp-smoke", action="store_true")
     parser.add_argument("--skip-b2bua", action="store_true")
     parser.add_argument("--timeout", type=int, default=180)
@@ -262,7 +303,22 @@ def main() -> int:
                 command.extend(["--media-driver", args.b2bua_media_driver])
             if args.b2bua_sipp_pcap_sudo:
                 command.append("--sipp-pcap-sudo")
+            if profile in RTPENGINE_B2BUA_PROFILES:
+                command.extend(["--rtpengine-url", args.b2bua_rtpengine_url])
             command_text = " ".join(command)
+            if profile in RTPENGINE_B2BUA_PROFILES and not args.skip_rtpengine_preflight:
+                started = time.monotonic()
+                ready, detail = probe_rtpengine(args.b2bua_rtpengine_url, args.rtpengine_preflight_timeout)
+                duration = time.monotonic() - started
+                if not ready:
+                    rows.append(rtpengine_blocked_row(profile, args.b2bua_rtpengine_url, detail, duration, b2bua_log_path, command_text))
+                    profile_log = b2bua_log_path / f"{profile}-{run_id}-runner.log"
+                    profile_log.parent.mkdir(parents=True, exist_ok=True)
+                    profile_log.write_text(
+                        f"BLOCKED: RTPengine not reachable at {args.b2bua_rtpengine_url}\n{detail}\n",
+                        encoding="utf-8",
+                    )
+                    continue
             returncode, duration, stdout, stderr = run_command(command, args.timeout)
             rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, b2bua_log_path, command_text))
             profile_log = b2bua_log_path / f"{profile}-{run_id}-runner.log"

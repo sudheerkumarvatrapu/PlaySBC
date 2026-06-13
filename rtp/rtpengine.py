@@ -69,9 +69,13 @@ class RtpengineClient:
         loop = asyncio.get_running_loop()
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setblocking(False)
-            await loop.sock_sendto(sock, packet, (self.host, self.port))
+            sock.connect((self.host, self.port))
+            await loop.sock_sendall(sock, packet)
             response = await asyncio.wait_for(loop.sock_recv(sock, 65535), timeout=self.timeout)
         return self.decode_response(response, cookie=cookie)
+
+    async def ping(self) -> Dict[str, Any]:
+        return await self.request("ping", {})
 
     async def offer(self, *, call_id: str, from_tag: str, sdp: str) -> Dict[str, Any]:
         return await self.request("offer", self._sdp_fields(call_id, from_tag, sdp))

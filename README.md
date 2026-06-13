@@ -199,9 +199,18 @@ python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s
 RTPengine-backed profiles require RTPengine NG control to be reachable at `--rtpengine-url`:
 
 ```bash
+python3 tools/check_rtpengine.py --url udp://127.0.0.1:2223
 python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine --rtpengine-url udp://127.0.0.1:2223
 python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s-rtpengine-transcoding --rtpengine-url udp://127.0.0.1:2223
 ```
+
+For a local lab, start RTPengine with NG control listening on the same URL before running those profiles:
+
+```bash
+rtpengine --interface=127.0.0.1 --listen-ng=127.0.0.1:2223 --foreground --log-stderr
+```
+
+The regression suite runs this RTPengine preflight automatically for RTPengine-backed profiles. If RTPengine is not reachable, the HTML report marks those profiles as `BLOCKED` instead of showing a generic SIPp call failure. Use `--skip-rtpengine-preflight` only when you intentionally want the call to run without that readiness check.
 
 Notes:
 
