@@ -8,7 +8,7 @@ Implemented:
 
 - SIP over UDP for `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
 - Optional SIP digest authentication for `REGISTER`
-- PCMU/PCMA RTP echo, relay, and basic transcoding
+- Initial PCMU/PCMA RTP echo, relay, and basic transcoding scaffolding
 - RFC 2833 DTMF detection
 - Dialog state tracking and UDP transaction cache
 - RTP metrics: packet loss, jitter, out-of-order, late packets, silence, clock drift, MOS-style score
@@ -16,7 +16,7 @@ Implemented:
 - Route policies and static fallback routes
 - SIPp UAC/UAS scripts for B2BUA calls
 - 5 cps / 60 second SIPp load shape
-- 60 second G.711u/G.711a media replay through the B2BUA path
+- 60 second G.711u/G.711a media replay profiles through the B2BUA path
 - SBC-style category logs: `log.sip`, `log.media`, `log.transcoding`, `log.platform`, `log.networking`, `log.call`, `log.sipp`, and transport logs such as `log.udp`
 - Single consolidated B2BUA SIPp regression folder with no separate saved SIPp A/B leg folders
 - Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine, registered inbound/outbound, and 5 cps / 60 second load
@@ -24,6 +24,28 @@ Implemented:
 - Optional RTPengine NG control backend scaffold for B2BUA SDP offer/answer/delete
 - Persistent project logs only for B2BUA SIPp call runs by default
 - Unit tests and SIPp regression harness
+
+## Immediate Priority: RTPengine First
+
+Before expanding more PlaySBC-native media and transcoding behavior, make RTPengine the first stable external media backend. This is important because PlaySBC is still early in media anchoring, codec handling, and transcoding. RTPengine gives the lab a proven media plane while PlaySBC focuses on SIP, B2BUA routing, policy, logs, and regression control.
+
+Short-term target:
+
+- Run the same open-source Sipwise `rtpengine` project used by Kamailio-style SIP deployments
+- Add simple local start/check instructions for macOS via Docker or Linux VM
+- Keep `tools/check_rtpengine.py` as the readiness gate
+- Make RTPengine-backed SIPp profiles report `BLOCKED` when RTPengine is down
+- Get one basic RTPengine B2BUA call green
+- Then get RTPengine-backed G.711 media green
+- Then add RTPengine-backed transcoding validation
+- Only after that, continue deeper PlaySBC-native media/transcoding work
+
+Target division:
+
+```text
+PlaySBC   = SIP, dialog/transaction state, B2BUA routing, policies, logs, regression reports
+RTPengine = RTP anchoring, SDP rewrite, media relay, DTMF/media controls, transcoding experiments
+```
 
 ## Next Focus
 
@@ -58,7 +80,7 @@ Add more SIPp cases:
 
 ### Phase 3: RTPengine Media Backend
 
-Status: started. Added optional media backend selection:
+Status: active priority. Added optional media backend selection:
 
 ```json
 {
@@ -74,7 +96,7 @@ Python B2BUA = SIP, routing, policy, logs
 RTPengine    = RTP/SRTP anchoring, SDP rewrite, DTMF/media controls
 ```
 
-Keep the current internal RTP relay as a fallback. Next step is local runtime validation with a real RTPengine process.
+Keep the current internal RTP relay as a fallback. The immediate next step is local runtime validation with the open-source Sipwise RTPengine process, then a green basic RTPengine B2BUA call, then RTPengine-backed media and transcoding.
 
 ### Phase 4: Enterprise SBC Lab Features
 
