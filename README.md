@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.x-3776AB?style=for-the-badge&logo=python&logoColor=white">
-  <img alt="SIPp" src="https://img.shields.io/badge/SIPp-Regression-16A34A?style=for-the-badge">
-  <img alt="B2BUA" src="https://img.shields.io/badge/B2BUA-Enabled-2563EB?style=for-the-badge">
-  <img alt="RTP" src="https://img.shields.io/badge/RTP-G.711u%20%7C%20G.711a-F59E0B?style=for-the-badge">
-  <img alt="RTPengine" src="https://img.shields.io/badge/RTPengine-Optional-0F766E?style=for-the-badge">
+  <img alt="Python 3.x" src="https://img.shields.io/badge/-Python%203.x-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="SIPp Regression" src="https://img.shields.io/badge/-SIPp%20Regression-16A34A?style=for-the-badge">
+  <img alt="B2BUA Enabled" src="https://img.shields.io/badge/-B2BUA%20Enabled-2563EB?style=for-the-badge">
+  <img alt="Transcoding G711u | G711a" src="https://img.shields.io/badge/-Transcoding%20G711u%20%7C%20G711a-9333EA?style=for-the-badge">
+  <img alt="RTPengine Getting Ready" src="https://img.shields.io/badge/-RTPengine%20Getting%20Ready-0F766E?style=for-the-badge">
 </p>
 
 ---
