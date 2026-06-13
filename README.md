@@ -1,8 +1,33 @@
-# PlaySBC
+<p align="center">
+  <img src="docs/assets/playsbc-logo.svg" alt="PlaySBC logo" width="720">
+</p>
 
-Educational SIP/RTP lab server focused on local SIPp regression for B2BUA and media experiments.
+<h1 align="center">PlaySBC</h1>
+
+<p align="center">
+  <strong>Educational SIP/RTP lab server for B2BUA, media, transcoding, and SIPp regression experiments.</strong>
+</p>
+
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.x-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="SIPp" src="https://img.shields.io/badge/SIPp-Regression-16A34A?style=for-the-badge">
+  <img alt="B2BUA" src="https://img.shields.io/badge/B2BUA-Enabled-2563EB?style=for-the-badge">
+  <img alt="RTP" src="https://img.shields.io/badge/RTP-G.711u%20%7C%20G.711a-F59E0B?style=for-the-badge">
+  <img alt="RTPengine" src="https://img.shields.io/badge/RTPengine-Optional-0F766E?style=for-the-badge">
+</p>
+
+---
 
 For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
+
+## Lab Focus
+
+| Area | Current focus |
+| --- | --- |
+| SIP signaling | Registrar-backed SIPp flows, B2BUA call setup, clear ladders |
+| RTP media | G.711u/G.711a PCAP replay, packet summaries, media logs |
+| Transcoding | Internal PCMU/PCMA checks and RTPengine-oriented profiles |
+| Regression | One-command local B2BUA regression with HTML pass/fail report |
 
 ## Contributors
 
@@ -86,12 +111,14 @@ cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server && sudo -v &&
 
 What this does:
 
-- Runs only B2BUA SIPp regression, not the old smoke suite.
-- Runs all 8 B2BUA profiles.
-- Uses SIPp `play_pcap_audio` for media profiles.
-- Prompts once for sudo, then uses `sudo -n` only for SIPp PCAP replay.
-- Deletes old passed/blocked B2BUA log bundles before the next run. Failed bundles are kept for debugging.
-- Writes the HTML report to `logs/reports/latest.html`.
+| Step | Behavior |
+| --- | --- |
+| Scope | Runs only B2BUA SIPp regression, not the old smoke suite |
+| Coverage | Runs all 8 B2BUA profiles |
+| Media | Uses SIPp `play_pcap_audio` for media profiles |
+| Sudo | Prompts once, then uses `sudo -n` only for SIPp PCAP replay |
+| Logs | Deletes old passed/blocked bundles; keeps failed bundles |
+| Report | Writes HTML output to `logs/reports/latest.html` |
 
 Useful targeted commands:
 
