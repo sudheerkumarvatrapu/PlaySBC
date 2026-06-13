@@ -178,6 +178,7 @@ class SippScenarioTests(unittest.TestCase):
             media_codec="PCMA",
             media_pcap="pcap/g711a_60s.pcap",
             media_driver="sipp-pcap",
+            sipp_pcap_sudo=False,
             uac_scenario=ROOT / "sipp" / "scenarios" / "b2bua_uac_a_media.xml",
             uas_scenario=ROOT / "sipp" / "scenarios" / "b2bua_uas_b_media.xml",
         )
@@ -191,6 +192,50 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("caller", uac)
         self.assertIn("sipp-a", uac)
         self.assertNotIn("-key", uas)
+
+    def test_sipp_pcap_sudo_wraps_only_media_sipp_commands(self):
+        media_args = argparse_namespace(
+            host="127.0.0.1",
+            server_port=25062,
+            uac_port=25081,
+            uas_port=25082,
+            uac_rtp_min=26000,
+            uac_rtp_max=26200,
+            uas_rtp_min=27000,
+            uas_rtp_max=27200,
+            caller="sipp-a",
+            callee="media-user",
+            calls=1,
+            rate=1,
+            hold_ms=1000,
+            media_enabled=True,
+            media_driver="sipp-pcap",
+            sipp_pcap_sudo=True,
+            uac_scenario=ROOT / "sipp" / "scenarios" / "b2bua_uac_a_media.xml",
+            uas_scenario=ROOT / "sipp" / "scenarios" / "b2bua_uas_b_media.xml",
+        )
+        signalling_args = argparse_namespace(
+            host="127.0.0.1",
+            server_port=25062,
+            uac_port=25081,
+            uac_rtp_min=26000,
+            uac_rtp_max=26200,
+            caller="sipp-a",
+            callee="sig-user",
+            calls=1,
+            rate=1,
+            hold_ms=1000,
+            media_enabled=False,
+            media_driver="sipp-pcap",
+            sipp_pcap_sudo=True,
+            uac_scenario=ROOT / "sipp" / "scenarios" / "b2bua_uac_a.xml",
+        )
+
+        media_uac = run_b2bua_sipp_smoke.build_uac_command(media_args, "sipp")
+        signalling_uac = run_b2bua_sipp_smoke.build_uac_command(signalling_args, "sipp")
+
+        self.assertEqual(media_uac[:2], ["sudo", "-n"])
+        self.assertNotEqual(signalling_uac[:2], ["sudo", "-n"])
 
     def test_b2bua_media_scenarios_resolve_pcap_path_per_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -488,6 +533,11 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("FAILED", report)
         self.assertIn("badge pass", report)
         self.assertIn("badge fail", report)
+
+    def test_regression_suite_can_target_all_b2bua_profiles(self):
+        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 8)
+        self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
 
     def test_b2bua_load_rtpengine_transcoding_profile_sets_load_shape(self):
         with tempfile.TemporaryDirectory() as tmp:

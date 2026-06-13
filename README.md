@@ -164,6 +164,21 @@ python3 tools/run_regression_suite.py
 
 The combined suite runs the SIPp smoke scenarios plus these B2BUA profiles: `basic-signalling`, `basic-media`, `transcoding`, `registered-inbound`, and `registered-outbound`.
 
+Run only B2BUA regression across all 8 profiles:
+
+```bash
+python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles
+```
+
+Temporary macOS workaround for SIPp `play_pcap_audio` raw-socket permission:
+
+```bash
+sudo -v
+python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo
+```
+
+This prefixes only media-enabled SIPp PCAP processes with `sudo -n`. The PlaySBC server still runs as the normal user. If sudo credentials are not cached, the run fails fast and asks you to run `sudo -v`.
+
 List the named B2BUA SIPp test profiles:
 
 ```bash
@@ -199,6 +214,7 @@ Notes:
 - The `transcoding` profile uses PCMU RTP media with server codec preference set to PCMA.
 - G.711 media runs use Python UDP PCAP replay by default, so macOS raw-socket permission is not required.
 - `--media-driver sipp-pcap` can be used only when SIPp has PCAP support and the OS allows raw-socket packet replay.
+- On macOS, `--sipp-pcap-sudo` is available as a temporary workaround for SIPp `play_pcap_audio`.
 - RTPengine mode expects RTPengine NG control on `udp://127.0.0.1:2223`; internal media remains the default.
 
 ## Local Logs

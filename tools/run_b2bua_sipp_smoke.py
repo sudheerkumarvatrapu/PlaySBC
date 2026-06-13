@@ -60,6 +60,7 @@ BASE_DEFAULTS = {
     "media_codec": None,
     "media_pcap": None,
     "media_driver": "python",
+    "sipp_pcap_sudo": False,
     "media_start_delay": 1.0,
     "server_codec": None,
     "media_backend": "internal",
@@ -167,6 +168,31 @@ def resolve_scenario_path(value: str, fallback: Path) -> Path:
     return path if path.is_absolute() else SCENARIO_DIR / path
 
 
+def should_sudo_sipp_pcap(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "sipp_pcap_sudo", False)
+        and getattr(args, "media_enabled", False)
+        and getattr(args, "media_driver", "") == "sipp-pcap"
+    )
+
+
+def maybe_sudo_sipp_pcap(args: argparse.Namespace, command: List[str]) -> List[str]:
+    if should_sudo_sipp_pcap(args):
+        return ["sudo", "-n", *command]
+    return command
+
+
+def ensure_sudo_ready_for_sipp_pcap(args: argparse.Namespace) -> None:
+    if not should_sudo_sipp_pcap(args) or args.dry_run:
+        return
+    completed = subprocess.run(["sudo", "-n", "true"], text=True, capture_output=True)
+    if completed.returncode != 0:
+        raise SystemExit(
+            "SIPp PCAP sudo mode requires cached sudo credentials. "
+            "Run `sudo -v` in your terminal, then retry with `--sipp-pcap-sudo`."
+        )
+
+
 def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
     scenario = getattr(args, "uas_scenario", SCENARIO_DIR / ("b2bua_uas_b_media.xml" if args.media_enabled else "b2bua_uas_b.xml"))
     command = [
@@ -199,7 +225,7 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-trace_counts",
         "-trace_logs",
     ]
-    return command
+    return maybe_sudo_sipp_pcap(args, command)
 
 
 def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
@@ -242,7 +268,7 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-trace_counts",
         "-trace_logs",
     ]
-    return command
+    return maybe_sudo_sipp_pcap(args, command)
 
 
 def build_server_command(args: argparse.Namespace, work_dir: Path, log_dir: Path) -> List[str]:
@@ -440,6 +466,7 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"media_enabled={args.media_enabled}",
         f"media_codec={args.media_codec or ''}",
         f"media_driver={args.media_driver if args.media_enabled else ''}",
+        f"sipp_pcap_sudo={args.sipp_pcap_sudo if args.media_enabled and args.media_driver == 'sipp-pcap' else False}",
         f"media_pcap={args.media_pcap_resolved if args.media_enabled else ''}",
         f"media_backend={args.media_backend}",
         f"rtpengine_url={args.rtpengine_url if args.media_backend == 'rtpengine' else ''}",
@@ -579,6 +606,12 @@ def main() -> int:
     parser.add_argument("--media-codec", choices=sorted(MEDIA_PCAPS), default=BASE_DEFAULTS["media_codec"], help="Play 60s RTP PCAP media using this G.711 codec")
     parser.add_argument("--media-pcap", default=BASE_DEFAULTS["media_pcap"], help="Override the RTP PCAP file used with --media-codec")
     parser.add_argument("--media-driver", choices=("python", "sipp-pcap"), default=BASE_DEFAULTS["media_driver"], help="Use Python UDP replay or SIPp play_pcap_audio for media")
+    parser.add_argument(
+        "--sipp-pcap-sudo",
+        action="store_true",
+        default=BASE_DEFAULTS["sipp_pcap_sudo"],
+        help="Temporary macOS workaround: run SIPp play_pcap_audio processes with sudo -n",
+    )
     parser.add_argument("--media-start-delay", type=float, default=BASE_DEFAULTS["media_start_delay"], help="Seconds to wait after starting SIPp A before Python media replay starts")
     parser.add_argument("--server-codec", choices=sorted(MEDIA_PCAPS), default=BASE_DEFAULTS["server_codec"], help="Server preferred G.711 codec; set different from media codec to exercise transcoding")
     parser.add_argument("--media-backend", choices=("internal", "rtpengine"), default=BASE_DEFAULTS["media_backend"])
@@ -627,6 +660,7 @@ def main() -> int:
         if not sipp_binary and not args.dry_run:
             raise SystemExit("SIPp executable not found")
         sipp = sipp_binary or args.sipp_bin
+        ensure_sudo_ready_for_sipp_pcap(args)
         server_command = build_server_command(args, work_dir, log_dir)
         uas_command = build_uas_command(args, sipp)
         uac_command = build_uac_command(args, sipp)

@@ -23,6 +23,16 @@ DEFAULT_B2BUA_PROFILES = (
     "registered-inbound",
     "registered-outbound",
 )
+ALL_B2BUA_PROFILES = (
+    "basic-signalling",
+    "basic-media",
+    "transcoding",
+    "rtpengine",
+    "registered-inbound",
+    "registered-outbound",
+    "load-5cps-60s",
+    "load-5cps-60s-rtpengine-transcoding",
+)
 
 
 @dataclass
@@ -194,10 +204,13 @@ def main() -> int:
     parser.add_argument("--report-dir", default=str(ROOT / "logs" / "reports"))
     parser.add_argument("--sipp-smoke-root", default=str(ROOT / "logs" / "sipp-smoke-Regression"))
     parser.add_argument("--b2bua-log-folder", default="b2bua-Regression")
-    parser.add_argument("--b2bua-profile", action="append", choices=DEFAULT_B2BUA_PROFILES, help="B2BUA profile to run; repeatable")
+    parser.add_argument("--b2bua-profile", action="append", choices=ALL_B2BUA_PROFILES, help="B2BUA profile to run; repeatable")
+    parser.add_argument("--all-b2bua-profiles", action="store_true", help="Run all B2BUA profiles, including load and RTPengine profiles")
+    parser.add_argument("--b2bua-media-driver", choices=("python", "sipp-pcap"), default="", help="Override B2BUA media driver for media-enabled profiles")
+    parser.add_argument("--b2bua-sipp-pcap-sudo", action="store_true", help="Pass --sipp-pcap-sudo to B2BUA profile runs")
     parser.add_argument("--skip-sipp-smoke", action="store_true")
     parser.add_argument("--skip-b2bua", action="store_true")
-    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args()
 
     run_id = args.run_id or make_run_id()
@@ -232,7 +245,7 @@ def main() -> int:
             (smoke_root / smoke_run_id / "stdout.log").write_text(stdout, encoding="utf-8")
 
     if not args.skip_b2bua:
-        profiles = tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
+        profiles = ALL_B2BUA_PROFILES if args.all_b2bua_profiles else tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
         b2bua_log_path = ROOT / "logs" / args.b2bua_log_folder
         for profile in profiles:
             command = [
@@ -245,6 +258,10 @@ def main() -> int:
                 "--log-folder",
                 args.b2bua_log_folder,
             ]
+            if args.b2bua_media_driver:
+                command.extend(["--media-driver", args.b2bua_media_driver])
+            if args.b2bua_sipp_pcap_sudo:
+                command.append("--sipp-pcap-sudo")
             command_text = " ".join(command)
             returncode, duration, stdout, stderr = run_command(command, args.timeout)
             rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, b2bua_log_path, command_text))
