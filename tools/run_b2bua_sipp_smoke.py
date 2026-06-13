@@ -37,6 +37,7 @@ LOG_FILES = (
     "log.call",
     "log.sipp",
 )
+DEFAULT_LOG_FOLDER = "b2bua-Regression"
 BASE_DEFAULTS = {
     "host": "127.0.0.1",
     "server_port": 25062,
@@ -66,6 +67,7 @@ BASE_DEFAULTS = {
     "rtpengine_timeout": 3.0,
     "ladder": None,
     "output_root": "",
+    "log_folder": DEFAULT_LOG_FOLDER,
     "run_id": "",
     "sipp_bin": "sipp",
     "dry_run": False,
@@ -387,6 +389,8 @@ def append_commands(log_dir: Path, commands: List[Tuple[str, List[str]]]) -> Non
 def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeResult]) -> None:
     transcoding_expected = bool(args.media_codec and args.server_codec and args.media_codec != args.server_codec)
     lines = [
+        f"run_id={args.resolved_run_id}",
+        f"log_folder={args.log_folder}",
         f"profile={args.profile or 'custom'}",
         f"caller={args.caller}",
         f"callee={args.callee}",
@@ -480,11 +484,12 @@ def register_caller(args: argparse.Namespace, log_dir: Path) -> int:
 
 
 def resolve_log_dir(args: argparse.Namespace, run_id: str) -> Tuple[Path, bool]:
+    log_folder = args.log_folder or DEFAULT_LOG_FOLDER
     if args.output_root:
-        return Path(args.output_root) / run_id, True
+        return Path(args.output_root) / log_folder, True
     if args.dry_run:
-        return Path(tempfile.mkdtemp(prefix=f"{run_id}-")), False
-    return ROOT / "logs" / run_id, True
+        return Path(tempfile.mkdtemp(prefix=f"{run_id}-")) / log_folder, True
+    return ROOT / "logs" / log_folder, True
 
 
 def apply_profile(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -535,6 +540,11 @@ def main() -> int:
     parser.add_argument("--ladder", dest="ladder", action="store_true", default=BASE_DEFAULTS["ladder"], help="Force unified B2BUA ladder logs on")
     parser.add_argument("--no-ladder", dest="ladder", action="store_false", help="Force unified B2BUA ladder logs off")
     parser.add_argument("--output-root", default=BASE_DEFAULTS["output_root"])
+    parser.add_argument(
+        "--log-folder",
+        default=BASE_DEFAULTS["log_folder"],
+        help="Single folder name used under the log root for consolidated B2BUA regression logs",
+    )
     parser.add_argument("--run-id", default=BASE_DEFAULTS["run_id"])
     parser.add_argument("--sipp-bin", default=BASE_DEFAULTS["sipp_bin"])
     parser.add_argument("--dry-run", action="store_true")
@@ -550,13 +560,11 @@ def main() -> int:
 
     run_prefix = args.profile or ("b2bua-media" if args.media_enabled else "b2bua-signalling")
     run_id = args.run_id or make_run_id(run_prefix)
+    args.resolved_run_id = run_id
     log_dir, needs_create = resolve_log_dir(args, run_id)
     if needs_create:
-        if log_dir.exists():
-            raise SystemExit(f"Log directory already exists: {log_dir}")
-        log_dir.mkdir(parents=True, exist_ok=False)
-    else:
-        initialize_log_dir(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+    initialize_log_dir(log_dir)
 
     results: List[SmokeResult] = []
     with tempfile.TemporaryDirectory(prefix=f"{run_id}-work-") as work_tmp:

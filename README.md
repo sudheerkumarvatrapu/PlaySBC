@@ -154,7 +154,7 @@ Preview the B2BUA commands without running SIPp:
 python3 tools/run_b2bua_sipp_smoke.py --callee alice --calls 1 --rate 1 --hold-ms 1000 --dry-run
 ```
 
-B2BUA dry-runs use a temporary output directory unless `--output-root <dir>` is provided.
+B2BUA dry-runs use a temporary output directory unless `--output-root <dir>` is provided. Inside that root, B2BUA logs are written to the single `b2bua-Regression` folder.
 
 List the named B2BUA SIPp test profiles:
 
@@ -193,10 +193,10 @@ Notes:
 
 ## Local Logs
 
-Only the B2BUA SIPp runner writes persistent project logs by default. Each run creates a fresh folder under:
+Only the B2BUA SIPp runner writes persistent project logs by default. All B2BUA runs append into one local regression folder:
 
 ```text
-logs/
+logs/b2bua-Regression/
 ```
 
 Important files:
@@ -214,7 +214,7 @@ log.call
 log.sipp
 ```
 
-The SIP ladder is written into `log.sip`. B2BUA call lifecycle events are written into `log.call`. SIPp tool output is consolidated into `log.sipp`. The saved run folder does not contain separate SIPp A or SIPp B leg folders.
+The SIP ladder is written into `log.sip`. B2BUA call lifecycle events are written into `log.call`. SIPp tool output is consolidated into `log.sipp`. The saved folder does not contain separate SIPp A or SIPp B leg folders. Use `--run-id <label>` to label a run inside the same files, or `--log-folder <name>` only when you intentionally want a different consolidated folder.
 
 Unit tests do not create log files. The generic SIPp regression runner writes to a temporary directory unless `--output-root <dir>` is provided.
 
