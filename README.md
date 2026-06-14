@@ -149,6 +149,7 @@ logs/b2bua-Regression/<run-id-or-profile-run-id>/
 Important files:
 
 ```text
+capture.pcap
 log.sip
 log.media
 log.transcoding
@@ -161,7 +162,7 @@ log.call
 log.sipp
 ```
 
-Single-call profiles include SIP and registration ladders in `log.sip`. Load profiles do not generate ladders. SIPp output is consolidated in `log.sipp`; media and transcoding summaries are in `log.media` and `log.transcoding`. Regression reports are written to `logs/reports/`, with the latest report copied to `logs/reports/latest.html`.
+Single-call profiles include SIP and registration ladders in `log.sip`. Non-load B2BUA profiles also generate one combined `capture.pcap` after the call completes, built from SIP traces and PlaySBC protocol logs. Load profiles do not generate ladders or PCAP captures. SIPp output is consolidated in `log.sipp`; media and transcoding summaries are in `log.media` and `log.transcoding`. Regression reports are written to `logs/reports/`, with the latest report copied to `logs/reports/latest.html`.
 
 ## Manual SIPp Debug Commands
 

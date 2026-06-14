@@ -10,11 +10,13 @@ import re
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -147,6 +149,16 @@ class SmokeResult:
     returncode: Optional[int]
     status: str
     duration_seconds: float
+
+
+@dataclass
+class PcapPacket:
+    timestamp: float
+    src_ip: str
+    src_port: int
+    dst_ip: str
+    dst_port: int
+    payload: bytes
 
 
 def make_run_id(prefix: str = "b2bua") -> str:
@@ -450,6 +462,180 @@ def append_commands(log_dir: Path, commands: List[Tuple[str, List[str]]]) -> Non
     for name, command in commands:
         lines.append(f"{name}: {shlex.join(command)}")
     append_log_section(log_dir, "log.sipp", "B2BUA SIPP COMMANDS", "\n".join(lines))
+
+
+def checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\x00"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    total = (total >> 16) + (total & 0xFFFF)
+    total += total >> 16
+    return (~total) & 0xFFFF
+
+
+def ethernet_ipv4_udp_packet(packet: PcapPacket, packet_id: int) -> bytes:
+    payload = packet.payload
+    src_ip = socket.inet_aton(packet.src_ip)
+    dst_ip = socket.inet_aton(packet.dst_ip)
+    udp_length = 8 + len(payload)
+    total_length = 20 + udp_length
+    ip_header = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total_length, packet_id & 0xFFFF, 0, 64, 17, 0, src_ip, dst_ip)
+    ip_header = ip_header[:10] + struct.pack("!H", checksum(ip_header)) + ip_header[12:]
+    udp_header = struct.pack("!HHHH", packet.src_port & 0xFFFF, packet.dst_port & 0xFFFF, udp_length, 0)
+    ethernet_header = b"\x02\x00\x00\x00\x00\x02" + b"\x02\x00\x00\x00\x00\x01" + struct.pack("!H", 0x0800)
+    return ethernet_header + ip_header + udp_header + payload
+
+
+def write_udp_pcap(path: Path, packets: List[PcapPacket]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as fh:
+        fh.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+        for index, packet in enumerate(sorted(packets, key=lambda item: item.timestamp), start=1):
+            frame = ethernet_ipv4_udp_packet(packet, index)
+            timestamp_seconds = int(packet.timestamp)
+            timestamp_microseconds = int((packet.timestamp - timestamp_seconds) * 1_000_000)
+            fh.write(struct.pack("<IIII", timestamp_seconds, timestamp_microseconds, len(frame), len(frame)))
+            fh.write(frame)
+
+
+def parse_iso_timestamp(value: str) -> float:
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%dT%H:%M:%S.%f").timestamp()
+    except ValueError:
+        return time.time()
+
+
+def parse_log_timestamp(line: str) -> float:
+    try:
+        return datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").timestamp()
+    except ValueError:
+        return time.time()
+
+
+def sipp_trace_messages(path: Path) -> List[Tuple[float, str, bytes]]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    pattern = re.compile(
+        r"^-{10,}\s+([0-9T:.\-]+)\nUDP message (sent|received) \[(\d+)\] bytes:\n\n",
+        re.MULTILINE,
+    )
+    matches = list(pattern.finditer(text))
+    messages = []
+    for index, match in enumerate(matches):
+        payload_start = match.end()
+        payload_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        payload_text = text[payload_start:payload_end].strip("\n")
+        if not payload_text.strip():
+            continue
+        payload = payload_text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
+        messages.append((parse_iso_timestamp(match.group(1)), match.group(2), payload))
+    return messages
+
+
+def sipp_leg_port(args: argparse.Namespace, leg: str) -> Optional[int]:
+    ports = {
+        "registration-callee": args.uas_port,
+        "registration-caller": args.uac_port,
+        "sipp-a-uac": args.uac_port,
+        "sipp-b-uas": args.uas_port,
+    }
+    return ports.get(leg)
+
+
+def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
+    packets = []
+    for leg in ("registration-callee", "registration-caller", "sipp-a-uac", "sipp-b-uas"):
+        local_port = sipp_leg_port(args, leg)
+        if local_port is None:
+            continue
+        for trace in sorted((work_dir / leg).glob("*_messages.log")):
+            for timestamp, direction, payload in sipp_trace_messages(trace):
+                if direction == "sent":
+                    src_port, dst_port = local_port, args.server_port
+                else:
+                    src_port, dst_port = args.server_port, local_port
+                packets.append(PcapPacket(timestamp, args.host, src_port, args.host, dst_port, payload))
+    return packets
+
+
+def parse_endpoint(text: str, key: str) -> Optional[Tuple[str, int]]:
+    match = re.search(rf"{key}=([0-9.]+):(\d+)", text)
+    if not match:
+        return None
+    return match.group(1), int(match.group(2))
+
+
+def protocol_event_port(line: str, args: argparse.Namespace) -> int:
+    if "protocol=rtp" in line:
+        return args.server_rtp_min
+    if "protocol=tls" in line:
+        return 5061
+    if "protocol=tcp" in line:
+        return args.server_port
+    return args.server_port
+
+
+def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
+    packets = []
+    for filename in ("log.udp", "log.networking", "log.tcp", "log.tls"):
+        path = log_dir / filename
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "LOG START" in line or not line.strip():
+                continue
+            timestamp = parse_log_timestamp(line)
+            default_port = protocol_event_port(line, args)
+            source = parse_endpoint(line, "source")
+            destination = parse_endpoint(line, "destination")
+            local = parse_endpoint(line, "local")
+            if " RX " in line and source:
+                src_ip, src_port = source
+                dst_ip, dst_port = args.host, default_port
+            elif " TX " in line and destination:
+                src_ip, src_port = args.host, default_port
+                dst_ip, dst_port = destination
+            elif local:
+                src_ip, src_port = local
+                dst_ip, dst_port = local
+            else:
+                src_ip = dst_ip = args.host
+                src_port = dst_port = default_port
+            packets.append(PcapPacket(timestamp, src_ip, src_port, dst_ip, dst_port, (line + "\n").encode("utf-8")))
+    return packets
+
+
+def should_generate_pcap_artifacts(args: argparse.Namespace) -> bool:
+    profile = str(getattr(args, "profile", "") or "")
+    if profile.startswith("load-"):
+        return False
+    return args.calls == 1 and args.rate == 1
+
+
+def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namespace) -> List[Path]:
+    if args.dry_run or not should_generate_pcap_artifacts(args):
+        return []
+
+    packets = sipp_trace_packets(work_dir, args) + protocol_event_packets(log_dir, args)
+    if not packets:
+        return []
+
+    pcap_path = log_dir / "capture.pcap"
+    write_udp_pcap(pcap_path, packets)
+    append_log_section(
+        log_dir,
+        "log.platform",
+        "PCAP GENERATION",
+        "\n".join(
+            [
+                "source=diagnostic_logs",
+                "scope=non_load_b2bua_profile",
+                "file=capture.pcap",
+                f"packet_count={len(packets)}",
+                "note=Single PCAP is generated from SIPp SIP traces and PlaySBC protocol logs after the call completes",
+            ]
+        ),
+    )
+    return [pcap_path]
 
 
 def registration_ladder_text(participant: str, user: str) -> str:
@@ -964,6 +1150,7 @@ def main() -> int:
             append_registration_ladders(log_dir, args, results)
             append_media_observation(log_dir, args)
             append_transcoding_observation(log_dir, args)
+            generate_pcap_artifacts(log_dir, work_dir, args)
             append_results(log_dir, args, results)
 
     print(f"B2BUA SIPp logs: {log_dir}")

@@ -417,6 +417,88 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("media_rtp_packets_received_total=6000", platform)
             self.assertIn("media_rtp_packets_relayed_total=6000", platform)
 
+    def test_b2bua_pcap_generation_creates_one_combined_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "bundle"
+            work_dir = root / "work"
+            trace_dir = work_dir / "sipp-a-uac"
+            trace_dir.mkdir(parents=True)
+            (work_dir / "sipp-b-uas").mkdir()
+            (work_dir / "registration-callee").mkdir()
+            (work_dir / "registration-caller").mkdir()
+            trace_dir.joinpath("b2bua_uac_a_messages.log").write_text(
+                "\n".join(
+                    [
+                        "----------------------------------------------- 2026-06-14T10:00:00.100000",
+                        "UDP message sent [92] bytes:",
+                        "",
+                        "OPTIONS sip:alice@127.0.0.1:25062 SIP/2.0",
+                        "Call-ID: unit-pcap@127.0.0.1",
+                        "Content-Length: 0",
+                        "",
+                        "----------------------------------------------- 2026-06-14T10:00:00.200000",
+                        "UDP message received [72] bytes:",
+                        "",
+                        "SIP/2.0 200 OK",
+                        "Call-ID: unit-pcap@127.0.0.1",
+                        "Content-Length: 0",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            run_b2bua_sipp_smoke.append_log_section(
+                log_dir,
+                "log.udp",
+                "UDP RX",
+                "protocol=sip source=127.0.0.1:25081 bytes=92",
+            )
+            args = argparse_namespace(
+                dry_run=False,
+                profile="basic-signalling",
+                calls=1,
+                rate=1,
+                host="127.0.0.1",
+                server_port=25062,
+                server_rtp_min=25100,
+                uac_port=25081,
+                uas_port=25082,
+            )
+
+            created = run_b2bua_sipp_smoke.generate_pcap_artifacts(log_dir, work_dir, args)
+
+            self.assertEqual([path.name for path in created], ["capture.pcap"])
+            self.assertTrue((log_dir / "capture.pcap").exists())
+            self.assertFalse((log_dir / "capture.sip.pcap").exists())
+            self.assertFalse((log_dir / "capture.protocols.pcap").exists())
+            self.assertEqual((log_dir / "capture.pcap").read_bytes()[:4], b"\xd4\xc3\xb2\xa1")
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            self.assertIn("PCAP GENERATION", platform)
+            self.assertIn("file=capture.pcap", platform)
+
+    def test_b2bua_pcap_generation_skips_load_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "bundle"
+            work_dir = Path(tmp) / "work"
+            args = argparse_namespace(
+                dry_run=False,
+                profile="load-5cps-60s",
+                calls=5,
+                rate=5,
+                host="127.0.0.1",
+                server_port=25062,
+                server_rtp_min=25100,
+                uac_port=25081,
+                uas_port=25082,
+            )
+
+            created = run_b2bua_sipp_smoke.generate_pcap_artifacts(log_dir, work_dir, args)
+
+            self.assertEqual(created, [])
+            self.assertFalse((log_dir / "capture.pcap").exists())
+
     def test_b2bua_basic_dry_run_enables_ladder_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             completed = subprocess.run(
