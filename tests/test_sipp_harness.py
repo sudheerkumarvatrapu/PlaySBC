@@ -16,18 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def read_udp_pcap_packets(path: Path):
+    return [(src, dst, payload) for _timestamp, src, dst, payload in read_udp_pcap_records(path)]
+
+
+def read_udp_pcap_records(path: Path):
     data = path.read_bytes()
     packets = []
     offset = 24
     while offset + 16 <= len(data):
-        _ts_sec, _ts_usec, included_length, _original_length = struct.unpack("<IIII", data[offset : offset + 16])
+        ts_sec, ts_usec, included_length, _original_length = struct.unpack("<IIII", data[offset : offset + 16])
         offset += 16
         frame = data[offset : offset + included_length]
         offset += included_length
         if len(frame) < 42:
             continue
         src_port, dst_port, _udp_length, _checksum = struct.unpack("!HHHH", frame[34:42])
-        packets.append((src_port, dst_port, frame[42:]))
+        packets.append((ts_sec + (ts_usec / 1_000_000), src_port, dst_port, frame[42:]))
     return packets
 
 
@@ -518,6 +522,22 @@ class SippScenarioTests(unittest.TestCase):
             root = Path(tmp)
             log_dir = root / "bundle"
             work_dir = root / "work"
+            trace_dir = work_dir / "sipp-b-uas"
+            trace_dir.mkdir(parents=True)
+            trace_dir.joinpath("b2bua_uas_b_messages.log").write_text(
+                "\n".join(
+                    [
+                        "----------------------------------------------- 2026-06-14T10:00:00.700000",
+                        "UDP message received [88] bytes:",
+                        "",
+                        "ACK sip:sipp-b@127.0.0.1:25082 SIP/2.0",
+                        "CSeq: 1 ACK",
+                        "Content-Length: 0",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             media_source = root / "media.pcap"
             rtp_payload = struct.pack("!BBHII", 0x80, 0, 1, 160, 0xC0DEC0DE) + (b"\xff" * 160)
             run_b2bua_sipp_smoke.write_udp_pcap(
@@ -568,13 +588,24 @@ class SippScenarioTests(unittest.TestCase):
 
             self.assertEqual([path.name for path in created], ["capture.pcap"])
             pcap_packets = read_udp_pcap_packets(log_dir / "capture.pcap")
+            pcap_records = read_udp_pcap_records(log_dir / "capture.pcap")
             rtp_ports = {25100, 25102, 26000, 27000}
             rtp_packets = [
                 (src, dst, payload)
                 for src, dst, payload in pcap_packets
                 if src in rtp_ports and dst in rtp_ports and len(payload) >= 12 and payload[0] >> 6 == 2
             ]
+            rtp_timestamps = [
+                timestamp
+                for timestamp, src, dst, payload in pcap_records
+                if src in rtp_ports and dst in rtp_ports and len(payload) >= 12 and payload[0] >> 6 == 2
+            ]
             self.assertEqual(len(rtp_packets), 8)
+            self.assertAlmostEqual(
+                min(rtp_timestamps),
+                run_b2bua_sipp_smoke.parse_iso_timestamp("2026-06-14T10:00:00.700000") + 0.001,
+                places=5,
+            )
             self.assertEqual(
                 {(src, dst) for src, dst, _payload in rtp_packets},
                 {

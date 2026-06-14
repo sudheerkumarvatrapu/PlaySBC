@@ -579,6 +579,25 @@ def media_capture_start_timestamp(log_dir: Path) -> float:
     return time.time()
 
 
+def is_invite_ack_payload(payload: bytes) -> bool:
+    start_line = payload.split(b"\r\n", 1)[0].upper()
+    if not start_line.startswith(b"ACK "):
+        return False
+    return re.search(rb"(?im)^CSeq\s*:\s*\d+\s+ACK\s*$", payload) is not None
+
+
+def sip_ack_media_start_timestamp(work_dir: Path) -> Optional[float]:
+    ack_timestamps = []
+    for leg in ("sipp-a-uac", "sipp-b-uas"):
+        for trace in sorted((work_dir / leg).glob("*_messages.log")):
+            for timestamp, _direction, payload in sipp_trace_messages(trace):
+                if is_invite_ack_payload(payload):
+                    ack_timestamps.append(timestamp)
+    if not ack_timestamps:
+        return None
+    return max(ack_timestamps) + 0.001
+
+
 def with_rtp_payload_type(rtp: bytes, codec: str) -> bytes:
     payload_type = {"PCMU": 0, "PCMA": 8}.get(codec.upper())
     if payload_type is None or len(rtp) < 2:
@@ -588,7 +607,7 @@ def with_rtp_payload_type(rtp: bytes, codec: str) -> bytes:
     return bytes(rewritten)
 
 
-def rtp_media_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
+def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
     if not getattr(args, "media_enabled", False) or total_logged_rtp_packets(log_dir) <= 0:
         return []
 
@@ -606,7 +625,6 @@ def rtp_media_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacke
     if not server_rtp:
         server_rtp = endpoint_rtp
 
-    base_time = media_capture_start_timestamp(log_dir)
     host = getattr(args, "host", BASE_DEFAULTS["host"])
     endpoint_streams = [
         (int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))),
@@ -616,6 +634,10 @@ def rtp_media_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacke
         (int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"]))),
         (int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"]))),
     ]
+
+    base_time = sip_ack_media_start_timestamp(work_dir)
+    if base_time is None:
+        base_time = media_capture_start_timestamp(log_dir)
 
     packets = []
     for relative_timestamp, rtp in endpoint_rtp:
@@ -759,7 +781,7 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
 
     sip_packets = sipp_trace_packets(work_dir, args)
     diagnostic_packets = protocol_event_packets(log_dir, args)
-    rtp_packets = rtp_media_packets(log_dir, args)
+    rtp_packets = rtp_media_packets(log_dir, work_dir, args)
     packets = sip_packets + diagnostic_packets + rtp_packets
     if not packets:
         return []
