@@ -78,6 +78,10 @@ BASE_DEFAULTS = {
     "log_folder": DEFAULT_LOG_FOLDER,
     "run_id": "",
     "sipp_bin": "sipp",
+    "pcap_topology": "logical",
+    "pcap_uac_ip": "10.10.10.10",
+    "pcap_server_ip": "10.10.10.20",
+    "pcap_uas_ip": "10.10.10.30",
     "dry_run": False,
 }
 B2BUA_PROFILES = {
@@ -625,14 +629,14 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
     if not server_rtp:
         server_rtp = endpoint_rtp
 
-    host = getattr(args, "host", BASE_DEFAULTS["host"])
+    uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
     endpoint_streams = [
-        (int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))),
-        (int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2),
+        (uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))),
+        (uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2),
     ]
     server_streams = [
-        (int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"]))),
-        (int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"]))),
+        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"]))),
+        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"]))),
     ]
 
     base_time = sip_ack_media_start_timestamp(work_dir)
@@ -642,12 +646,12 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
     packets = []
     for relative_timestamp, rtp in endpoint_rtp:
         payload = with_rtp_payload_type(rtp, media_codec)
-        for src_port, dst_port in endpoint_streams:
-            packets.append(PcapPacket(base_time + relative_timestamp, host, src_port, host, dst_port, payload))
+        for src_ip, src_port, dst_ip, dst_port in endpoint_streams:
+            packets.append(PcapPacket(base_time + relative_timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     for relative_timestamp, rtp in server_rtp:
         payload = with_rtp_payload_type(rtp, server_codec)
-        for src_port, dst_port in server_streams:
-            packets.append(PcapPacket(base_time + relative_timestamp, host, src_port, host, dst_port, payload))
+        for src_ip, src_port, dst_ip, dst_port in server_streams:
+            packets.append(PcapPacket(base_time + relative_timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     return packets
 
 
@@ -716,19 +720,78 @@ def sipp_leg_port(args: argparse.Namespace, leg: str) -> Optional[int]:
     return ports.get(leg)
 
 
+def pcap_topology_ips(args: argparse.Namespace) -> Tuple[str, str, str]:
+    if getattr(args, "pcap_topology", BASE_DEFAULTS["pcap_topology"]) == "runtime":
+        host = getattr(args, "host", BASE_DEFAULTS["host"])
+        return host, host, host
+    return (
+        getattr(args, "pcap_uac_ip", BASE_DEFAULTS["pcap_uac_ip"]),
+        getattr(args, "pcap_server_ip", BASE_DEFAULTS["pcap_server_ip"]),
+        getattr(args, "pcap_uas_ip", BASE_DEFAULTS["pcap_uas_ip"]),
+    )
+
+
+def pcap_leg_ip(args: argparse.Namespace, leg: str) -> str:
+    uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
+    leg_ips = {
+        "registration-callee": uas_ip,
+        "registration-caller": uac_ip,
+        "sipp-a-uac": uac_ip,
+        "sipp-b-uas": uas_ip,
+    }
+    return leg_ips.get(leg, server_ip)
+
+
+def pcap_endpoint_ip(args: argparse.Namespace, endpoint: Optional[Tuple[str, int]]) -> str:
+    uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
+    if not endpoint:
+        return server_ip
+
+    _host, port = endpoint
+    uac_port = int(getattr(args, "uac_port", BASE_DEFAULTS["uac_port"]))
+    uas_port = int(getattr(args, "uas_port", BASE_DEFAULTS["uas_port"]))
+    register_port = int(getattr(args, "register_port", BASE_DEFAULTS["register_port"]))
+    caller_register_port = int(getattr(args, "caller_register_port", BASE_DEFAULTS["caller_register_port"]))
+    server_port = int(getattr(args, "server_port", BASE_DEFAULTS["server_port"]))
+    server_rtp_min = int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))
+    server_rtp_max = int(getattr(args, "server_rtp_max", BASE_DEFAULTS["server_rtp_max"]))
+    uac_rtp_min = int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"]))
+    uac_rtp_max = int(getattr(args, "uac_rtp_max", BASE_DEFAULTS["uac_rtp_max"]))
+    uas_rtp_min = int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"]))
+    uas_rtp_max = int(getattr(args, "uas_rtp_max", BASE_DEFAULTS["uas_rtp_max"]))
+
+    if port in {uac_port, caller_register_port}:
+        return uac_ip
+    if port in {uas_port, register_port}:
+        return uas_ip
+    if uac_rtp_min <= port <= uac_rtp_max:
+        return uac_ip
+    if uas_rtp_min <= port <= uas_rtp_max:
+        return uas_ip
+    if port == server_port or server_rtp_min <= port <= server_rtp_max:
+        return server_ip
+    if getattr(args, "pcap_topology", BASE_DEFAULTS["pcap_topology"]) == "runtime":
+        return endpoint[0]
+    return server_ip
+
+
 def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
     packets = []
+    _uac_ip, server_ip, _uas_ip = pcap_topology_ips(args)
     for leg in ("registration-callee", "registration-caller", "sipp-a-uac", "sipp-b-uas"):
         local_port = sipp_leg_port(args, leg)
         if local_port is None:
             continue
+        local_ip = pcap_leg_ip(args, leg)
         for trace in sorted((work_dir / leg).glob("*_messages.log")):
             for timestamp, direction, payload in sipp_trace_messages(trace):
                 if direction == "sent":
                     src_port, dst_port = local_port, args.server_port
+                    src_ip, dst_ip = local_ip, server_ip
                 else:
                     src_port, dst_port = args.server_port, local_port
-                packets.append(PcapPacket(timestamp, args.host, src_port, args.host, dst_port, payload))
+                    src_ip, dst_ip = server_ip, local_ip
+                packets.append(PcapPacket(timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     return packets
 
 
@@ -741,6 +804,7 @@ def parse_endpoint(text: str, key: str) -> Optional[Tuple[str, int]]:
 
 def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
     packets = []
+    _uac_ip, server_ip, _uas_ip = pcap_topology_ips(args)
     for filename in ("log.udp", "log.networking", "log.tcp", "log.tls"):
         path = log_dir / filename
         if not path.exists():
@@ -753,16 +817,16 @@ def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[Pcap
             destination = parse_endpoint(line, "destination")
             local = parse_endpoint(line, "local")
             if " RX " in line and source:
-                src_ip, _src_port = source
-                dst_ip = args.host
+                src_ip = pcap_endpoint_ip(args, source)
+                dst_ip = server_ip
             elif " TX " in line and destination:
-                src_ip = args.host
-                dst_ip, _dst_port = destination
+                src_ip = server_ip
+                dst_ip = pcap_endpoint_ip(args, destination)
             elif local:
-                src_ip, _src_port = local
-                dst_ip = local[0]
+                src_ip = pcap_endpoint_ip(args, local)
+                dst_ip = src_ip
             else:
-                src_ip = dst_ip = args.host
+                src_ip = dst_ip = server_ip
             payload = f"PlaySBC diagnostic event | {line}\n".encode("utf-8")
             packets.append(PcapPacket(timestamp, src_ip, DIAGNOSTIC_PCAP_PORT, dst_ip, DIAGNOSTIC_PCAP_PORT, payload))
     return packets
@@ -786,6 +850,7 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
     if not packets:
         return []
 
+    uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
     pcap_path = log_dir / "capture.pcap"
     write_udp_pcap(pcap_path, packets)
     append_log_section(
@@ -801,6 +866,10 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
                 f"sip_packets={len(sip_packets)}",
                 f"rtp_packets={len(rtp_packets)}",
                 f"diagnostic_packets={len(diagnostic_packets)}",
+                f"topology={getattr(args, 'pcap_topology', BASE_DEFAULTS['pcap_topology'])}",
+                f"topology_uac_ip={uac_ip}",
+                f"topology_server_ip={server_ip}",
+                f"topology_uas_ip={uas_ip}",
                 "note=Single PCAP is generated from SIPp SIP traces, RTP media replay samples, and PlaySBC protocol logs after the call completes",
             ]
         ),
@@ -1009,6 +1078,10 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"rtpengine_url={args.rtpengine_url if args.media_backend == 'rtpengine' else ''}",
         f"transcoding_expected={transcoding_expected}",
         f"transcoding_owner={'rtpengine' if transcoding_expected and args.media_backend == 'rtpengine' else 'internal' if transcoding_expected else ''}",
+        f"pcap_topology={getattr(args, 'pcap_topology', BASE_DEFAULTS['pcap_topology'])}",
+        f"pcap_uac_ip={pcap_topology_ips(args)[0]}",
+        f"pcap_server_ip={pcap_topology_ips(args)[1]}",
+        f"pcap_uas_ip={pcap_topology_ips(args)[2]}",
         f"ladder_enabled={args.ladder_enabled}",
         "",
     ]
@@ -1180,6 +1253,15 @@ def main() -> int:
         default=BASE_DEFAULTS["log_folder"],
         help="Folder name used under logs/ as the parent for per-testcase B2BUA log bundles",
     )
+    parser.add_argument(
+        "--pcap-topology",
+        choices=("logical", "runtime"),
+        default=BASE_DEFAULTS["pcap_topology"],
+        help="Use logical SIPp A/PlaySBC/SIPp B IPs in capture.pcap, or preserve runtime bind IPs",
+    )
+    parser.add_argument("--pcap-uac-ip", default=BASE_DEFAULTS["pcap_uac_ip"], help="Logical SIPp A IP written to capture.pcap")
+    parser.add_argument("--pcap-server-ip", default=BASE_DEFAULTS["pcap_server_ip"], help="Logical PlaySBC IP written to capture.pcap")
+    parser.add_argument("--pcap-uas-ip", default=BASE_DEFAULTS["pcap_uas_ip"], help="Logical SIPp B IP written to capture.pcap")
     parser.add_argument("--run-id", default=BASE_DEFAULTS["run_id"])
     parser.add_argument("--sipp-bin", default=BASE_DEFAULTS["sipp_bin"])
     parser.add_argument("--dry-run", action="store_true")
