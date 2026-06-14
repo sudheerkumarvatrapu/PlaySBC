@@ -1,4 +1,5 @@
 import json
+import struct
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,22 @@ from tools import run_regression_suite
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def read_udp_pcap_packets(path: Path):
+    data = path.read_bytes()
+    packets = []
+    offset = 24
+    while offset + 16 <= len(data):
+        _ts_sec, _ts_usec, included_length, _original_length = struct.unpack("<IIII", data[offset : offset + 16])
+        offset += 16
+        frame = data[offset : offset + included_length]
+        offset += included_length
+        if len(frame) < 42:
+            continue
+        src_port, dst_port, _udp_length, _checksum = struct.unpack("!HHHH", frame[34:42])
+        packets.append((src_port, dst_port, frame[42:]))
+    return packets
 
 
 class SippScenarioTests(unittest.TestCase):
@@ -474,6 +491,24 @@ class SippScenarioTests(unittest.TestCase):
             self.assertFalse((log_dir / "capture.sip.pcap").exists())
             self.assertFalse((log_dir / "capture.protocols.pcap").exists())
             self.assertEqual((log_dir / "capture.pcap").read_bytes()[:4], b"\xd4\xc3\xb2\xa1")
+            pcap_packets = read_udp_pcap_packets(log_dir / "capture.pcap")
+            sip_payloads = [payload for _src, _dst, payload in pcap_packets if payload.startswith((b"OPTIONS ", b"SIP/2.0 "))]
+            self.assertEqual(len(sip_payloads), 2)
+            self.assertTrue(all(payload.endswith(b"\r\n\r\n") for payload in sip_payloads))
+            self.assertTrue(all(b"Content-Length: 0\r\n\r\n" in payload for payload in sip_payloads))
+            diagnostic_packets = [
+                (src, dst, payload)
+                for src, dst, payload in pcap_packets
+                if payload.startswith(b"PlaySBC diagnostic event")
+            ]
+            self.assertTrue(diagnostic_packets)
+            self.assertTrue(
+                all(
+                    src == run_b2bua_sipp_smoke.DIAGNOSTIC_PCAP_PORT
+                    and dst == run_b2bua_sipp_smoke.DIAGNOSTIC_PCAP_PORT
+                    for src, dst, _payload in diagnostic_packets
+                )
+            )
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("PCAP GENERATION", platform)
             self.assertIn("file=capture.pcap", platform)

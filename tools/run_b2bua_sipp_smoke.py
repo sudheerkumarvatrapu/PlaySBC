@@ -28,6 +28,7 @@ MEDIA_PCAPS = {
     "PCMA": "pcap/g711a_60s.pcap",
 }
 CRLF = "\r\n"
+DIAGNOSTIC_PCAP_PORT = 65530
 LOG_FILES = (
     "log.sip",
     "log.media",
@@ -523,12 +524,34 @@ def sipp_trace_messages(path: Path) -> List[Tuple[float, str, bytes]]:
     for index, match in enumerate(matches):
         payload_start = match.end()
         payload_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        payload_text = text[payload_start:payload_end].strip("\n")
-        if not payload_text.strip():
+        payload = normalize_sip_payload(text[payload_start:payload_end])
+        if not payload:
             continue
-        payload = payload_text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
         messages.append((parse_iso_timestamp(match.group(1)), match.group(2), payload))
     return messages
+
+
+def normalize_sip_payload(payload_text: str) -> bytes:
+    normalized = payload_text.replace("\r\n", "\n").strip("\n")
+    if not normalized.strip():
+        return b""
+
+    if "\n\n" in normalized:
+        headers, body = normalized.split("\n\n", 1)
+        body = body.rstrip("\n")
+    else:
+        headers, body = normalized, ""
+
+    body_bytes = body.replace("\n", "\r\n").encode("utf-8")
+    if re.search(r"(?im)^Content-Length\s*:", headers):
+        headers = re.sub(
+            r"(?im)^Content-Length\s*:\s*\d+",
+            f"Content-Length: {len(body_bytes)}",
+            headers,
+            count=1,
+        )
+    header_bytes = headers.replace("\n", "\r\n").encode("utf-8")
+    return header_bytes + b"\r\n\r\n" + body_bytes
 
 
 def sipp_leg_port(args: argparse.Namespace, leg: str) -> Optional[int]:
@@ -564,16 +587,6 @@ def parse_endpoint(text: str, key: str) -> Optional[Tuple[str, int]]:
     return match.group(1), int(match.group(2))
 
 
-def protocol_event_port(line: str, args: argparse.Namespace) -> int:
-    if "protocol=rtp" in line:
-        return args.server_rtp_min
-    if "protocol=tls" in line:
-        return 5061
-    if "protocol=tcp" in line:
-        return args.server_port
-    return args.server_port
-
-
 def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
     packets = []
     for filename in ("log.udp", "log.networking", "log.tcp", "log.tls"):
@@ -584,23 +597,22 @@ def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[Pcap
             if "LOG START" in line or not line.strip():
                 continue
             timestamp = parse_log_timestamp(line)
-            default_port = protocol_event_port(line, args)
             source = parse_endpoint(line, "source")
             destination = parse_endpoint(line, "destination")
             local = parse_endpoint(line, "local")
             if " RX " in line and source:
-                src_ip, src_port = source
-                dst_ip, dst_port = args.host, default_port
+                src_ip, _src_port = source
+                dst_ip = args.host
             elif " TX " in line and destination:
-                src_ip, src_port = args.host, default_port
-                dst_ip, dst_port = destination
+                src_ip = args.host
+                dst_ip, _dst_port = destination
             elif local:
-                src_ip, src_port = local
-                dst_ip, dst_port = local
+                src_ip, _src_port = local
+                dst_ip = local[0]
             else:
                 src_ip = dst_ip = args.host
-                src_port = dst_port = default_port
-            packets.append(PcapPacket(timestamp, src_ip, src_port, dst_ip, dst_port, (line + "\n").encode("utf-8")))
+            payload = f"PlaySBC diagnostic event | {line}\n".encode("utf-8")
+            packets.append(PcapPacket(timestamp, src_ip, DIAGNOSTIC_PCAP_PORT, dst_ip, DIAGNOSTIC_PCAP_PORT, payload))
     return packets
 
 
