@@ -499,6 +499,136 @@ def write_udp_pcap(path: Path, packets: List[PcapPacket]) -> None:
             fh.write(frame)
 
 
+def extract_rtp_payload(frame: bytes) -> bytes:
+    if len(frame) < 14:
+        return b""
+    ether_type = struct.unpack("!H", frame[12:14])[0]
+    if ether_type != 0x0800:
+        return b""
+
+    ip_offset = 14
+    if len(frame) < ip_offset + 20:
+        return b""
+    version_ihl = frame[ip_offset]
+    if version_ihl >> 4 != 4:
+        return b""
+    ihl = (version_ihl & 0x0F) * 4
+    if frame[ip_offset + 9] != 17:
+        return b""
+
+    udp_offset = ip_offset + ihl
+    rtp_offset = udp_offset + 8
+    if len(frame) < rtp_offset + 12:
+        return b""
+    return frame[rtp_offset:]
+
+
+def rtp_packets_from_pcap(path: Path, max_seconds: float) -> List[Tuple[float, bytes]]:
+    if not path.exists():
+        return []
+
+    data = path.read_bytes()
+    if len(data) < 24:
+        return []
+
+    magic = data[:4]
+    if magic == b"\xd4\xc3\xb2\xa1":
+        endian = "<"
+    elif magic == b"\xa1\xb2\xc3\xd4":
+        endian = ">"
+    else:
+        return []
+
+    packets = []
+    first_timestamp: Optional[float] = None
+    offset = 24
+    while offset + 16 <= len(data):
+        ts_sec, ts_usec, included_len, _original_len = struct.unpack(f"{endian}IIII", data[offset : offset + 16])
+        offset += 16
+        frame = data[offset : offset + included_len]
+        offset += included_len
+        rtp = extract_rtp_payload(frame)
+        if not rtp:
+            continue
+
+        timestamp = ts_sec + (ts_usec / 1_000_000)
+        if first_timestamp is None:
+            first_timestamp = timestamp
+        relative_timestamp = timestamp - first_timestamp
+        if max_seconds > 0 and relative_timestamp > max_seconds:
+            break
+        packets.append((relative_timestamp, rtp))
+    return packets
+
+
+def media_pcap_for_codec(codec: str, fallback: Path) -> Path:
+    relative = MEDIA_PCAPS.get(codec.upper())
+    if not relative:
+        return fallback
+    path = SCENARIO_DIR / relative
+    return path if path.exists() else fallback
+
+
+def media_capture_start_timestamp(log_dir: Path) -> float:
+    media_log = log_dir / "log.media"
+    if not media_log.exists():
+        return time.time()
+    for line in media_log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "RTP PACKET RX" in line or "B2BUA ANSWERED" in line:
+            return parse_log_timestamp(line)
+    return time.time()
+
+
+def with_rtp_payload_type(rtp: bytes, codec: str) -> bytes:
+    payload_type = {"PCMU": 0, "PCMA": 8}.get(codec.upper())
+    if payload_type is None or len(rtp) < 2:
+        return rtp
+    rewritten = bytearray(rtp)
+    rewritten[1] = (rewritten[1] & 0x80) | payload_type
+    return bytes(rewritten)
+
+
+def rtp_media_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
+    if not getattr(args, "media_enabled", False) or total_logged_rtp_packets(log_dir) <= 0:
+        return []
+
+    media_pcap = Path(str(getattr(args, "media_pcap_resolved", "") or ""))
+    if not media_pcap.exists():
+        return []
+
+    media_codec = str(getattr(args, "media_codec", "") or "PCMU").upper()
+    server_codec = str(getattr(args, "server_codec", "") or media_codec).upper()
+    max_seconds = max(float(getattr(args, "hold_ms", 0) or 0) / 1000.0, 0.0) + 0.100
+    endpoint_rtp = rtp_packets_from_pcap(media_pcap, max_seconds)
+    server_rtp = rtp_packets_from_pcap(media_pcap_for_codec(server_codec, media_pcap), max_seconds)
+    if not endpoint_rtp:
+        return []
+    if not server_rtp:
+        server_rtp = endpoint_rtp
+
+    base_time = media_capture_start_timestamp(log_dir)
+    host = getattr(args, "host", BASE_DEFAULTS["host"])
+    endpoint_streams = [
+        (int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))),
+        (int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2),
+    ]
+    server_streams = [
+        (int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"]))),
+        (int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"]))),
+    ]
+
+    packets = []
+    for relative_timestamp, rtp in endpoint_rtp:
+        payload = with_rtp_payload_type(rtp, media_codec)
+        for src_port, dst_port in endpoint_streams:
+            packets.append(PcapPacket(base_time + relative_timestamp, host, src_port, host, dst_port, payload))
+    for relative_timestamp, rtp in server_rtp:
+        payload = with_rtp_payload_type(rtp, server_codec)
+        for src_port, dst_port in server_streams:
+            packets.append(PcapPacket(base_time + relative_timestamp, host, src_port, host, dst_port, payload))
+    return packets
+
+
 def parse_iso_timestamp(value: str) -> float:
     try:
         return datetime.strptime(value.strip(), "%Y-%m-%dT%H:%M:%S.%f").timestamp()
@@ -627,7 +757,10 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
     if args.dry_run or not should_generate_pcap_artifacts(args):
         return []
 
-    packets = sipp_trace_packets(work_dir, args) + protocol_event_packets(log_dir, args)
+    sip_packets = sipp_trace_packets(work_dir, args)
+    diagnostic_packets = protocol_event_packets(log_dir, args)
+    rtp_packets = rtp_media_packets(log_dir, args)
+    packets = sip_packets + diagnostic_packets + rtp_packets
     if not packets:
         return []
 
@@ -643,7 +776,10 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
                 "scope=non_load_b2bua_profile",
                 "file=capture.pcap",
                 f"packet_count={len(packets)}",
-                "note=Single PCAP is generated from SIPp SIP traces and PlaySBC protocol logs after the call completes",
+                f"sip_packets={len(sip_packets)}",
+                f"rtp_packets={len(rtp_packets)}",
+                f"diagnostic_packets={len(diagnostic_packets)}",
+                "note=Single PCAP is generated from SIPp SIP traces, RTP media replay samples, and PlaySBC protocol logs after the call completes",
             ]
         ),
     )

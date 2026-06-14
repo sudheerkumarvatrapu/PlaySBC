@@ -513,6 +513,82 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("PCAP GENERATION", platform)
             self.assertIn("file=capture.pcap", platform)
 
+    def test_b2bua_pcap_generation_includes_rtp_for_media_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "bundle"
+            work_dir = root / "work"
+            media_source = root / "media.pcap"
+            rtp_payload = struct.pack("!BBHII", 0x80, 0, 1, 160, 0xC0DEC0DE) + (b"\xff" * 160)
+            run_b2bua_sipp_smoke.write_udp_pcap(
+                media_source,
+                [
+                    run_b2bua_sipp_smoke.PcapPacket(0.000, "10.0.0.1", 4000, "10.0.0.2", 4002, rtp_payload),
+                    run_b2bua_sipp_smoke.PcapPacket(0.020, "10.0.0.1", 4000, "10.0.0.2", 4002, rtp_payload),
+                ],
+            )
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            run_b2bua_sipp_smoke.append_log_section(
+                log_dir,
+                "log.media",
+                "RTP PACKET RX",
+                "call_id=unit leg=inbound source=127.0.0.1:26000 seq=1 timestamp=160 payload_type=PCMU payload_bytes=160",
+            )
+            run_b2bua_sipp_smoke.append_log_section(
+                log_dir,
+                "log.media",
+                "CALL SUMMARY",
+                "rtp_packets_received=2 rtp_packets_sent=2 rtp_packets_relayed=2",
+            )
+            args = argparse_namespace(
+                dry_run=False,
+                profile="basic-media",
+                calls=1,
+                rate=1,
+                hold_ms=20,
+                host="127.0.0.1",
+                server_port=25062,
+                server_rtp_min=25100,
+                uac_rtp_min=26000,
+                uas_rtp_min=27000,
+                uac_port=25081,
+                uas_port=25082,
+                media_enabled=True,
+                media_codec="PCMU",
+                server_codec="PCMA",
+                media_pcap_resolved=media_source,
+            )
+
+            original_pcma_fixture = run_b2bua_sipp_smoke.MEDIA_PCAPS["PCMA"]
+            run_b2bua_sipp_smoke.MEDIA_PCAPS["PCMA"] = "pcap/missing-test-fixture.pcap"
+            try:
+                created = run_b2bua_sipp_smoke.generate_pcap_artifacts(log_dir, work_dir, args)
+            finally:
+                run_b2bua_sipp_smoke.MEDIA_PCAPS["PCMA"] = original_pcma_fixture
+
+            self.assertEqual([path.name for path in created], ["capture.pcap"])
+            pcap_packets = read_udp_pcap_packets(log_dir / "capture.pcap")
+            rtp_ports = {25100, 25102, 26000, 27000}
+            rtp_packets = [
+                (src, dst, payload)
+                for src, dst, payload in pcap_packets
+                if src in rtp_ports and dst in rtp_ports and len(payload) >= 12 and payload[0] >> 6 == 2
+            ]
+            self.assertEqual(len(rtp_packets), 8)
+            self.assertEqual(
+                {(src, dst) for src, dst, _payload in rtp_packets},
+                {
+                    (26000, 25100),
+                    (27000, 25102),
+                    (25100, 26000),
+                    (25102, 27000),
+                },
+            )
+            self.assertTrue(all((payload[1] & 0x7F) == 0 for src, _dst, payload in rtp_packets if src in (26000, 27000)))
+            self.assertTrue(all((payload[1] & 0x7F) == 8 for src, _dst, payload in rtp_packets if src in (25100, 25102)))
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            self.assertIn("rtp_packets=8", platform)
+
     def test_b2bua_pcap_generation_skips_load_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp) / "bundle"
