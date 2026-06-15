@@ -42,6 +42,11 @@ def read_udp_pcap_flow_records(path: Path):
     return packets
 
 
+def sip_body(payload: bytes) -> bytes:
+    _headers, separator, body = payload.partition(b"\r\n\r\n")
+    return body if separator else b""
+
+
 class SippScenarioTests(unittest.TestCase):
     def test_all_xml_scenarios_are_well_formed(self):
         scenarios = ROOT / "sipp" / "scenarios"
@@ -541,6 +546,23 @@ class SippScenarioTests(unittest.TestCase):
             trace_dir.joinpath("b2bua_uas_b_messages.log").write_text(
                 "\n".join(
                     [
+                        "----------------------------------------------- 2026-06-14T10:00:00.500000",
+                        "UDP message sent [180] bytes:",
+                        "",
+                        "SIP/2.0 200 OK",
+                        "Call-ID: unit-media@127.0.0.1",
+                        "Content-Type: application/sdp",
+                        "Content-Length: 999",
+                        "",
+                        "v=0",
+                        "o=playsbc 1 1 IN IP4 127.0.0.1",
+                        "s=PlaySBC",
+                        "c=IN IP4 127.0.0.1",
+                        "t=0 0",
+                        "m=audio 27000 RTP/AVP 0 8 101",
+                        "a=rtpmap:0 PCMU/8000",
+                        "a=rtpmap:8 PCMA/8000",
+                        "",
                         "----------------------------------------------- 2026-06-14T10:00:00.700000",
                         "UDP message received [88] bytes:",
                         "",
@@ -644,6 +666,12 @@ class SippScenarioTests(unittest.TestCase):
                     ("10.10.10.20", 25102, "10.10.10.30", 27000),
                 },
             )
+            sdp_payloads = [payload for _src, _dst, payload in pcap_packets if b"m=audio 27000" in payload]
+            self.assertEqual(len(sdp_payloads), 1)
+            self.assertIn(b"o=playsbc 1 1 IN IP4 10.10.10.30", sdp_payloads[0])
+            self.assertIn(b"c=IN IP4 10.10.10.30", sdp_payloads[0])
+            self.assertNotIn(b"c=IN IP4 127.0.0.1", sdp_payloads[0])
+            self.assertIn(f"Content-Length: {len(sip_body(sdp_payloads[0]))}".encode("utf-8"), sdp_payloads[0])
             self.assertTrue(all((payload[1] & 0x7F) == 0 for src, _dst, payload in rtp_packets if src in (26000, 27000)))
             self.assertTrue(all((payload[1] & 0x7F) == 8 for src, _dst, payload in rtp_packets if src in (25100, 25102)))
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")

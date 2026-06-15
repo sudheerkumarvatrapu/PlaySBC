@@ -775,6 +775,64 @@ def pcap_endpoint_ip(args: argparse.Namespace, endpoint: Optional[Tuple[str, int
     return server_ip
 
 
+def pcap_media_ip_for_port(args: argparse.Namespace, port: int) -> Optional[str]:
+    uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
+    server_rtp_min = int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))
+    server_rtp_max = int(getattr(args, "server_rtp_max", BASE_DEFAULTS["server_rtp_max"]))
+    uac_rtp_min = int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"]))
+    uac_rtp_max = int(getattr(args, "uac_rtp_max", BASE_DEFAULTS["uac_rtp_max"]))
+    uas_rtp_min = int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"]))
+    uas_rtp_max = int(getattr(args, "uas_rtp_max", BASE_DEFAULTS["uas_rtp_max"]))
+
+    if uac_rtp_min <= port <= uac_rtp_max:
+        return uac_ip
+    if uas_rtp_min <= port <= uas_rtp_max:
+        return uas_ip
+    if server_rtp_min <= port <= server_rtp_max:
+        return server_ip
+    return None
+
+
+def rewrite_sdp_topology_ip(body: str, args: argparse.Namespace) -> str:
+    media_match = re.search(r"(?m)^m=audio\s+(\d+)\s+RTP/AVP\b", body)
+    if not media_match:
+        return body
+
+    media_ip = pcap_media_ip_for_port(args, int(media_match.group(1)))
+    if not media_ip:
+        return body
+
+    body = re.sub(r"(?m)^c=IN\s+IP4\s+\S+", f"c=IN IP4 {media_ip}", body)
+    return re.sub(
+        r"(?m)^(o=\S+\s+\S+\s+\S+\s+IN\s+IP4\s+)\S+",
+        lambda match: f"{match.group(1)}{media_ip}",
+        body,
+    )
+
+
+def rewrite_sip_payload_for_pcap(payload: bytes, args: argparse.Namespace) -> bytes:
+    separator = b"\r\n\r\n"
+    if separator not in payload or b"m=audio" not in payload:
+        return payload
+
+    headers_bytes, body_bytes = payload.split(separator, 1)
+    headers = headers_bytes.decode("utf-8", errors="replace")
+    body = body_bytes.decode("utf-8", errors="replace")
+    rewritten_body = rewrite_sdp_topology_ip(body, args)
+    if rewritten_body == body:
+        return payload
+
+    rewritten_body_bytes = rewritten_body.encode("utf-8")
+    if re.search(r"(?im)^Content-Length\s*:", headers):
+        headers = re.sub(
+            r"(?im)^Content-Length\s*:\s*\d+",
+            f"Content-Length: {len(rewritten_body_bytes)}",
+            headers,
+            count=1,
+        )
+    return headers.encode("utf-8") + separator + rewritten_body_bytes
+
+
 def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
     packets = []
     _uac_ip, server_ip, _uas_ip = pcap_topology_ips(args)
@@ -791,6 +849,7 @@ def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPac
                 else:
                     src_port, dst_port = args.server_port, local_port
                     src_ip, dst_ip = server_ip, local_ip
+                payload = rewrite_sip_payload_for_pcap(payload, args)
                 packets.append(PcapPacket(timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     return packets
 
