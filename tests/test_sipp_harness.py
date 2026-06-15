@@ -1,4 +1,5 @@
 import json
+import socket
 import struct
 import subprocess
 import sys
@@ -20,6 +21,10 @@ def read_udp_pcap_packets(path: Path):
 
 
 def read_udp_pcap_records(path: Path):
+    return [(timestamp, src_port, dst_port, payload) for timestamp, _src_ip, src_port, _dst_ip, dst_port, payload in read_udp_pcap_flow_records(path)]
+
+
+def read_udp_pcap_flow_records(path: Path):
     data = path.read_bytes()
     packets = []
     offset = 24
@@ -30,9 +35,16 @@ def read_udp_pcap_records(path: Path):
         offset += included_length
         if len(frame) < 42:
             continue
+        src_ip = socket.inet_ntoa(frame[26:30])
+        dst_ip = socket.inet_ntoa(frame[30:34])
         src_port, dst_port, _udp_length, _checksum = struct.unpack("!HHHH", frame[34:42])
-        packets.append((ts_sec + (ts_usec / 1_000_000), src_port, dst_port, frame[42:]))
+        packets.append((ts_sec + (ts_usec / 1_000_000), src_ip, src_port, dst_ip, dst_port, frame[42:]))
     return packets
+
+
+def sip_body(payload: bytes) -> bytes:
+    _headers, separator, body = payload.partition(b"\r\n\r\n")
+    return body if separator else b""
 
 
 class SippScenarioTests(unittest.TestCase):
@@ -496,10 +508,17 @@ class SippScenarioTests(unittest.TestCase):
             self.assertFalse((log_dir / "capture.protocols.pcap").exists())
             self.assertEqual((log_dir / "capture.pcap").read_bytes()[:4], b"\xd4\xc3\xb2\xa1")
             pcap_packets = read_udp_pcap_packets(log_dir / "capture.pcap")
+            pcap_flows = read_udp_pcap_flow_records(log_dir / "capture.pcap")
             sip_payloads = [payload for _src, _dst, payload in pcap_packets if payload.startswith((b"OPTIONS ", b"SIP/2.0 "))]
             self.assertEqual(len(sip_payloads), 2)
             self.assertTrue(all(payload.endswith(b"\r\n\r\n") for payload in sip_payloads))
             self.assertTrue(all(b"Content-Length: 0\r\n\r\n" in payload for payload in sip_payloads))
+            options_flows = [
+                (src_ip, src_port, dst_ip, dst_port)
+                for _timestamp, src_ip, src_port, dst_ip, dst_port, payload in pcap_flows
+                if payload.startswith(b"OPTIONS ")
+            ]
+            self.assertEqual(options_flows, [("10.10.10.10", 25081, "10.10.10.20", 25062)])
             diagnostic_packets = [
                 (src, dst, payload)
                 for src, dst, payload in pcap_packets
@@ -527,6 +546,23 @@ class SippScenarioTests(unittest.TestCase):
             trace_dir.joinpath("b2bua_uas_b_messages.log").write_text(
                 "\n".join(
                     [
+                        "----------------------------------------------- 2026-06-14T10:00:00.500000",
+                        "UDP message sent [180] bytes:",
+                        "",
+                        "SIP/2.0 200 OK",
+                        "Call-ID: unit-media@127.0.0.1",
+                        "Content-Type: application/sdp",
+                        "Content-Length: 999",
+                        "",
+                        "v=0",
+                        "o=playsbc 1 1 IN IP4 127.0.0.1",
+                        "s=PlaySBC",
+                        "c=IN IP4 127.0.0.1",
+                        "t=0 0",
+                        "m=audio 27000 RTP/AVP 0 8 101",
+                        "a=rtpmap:0 PCMU/8000",
+                        "a=rtpmap:8 PCMA/8000",
+                        "",
                         "----------------------------------------------- 2026-06-14T10:00:00.700000",
                         "UDP message received [88] bytes:",
                         "",
@@ -589,11 +625,17 @@ class SippScenarioTests(unittest.TestCase):
             self.assertEqual([path.name for path in created], ["capture.pcap"])
             pcap_packets = read_udp_pcap_packets(log_dir / "capture.pcap")
             pcap_records = read_udp_pcap_records(log_dir / "capture.pcap")
+            pcap_flows = read_udp_pcap_flow_records(log_dir / "capture.pcap")
             rtp_ports = {25100, 25102, 26000, 27000}
             rtp_packets = [
                 (src, dst, payload)
                 for src, dst, payload in pcap_packets
                 if src in rtp_ports and dst in rtp_ports and len(payload) >= 12 and payload[0] >> 6 == 2
+            ]
+            rtp_flows = [
+                (src_ip, src_port, dst_ip, dst_port)
+                for _timestamp, src_ip, src_port, dst_ip, dst_port, payload in pcap_flows
+                if src_port in rtp_ports and dst_port in rtp_ports and len(payload) >= 12 and payload[0] >> 6 == 2
             ]
             rtp_timestamps = [
                 timestamp
@@ -615,10 +657,27 @@ class SippScenarioTests(unittest.TestCase):
                     (25102, 27000),
                 },
             )
+            self.assertEqual(
+                set(rtp_flows),
+                {
+                    ("10.10.10.10", 26000, "10.10.10.20", 25100),
+                    ("10.10.10.30", 27000, "10.10.10.20", 25102),
+                    ("10.10.10.20", 25100, "10.10.10.10", 26000),
+                    ("10.10.10.20", 25102, "10.10.10.30", 27000),
+                },
+            )
+            sdp_payloads = [payload for _src, _dst, payload in pcap_packets if b"m=audio 27000" in payload]
+            self.assertEqual(len(sdp_payloads), 1)
+            self.assertIn(b"o=playsbc 1 1 IN IP4 10.10.10.30", sdp_payloads[0])
+            self.assertIn(b"c=IN IP4 10.10.10.30", sdp_payloads[0])
+            self.assertNotIn(b"c=IN IP4 127.0.0.1", sdp_payloads[0])
+            self.assertIn(f"Content-Length: {len(sip_body(sdp_payloads[0]))}".encode("utf-8"), sdp_payloads[0])
             self.assertTrue(all((payload[1] & 0x7F) == 0 for src, _dst, payload in rtp_packets if src in (26000, 27000)))
             self.assertTrue(all((payload[1] & 0x7F) == 8 for src, _dst, payload in rtp_packets if src in (25100, 25102)))
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("rtp_packets=8", platform)
+            self.assertIn("topology=logical", platform)
+            self.assertIn("topology_uac_ip=10.10.10.10", platform)
 
     def test_b2bua_pcap_generation_skips_load_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
