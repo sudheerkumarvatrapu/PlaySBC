@@ -187,7 +187,7 @@ sipp -sf sipp/scenarios/b2bua_uas_b.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 2
 Then start SIPp A toward a running PlaySBC B2BUA on port `25062`:
 
 ```bash
-sipp 127.0.0.1:25062 -sf sipp/scenarios/b2bua_uac_a.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25081 -m 1 -r 1 -d 1000 -trace_msg -trace_err -trace_logs -min_rtp_port 26000 -max_rtp_port 26200
+sipp 127.0.0.1:25062 -sf sipp/scenarios/b2bua_uac_a.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25081 -m 1 -r 1 -d 1000 -trace_msg -trace_err -trace_logs -min_rtp_port 36000 -max_rtp_port 36200
 ```
 
 For full B2BUA validation, prefer the quick regression command above because it starts the server, registers users, runs SIPp A/B, and collects the log bundle automatically.
