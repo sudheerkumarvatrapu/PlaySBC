@@ -633,20 +633,26 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
     server_codec = str(getattr(args, "server_codec", "") or media_codec).upper()
     max_seconds = max(float(getattr(args, "hold_ms", 0) or 0) / 1000.0, 0.0) + 0.100
     endpoint_rtp = rtp_packets_from_pcap(media_pcap, max_seconds)
-    server_rtp = rtp_packets_from_pcap(media_pcap_for_codec(server_codec, media_pcap), max_seconds)
     if not endpoint_rtp:
         return []
-    if not server_rtp:
-        server_rtp = endpoint_rtp
+
+    rtp_by_codec = {media_codec: endpoint_rtp}
+
+    def samples_for_codec(codec: str) -> List[Tuple[float, bytes]]:
+        normalized_codec = codec.upper()
+        if normalized_codec not in rtp_by_codec:
+            codec_samples = rtp_packets_from_pcap(media_pcap_for_codec(normalized_codec, media_pcap), max_seconds)
+            rtp_by_codec[normalized_codec] = codec_samples or endpoint_rtp
+        return rtp_by_codec[normalized_codec]
 
     uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
     endpoint_streams = [
-        (uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), 0xA10A0001, 1000, 16000),
-        (uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, 0xB10B0002, 3000, 48000),
+        (media_codec, uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), 0xA10A0001, 1000, 16000),
+        (media_codec, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, 0xB10B0002, 3000, 48000),
     ]
     server_streams = [
-        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
-        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), 0xD10D0004, 7000, 112000),
+        (media_codec, server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
+        (server_codec, server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), 0xD10D0004, 7000, 112000),
     ]
 
     base_time = sip_ack_media_start_timestamp(work_dir)
@@ -654,15 +660,15 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
         base_time = media_capture_start_timestamp(log_dir)
 
     packets = []
-    for src_ip, src_port, dst_ip, dst_port, ssrc, sequence_base, timestamp_base in endpoint_streams:
-        for index, (relative_timestamp, rtp) in enumerate(endpoint_rtp):
+    for stream_codec, src_ip, src_port, dst_ip, dst_port, ssrc, sequence_base, timestamp_base in endpoint_streams:
+        for index, (relative_timestamp, rtp) in enumerate(samples_for_codec(stream_codec)):
             payload_step = max(len(rtp) - 12, 160)
-            payload = with_rtp_stream_identity(rtp, media_codec, sequence_base + index, timestamp_base + (index * payload_step), ssrc)
+            payload = with_rtp_stream_identity(rtp, stream_codec, sequence_base + index, timestamp_base + (index * payload_step), ssrc)
             packets.append(PcapPacket(base_time + relative_timestamp, src_ip, src_port, dst_ip, dst_port, payload))
-    for src_ip, src_port, dst_ip, dst_port, ssrc, sequence_base, timestamp_base in server_streams:
-        for index, (relative_timestamp, rtp) in enumerate(server_rtp):
+    for stream_codec, src_ip, src_port, dst_ip, dst_port, ssrc, sequence_base, timestamp_base in server_streams:
+        for index, (relative_timestamp, rtp) in enumerate(samples_for_codec(stream_codec)):
             payload_step = max(len(rtp) - 12, 160)
-            payload = with_rtp_stream_identity(rtp, server_codec, sequence_base + index, timestamp_base + (index * payload_step), ssrc)
+            payload = with_rtp_stream_identity(rtp, stream_codec, sequence_base + index, timestamp_base + (index * payload_step), ssrc)
             packets.append(PcapPacket(base_time + relative_timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     return packets
 

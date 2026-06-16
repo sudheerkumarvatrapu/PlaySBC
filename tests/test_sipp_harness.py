@@ -681,8 +681,14 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn(b"c=IN IP4 10.10.10.30", sdp_payloads[0])
             self.assertNotIn(b"c=IN IP4 127.0.0.1", sdp_payloads[0])
             self.assertIn(f"Content-Length: {len(sip_body(sdp_payloads[0]))}".encode("utf-8"), sdp_payloads[0])
-            self.assertTrue(all((payload[1] & 0x7F) == 0 for src, _dst, payload in rtp_packets if src in (36000, 27000)))
-            self.assertTrue(all((payload[1] & 0x7F) == 8 for src, _dst, payload in rtp_packets if src in (25100, 25102)))
+            payload_types_by_flow = {
+                (src, dst): payload[1] & 0x7F
+                for src, dst, payload in rtp_packets
+            }
+            self.assertEqual(payload_types_by_flow[(36000, 25100)], 0)
+            self.assertEqual(payload_types_by_flow[(25100, 36000)], 0)
+            self.assertEqual(payload_types_by_flow[(27000, 25102)], 0)
+            self.assertEqual(payload_types_by_flow[(25102, 27000)], 8)
             ssrc_by_flow = {
                 (src, dst): struct.unpack("!I", payload[8:12])[0]
                 for src, dst, payload in rtp_packets
