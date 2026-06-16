@@ -51,8 +51,8 @@ BASE_DEFAULTS = {
     "caller_register_port": 25084,
     "server_rtp_min": 25100,
     "server_rtp_max": 25400,
-    "uac_rtp_min": 26000,
-    "uac_rtp_max": 26200,
+    "uac_rtp_min": 36000,
+    "uac_rtp_max": 36200,
     "uas_rtp_min": 27000,
     "uas_rtp_max": 27200,
     "caller": "sipp-a",
@@ -611,6 +611,16 @@ def with_rtp_payload_type(rtp: bytes, codec: str) -> bytes:
     return bytes(rewritten)
 
 
+def with_rtp_stream_identity(rtp: bytes, codec: str, sequence: int, timestamp: int, ssrc: int) -> bytes:
+    rewritten = bytearray(with_rtp_payload_type(rtp, codec))
+    if len(rewritten) < 12:
+        return bytes(rewritten)
+    rewritten[2:4] = struct.pack("!H", sequence & 0xFFFF)
+    rewritten[4:8] = struct.pack("!I", timestamp & 0xFFFFFFFF)
+    rewritten[8:12] = struct.pack("!I", ssrc & 0xFFFFFFFF)
+    return bytes(rewritten)
+
+
 def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
     if not getattr(args, "media_enabled", False) or total_logged_rtp_packets(log_dir) <= 0:
         return []
@@ -631,12 +641,12 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
 
     uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
     endpoint_streams = [
-        (uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))),
-        (uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2),
+        (uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), 0xA10A0001, 1000, 16000),
+        (uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, 0xB10B0002, 3000, 48000),
     ]
     server_streams = [
-        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"]))),
-        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"]))),
+        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
+        (server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), 0xD10D0004, 7000, 112000),
     ]
 
     base_time = sip_ack_media_start_timestamp(work_dir)
@@ -644,13 +654,15 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
         base_time = media_capture_start_timestamp(log_dir)
 
     packets = []
-    for relative_timestamp, rtp in endpoint_rtp:
-        payload = with_rtp_payload_type(rtp, media_codec)
-        for src_ip, src_port, dst_ip, dst_port in endpoint_streams:
+    for src_ip, src_port, dst_ip, dst_port, ssrc, sequence_base, timestamp_base in endpoint_streams:
+        for index, (relative_timestamp, rtp) in enumerate(endpoint_rtp):
+            payload_step = max(len(rtp) - 12, 160)
+            payload = with_rtp_stream_identity(rtp, media_codec, sequence_base + index, timestamp_base + (index * payload_step), ssrc)
             packets.append(PcapPacket(base_time + relative_timestamp, src_ip, src_port, dst_ip, dst_port, payload))
-    for relative_timestamp, rtp in server_rtp:
-        payload = with_rtp_payload_type(rtp, server_codec)
-        for src_ip, src_port, dst_ip, dst_port in server_streams:
+    for src_ip, src_port, dst_ip, dst_port, ssrc, sequence_base, timestamp_base in server_streams:
+        for index, (relative_timestamp, rtp) in enumerate(server_rtp):
+            payload_step = max(len(rtp) - 12, 160)
+            payload = with_rtp_stream_identity(rtp, server_codec, sequence_base + index, timestamp_base + (index * payload_step), ssrc)
             packets.append(PcapPacket(base_time + relative_timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     return packets
 
@@ -810,27 +822,55 @@ def rewrite_sdp_topology_ip(body: str, args: argparse.Namespace) -> str:
     )
 
 
+def sip_topology_host_port_replacements(args: argparse.Namespace) -> List[Tuple[str, str]]:
+    if getattr(args, "pcap_topology", BASE_DEFAULTS["pcap_topology"]) == "runtime":
+        return []
+
+    runtime_host = getattr(args, "host", BASE_DEFAULTS["host"])
+    uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
+    port_ips = {
+        int(getattr(args, "uac_port", BASE_DEFAULTS["uac_port"])): uac_ip,
+        int(getattr(args, "caller_register_port", BASE_DEFAULTS["caller_register_port"])): uac_ip,
+        int(getattr(args, "uas_port", BASE_DEFAULTS["uas_port"])): uas_ip,
+        int(getattr(args, "register_port", BASE_DEFAULTS["register_port"])): uas_ip,
+        int(getattr(args, "server_port", BASE_DEFAULTS["server_port"])): server_ip,
+        int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])): server_ip,
+        int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2: server_ip,
+        int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])): uac_ip,
+        int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])): uas_ip,
+    }
+    return [(f"{runtime_host}:{port}", f"{logical_ip}:{port}") for port, logical_ip in sorted(port_ips.items())]
+
+
+def rewrite_sip_headers_topology(headers: str, args: argparse.Namespace) -> str:
+    rewritten = headers
+    for runtime_endpoint, logical_endpoint in sip_topology_host_port_replacements(args):
+        rewritten = rewritten.replace(runtime_endpoint, logical_endpoint)
+    return rewritten
+
+
 def rewrite_sip_payload_for_pcap(payload: bytes, args: argparse.Namespace) -> bytes:
     separator = b"\r\n\r\n"
-    if separator not in payload or b"m=audio" not in payload:
+    if separator not in payload:
         return payload
 
     headers_bytes, body_bytes = payload.split(separator, 1)
     headers = headers_bytes.decode("utf-8", errors="replace")
     body = body_bytes.decode("utf-8", errors="replace")
-    rewritten_body = rewrite_sdp_topology_ip(body, args)
-    if rewritten_body == body:
+    rewritten_headers = rewrite_sip_headers_topology(headers, args)
+    rewritten_body = rewrite_sdp_topology_ip(body, args) if "m=audio" in body else body
+    if rewritten_headers == headers and rewritten_body == body:
         return payload
 
     rewritten_body_bytes = rewritten_body.encode("utf-8")
-    if re.search(r"(?im)^Content-Length\s*:", headers):
-        headers = re.sub(
+    if re.search(r"(?im)^Content-Length\s*:", rewritten_headers):
+        rewritten_headers = re.sub(
             r"(?im)^Content-Length\s*:\s*\d+",
             f"Content-Length: {len(rewritten_body_bytes)}",
-            headers,
+            rewritten_headers,
             count=1,
         )
-    return headers.encode("utf-8") + separator + rewritten_body_bytes
+    return rewritten_headers.encode("utf-8") + separator + rewritten_body_bytes
 
 
 def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:

@@ -166,8 +166,8 @@ class SippScenarioTests(unittest.TestCase):
             register_port=25083,
             server_rtp_min=25100,
             server_rtp_max=25400,
-            uac_rtp_min=26000,
-            uac_rtp_max=26200,
+            uac_rtp_min=36000,
+            uac_rtp_max=36200,
             uas_rtp_min=27000,
             uas_rtp_max=27200,
             callee="dynamic-user",
@@ -199,8 +199,8 @@ class SippScenarioTests(unittest.TestCase):
             register_port=25083,
             server_rtp_min=25100,
             server_rtp_max=25400,
-            uac_rtp_min=26000,
-            uac_rtp_max=26200,
+            uac_rtp_min=36000,
+            uac_rtp_max=36200,
             uas_rtp_min=27000,
             uas_rtp_max=27200,
             callee="media-user",
@@ -232,8 +232,8 @@ class SippScenarioTests(unittest.TestCase):
             server_port=25062,
             uac_port=25081,
             uas_port=25082,
-            uac_rtp_min=26000,
-            uac_rtp_max=26200,
+            uac_rtp_min=36000,
+            uac_rtp_max=36200,
             uas_rtp_min=27000,
             uas_rtp_max=27200,
             caller="sipp-a",
@@ -251,8 +251,8 @@ class SippScenarioTests(unittest.TestCase):
             host="127.0.0.1",
             server_port=25062,
             uac_port=25081,
-            uac_rtp_min=26000,
-            uac_rtp_max=26200,
+            uac_rtp_min=36000,
+            uac_rtp_max=36200,
             caller="sipp-a",
             callee="sig-user",
             calls=1,
@@ -588,7 +588,7 @@ class SippScenarioTests(unittest.TestCase):
                 log_dir,
                 "log.media",
                 "RTP PACKET RX",
-                "call_id=unit leg=inbound source=127.0.0.1:26000 seq=1 timestamp=160 payload_type=PCMU payload_bytes=160",
+                "call_id=unit leg=inbound source=127.0.0.1:36000 seq=1 timestamp=160 payload_type=PCMU payload_bytes=160",
             )
             run_b2bua_sipp_smoke.append_log_section(
                 log_dir,
@@ -605,7 +605,7 @@ class SippScenarioTests(unittest.TestCase):
                 host="127.0.0.1",
                 server_port=25062,
                 server_rtp_min=25100,
-                uac_rtp_min=26000,
+                uac_rtp_min=36000,
                 uas_rtp_min=27000,
                 uac_port=25081,
                 uas_port=25082,
@@ -626,7 +626,7 @@ class SippScenarioTests(unittest.TestCase):
             pcap_packets = read_udp_pcap_packets(log_dir / "capture.pcap")
             pcap_records = read_udp_pcap_records(log_dir / "capture.pcap")
             pcap_flows = read_udp_pcap_flow_records(log_dir / "capture.pcap")
-            rtp_ports = {25100, 25102, 26000, 27000}
+            rtp_ports = {25100, 25102, 36000, 27000}
             rtp_packets = [
                 (src, dst, payload)
                 for src, dst, payload in pcap_packets
@@ -651,29 +651,43 @@ class SippScenarioTests(unittest.TestCase):
             self.assertEqual(
                 {(src, dst) for src, dst, _payload in rtp_packets},
                 {
-                    (26000, 25100),
+                    (36000, 25100),
                     (27000, 25102),
-                    (25100, 26000),
+                    (25100, 36000),
                     (25102, 27000),
                 },
             )
             self.assertEqual(
                 set(rtp_flows),
                 {
-                    ("10.10.10.10", 26000, "10.10.10.20", 25100),
+                    ("10.10.10.10", 36000, "10.10.10.20", 25100),
                     ("10.10.10.30", 27000, "10.10.10.20", 25102),
-                    ("10.10.10.20", 25100, "10.10.10.10", 26000),
+                    ("10.10.10.20", 25100, "10.10.10.10", 36000),
                     ("10.10.10.20", 25102, "10.10.10.30", 27000),
                 },
             )
+            sip_payloads = [
+                payload
+                for _src, _dst, payload in pcap_packets
+                if payload.startswith((b"SIP/2.0", b"INVITE ", b"ACK ", b"BYE ", b"REGISTER "))
+            ]
+            self.assertTrue(sip_payloads)
+            self.assertFalse(any(b"127.0.0.1:25062" in payload for payload in sip_payloads))
+            self.assertFalse(any(b"127.0.0.1:25082" in payload for payload in sip_payloads))
+            self.assertIn(b"ACK sip:sipp-b@10.10.10.30:25082 SIP/2.0", b"\n".join(sip_payloads))
             sdp_payloads = [payload for _src, _dst, payload in pcap_packets if b"m=audio 27000" in payload]
             self.assertEqual(len(sdp_payloads), 1)
             self.assertIn(b"o=playsbc 1 1 IN IP4 10.10.10.30", sdp_payloads[0])
             self.assertIn(b"c=IN IP4 10.10.10.30", sdp_payloads[0])
             self.assertNotIn(b"c=IN IP4 127.0.0.1", sdp_payloads[0])
             self.assertIn(f"Content-Length: {len(sip_body(sdp_payloads[0]))}".encode("utf-8"), sdp_payloads[0])
-            self.assertTrue(all((payload[1] & 0x7F) == 0 for src, _dst, payload in rtp_packets if src in (26000, 27000)))
+            self.assertTrue(all((payload[1] & 0x7F) == 0 for src, _dst, payload in rtp_packets if src in (36000, 27000)))
             self.assertTrue(all((payload[1] & 0x7F) == 8 for src, _dst, payload in rtp_packets if src in (25100, 25102)))
+            ssrc_by_flow = {
+                (src, dst): struct.unpack("!I", payload[8:12])[0]
+                for src, dst, payload in rtp_packets
+            }
+            self.assertEqual(len(set(ssrc_by_flow.values())), 4)
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("rtp_packets=8", platform)
             self.assertIn("topology=logical", platform)

@@ -1083,7 +1083,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
             dialog.mark_ringing()
             to_header = dialog.to_header(message.header("to"))
-            self.send_response(message, 100, "Trying", to_header=to_header)
+            self.send_response(message, 100, "Trying", to_header=message.header("to"))
 
             remote_payloads = parse_sdp_payloads(message.body)
             dtmf_payload_type = parse_dtmf_payload_type(message.body)
@@ -1254,9 +1254,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
 
+        inbound_payload = choose_payload(remote_payloads, PCMU)
+        outbound_payload = preferred_payload
         inbound_rtp = await self.media.create_session(
             inbound_call_id,
-            preferred_payload,
+            inbound_payload,
             remote_payloads,
             dtmf_payload_type,
             media_mode="b2bua",
@@ -1270,7 +1272,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         outbound_call_id = make_call_id()
         outbound_rtp = await self.media.create_session(
             outbound_call_id,
-            preferred_payload,
+            outbound_payload,
             remote_payloads,
             dtmf_payload_type,
             media_mode="b2bua",
@@ -1304,7 +1306,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         outbound_body = make_sdp(
             self.local_ip,
             outbound_rtp.local_port,
-            preferred_payload,
+            outbound_payload,
             dtmf_payload_type=dtmf_payload_type,
             payloads=remote_payloads,
         )
@@ -1344,7 +1346,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
         outbound_payloads = parse_sdp_payloads(final_response.body)
         outbound_rtp.remote_payloads = outbound_payloads
-        outbound_rtp.preferred_payload = choose_payload(outbound_payloads, preferred_payload)
+        outbound_rtp.preferred_payload = choose_payload(outbound_payloads, outbound_payload)
         outbound_remote = parse_sdp_remote_addr(final_response.body, final_response.source[0])
         if outbound_remote:
             outbound_rtp.remote_addr = outbound_remote
@@ -2002,8 +2004,8 @@ def make_sdp(
     offered_payloads = []
     if payloads:
         offered_payloads.extend(payload for payload in payloads if payload in SUPPORTED_CODECS)
-    if payload_type not in offered_payloads:
-        offered_payloads.insert(0, payload_type)
+    offered_payloads = [payload for payload in offered_payloads if payload != payload_type]
+    offered_payloads.insert(0, payload_type)
 
     if dtmf_payload_type is not None and dtmf_payload_type not in offered_payloads:
         offered_payloads.append(dtmf_payload_type)
