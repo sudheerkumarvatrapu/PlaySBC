@@ -27,6 +27,14 @@ MEDIA_PCAPS = {
     "PCMU": "pcap/g711u_60s.pcap",
     "PCMA": "pcap/g711a_60s.pcap",
 }
+MEDIA_PAYLOAD_TYPES = {
+    "PCMU": 0,
+    "PCMA": 8,
+}
+MEDIA_RTPMAP_LINES = {
+    "PCMU": "a=rtpmap:0 PCMU/8000",
+    "PCMA": "a=rtpmap:8 PCMA/8000",
+}
 CRLF = "\r\n"
 DIAGNOSTIC_PCAP_PORT = 65530
 LOG_FILES = (
@@ -213,6 +221,26 @@ def ensure_sudo_ready_for_sipp_pcap(args: argparse.Namespace) -> None:
         )
 
 
+def is_transcoding_profile(args: argparse.Namespace) -> bool:
+    media_codec = str(getattr(args, "media_codec", "") or "").upper()
+    server_codec = str(getattr(args, "server_codec", "") or "").upper()
+    return bool(media_codec and server_codec and media_codec != server_codec)
+
+
+def uas_media_codec(args: argparse.Namespace) -> str:
+    media_codec = str(getattr(args, "media_codec", "") or "PCMU").upper()
+    server_codec = str(getattr(args, "server_codec", "") or media_codec).upper()
+    return server_codec if is_transcoding_profile(args) else media_codec
+
+
+def uas_sdp_payloads(args: argparse.Namespace) -> Tuple[str, str]:
+    if is_transcoding_profile(args):
+        codec = uas_media_codec(args)
+        payload_type = MEDIA_PAYLOAD_TYPES[codec]
+        return f"{payload_type} 101", MEDIA_RTPMAP_LINES[codec]
+    return "0 8 101", "\n      ".join(MEDIA_RTPMAP_LINES[codec] for codec in ("PCMU", "PCMA"))
+
+
 def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
     scenario = getattr(args, "uas_scenario", SCENARIO_DIR / ("b2bua_uas_b_media.xml" if args.media_enabled else "b2bua_uas_b.xml"))
     command = [
@@ -346,6 +374,8 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
     if not pcap_path.exists():
         raise SystemExit(f"Media PCAP not found: {pcap_path}")
     args.media_pcap_resolved = str(pcap_path)
+    uas_pcap_path = media_pcap_for_codec(uas_media_codec(args), pcap_path)
+    args.uas_media_pcap_resolved = str(uas_pcap_path)
 
     if args.media_driver == "python":
         args.uac_scenario = SCENARIO_DIR / "b2bua_uac_a.xml"
@@ -357,7 +387,12 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
         "uas_scenario": (SCENARIO_DIR / "b2bua_uas_b_media.xml", run_dir / "sipp-b-uas" / "b2bua_uas_b_media_resolved.xml"),
     }
     for attr_name, (template, destination) in replacements.items():
-        text = template.read_text(encoding="ISO-8859-1").replace("[media_pcap]", str(pcap_path))
+        scenario_pcap = uas_pcap_path if attr_name == "uas_scenario" else pcap_path
+        text = template.read_text(encoding="ISO-8859-1").replace("[media_pcap]", str(scenario_pcap))
+        if attr_name == "uas_scenario":
+            uas_payloads, uas_rtpmaps = uas_sdp_payloads(args)
+            text = text.replace("[uas_sdp_payloads]", uas_payloads)
+            text = text.replace("[uas_sdp_rtpmaps]", uas_rtpmaps)
         destination.write_text(text, encoding="ISO-8859-1")
         setattr(args, attr_name, destination.resolve())
 
@@ -631,6 +666,7 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
 
     media_codec = str(getattr(args, "media_codec", "") or "PCMU").upper()
     server_codec = str(getattr(args, "server_codec", "") or media_codec).upper()
+    b_leg_codec = uas_media_codec(args)
     max_seconds = max(float(getattr(args, "hold_ms", 0) or 0) / 1000.0, 0.0) + 0.100
     endpoint_rtp = rtp_packets_from_pcap(media_pcap, max_seconds)
     if not endpoint_rtp:
@@ -648,7 +684,7 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
     uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
     endpoint_streams = [
         (media_codec, uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), 0xA10A0001, 1000, 16000),
-        (media_codec, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, 0xB10B0002, 3000, 48000),
+        (b_leg_codec, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, 0xB10B0002, 3000, 48000),
     ]
     server_streams = [
         (media_codec, server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
@@ -1176,9 +1212,11 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"server_codec={args.server_codec}",
         f"media_enabled={args.media_enabled}",
         f"media_codec={args.media_codec or ''}",
+        f"uas_media_codec={uas_media_codec(args) if args.media_enabled else ''}",
         f"media_driver={args.media_driver if args.media_enabled else ''}",
         f"sipp_pcap_sudo={args.sipp_pcap_sudo if args.media_enabled and args.media_driver == 'sipp-pcap' else False}",
         f"media_pcap={args.media_pcap_resolved if args.media_enabled else ''}",
+        f"uas_media_pcap={getattr(args, 'uas_media_pcap_resolved', '') if args.media_enabled else ''}",
         f"media_backend={args.media_backend}",
         f"rtpengine_url={args.rtpengine_url if args.media_backend == 'rtpengine' else ''}",
         f"transcoding_expected={transcoding_expected}",
