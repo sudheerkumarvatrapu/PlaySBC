@@ -891,7 +891,40 @@ def rewrite_sip_headers_topology(headers: str, args: argparse.Namespace) -> str:
     return rewritten
 
 
-def rewrite_sip_payload_for_pcap(payload: bytes, args: argparse.Namespace) -> bytes:
+def logical_identity_ip_for_sip_message(args: argparse.Namespace, src_port: int, dst_port: int) -> str:
+    uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
+    uac_ports = {
+        int(getattr(args, "uac_port", BASE_DEFAULTS["uac_port"])),
+        int(getattr(args, "caller_register_port", BASE_DEFAULTS["caller_register_port"])),
+    }
+    uas_ports = {
+        int(getattr(args, "uas_port", BASE_DEFAULTS["uas_port"])),
+        int(getattr(args, "register_port", BASE_DEFAULTS["register_port"])),
+    }
+    if src_port in uas_ports or dst_port in uas_ports:
+        return uas_ip
+    if src_port in uac_ports or dst_port in uac_ports:
+        return uac_ip
+    return server_ip
+
+
+def rewrite_bare_sip_identity_hosts(headers: str, args: argparse.Namespace, src_port: int, dst_port: int) -> str:
+    if getattr(args, "pcap_topology", BASE_DEFAULTS["pcap_topology"]) == "runtime":
+        return headers
+
+    runtime_host = re.escape(str(getattr(args, "host", BASE_DEFAULTS["host"])))
+    logical_ip = logical_identity_ip_for_sip_message(args, src_port, dst_port)
+    bare_host_pattern = re.compile(rf"@{runtime_host}(?=([>;,\s]|$))")
+    rewritten_lines = []
+    for line in headers.split(CRLF):
+        if line.lower().startswith("call-id:"):
+            rewritten_lines.append(line)
+        else:
+            rewritten_lines.append(bare_host_pattern.sub(f"@{logical_ip}", line))
+    return CRLF.join(rewritten_lines)
+
+
+def rewrite_sip_payload_for_pcap(payload: bytes, args: argparse.Namespace, src_port: int, dst_port: int) -> bytes:
     separator = b"\r\n\r\n"
     if separator not in payload:
         return payload
@@ -900,6 +933,7 @@ def rewrite_sip_payload_for_pcap(payload: bytes, args: argparse.Namespace) -> by
     headers = headers_bytes.decode("utf-8", errors="replace")
     body = body_bytes.decode("utf-8", errors="replace")
     rewritten_headers = rewrite_sip_headers_topology(headers, args)
+    rewritten_headers = rewrite_bare_sip_identity_hosts(rewritten_headers, args, src_port, dst_port)
     rewritten_body = rewrite_sdp_topology_ip(body, args) if "m=audio" in body else body
     if rewritten_headers == headers and rewritten_body == body:
         return payload
@@ -931,7 +965,7 @@ def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPac
                 else:
                     src_port, dst_port = args.server_port, local_port
                     src_ip, dst_ip = server_ip, local_ip
-                payload = rewrite_sip_payload_for_pcap(payload, args)
+                payload = rewrite_sip_payload_for_pcap(payload, args, src_port, dst_port)
                 packets.append(PcapPacket(timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     return packets
 
