@@ -363,15 +363,16 @@ class B2BUAFlowLog:
         )
 
     def write(self, event: str, detail: str = "") -> None:
-        if not self.path:
-            return
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         line = f"{timestamp} {event}"
         if detail:
             line += f" {detail}"
-        with self.path.open("a", encoding="utf-8") as log_file:
-            log_file.write(line + "\n")
-        if self.logger and event != "SIP FLOW":
+        if self.path:
+            with self.path.open("a", encoding="utf-8") as log_file:
+                log_file.write(line + "\n")
+        upper_event = event.upper()
+        should_emit_structured = self.enabled or "RTPENGINE" in upper_event or upper_event == "MEDIA BACKEND"
+        if self.logger and event != "SIP FLOW" and should_emit_structured:
             self.logger.write(
                 log_category_for_flow_event(event),
                 f"B2BUA {event}",
@@ -1415,15 +1416,33 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         flow_log.write("MEDIA BACKEND", f"backend=rtpengine target={target.uri}")
 
         from_tag = extract_header_tag(message.header("from")) or dialog.remote_tag or secrets.token_hex(6)
+        remote_payloads = parse_sdp_payloads(message.body)
+        codec_policy = rtpengine_codec_policy(remote_payloads, self.default_payload)
+        flow_log.write(
+            "RTPENGINE CODEC POLICY",
+            (
+                f"offered={format_payloads(remote_payloads)} "
+                f"target={CODEC_NAMES.get(self.default_payload, self.default_payload)} "
+                f"policy={format_rtpengine_codec_policy(codec_policy)}"
+            ),
+        )
         try:
             offer_response = await self.rtpengine_client.offer(
                 call_id=inbound_call_id,
                 from_tag=from_tag,
                 sdp=message.body,
+                codec=codec_policy,
             )
             outbound_body = str(offer_response.get("sdp") or "")
             if not outbound_body:
                 raise RtpengineError("RTPengine offer response did not include SDP")
+            flow_log.write(
+                "RTPENGINE OFFER",
+                (
+                    f"status={offer_response.get('result', 'unknown')} call_id={inbound_call_id} "
+                    f"from_tag={from_tag} rewritten_sdp_bytes={len(outbound_body.encode('utf-8'))}"
+                ),
+            )
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
             flow_log.write("RTPENGINE OFFER FAILED", str(exc))
             self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
@@ -1491,10 +1510,18 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 from_tag=from_tag,
                 to_tag=to_tag,
                 sdp=final_response.body,
+                codec=codec_policy,
             )
             answer_sdp = str(answer_response.get("sdp") or "")
             if not answer_sdp:
                 raise RtpengineError("RTPengine answer response did not include SDP")
+            flow_log.write(
+                "RTPENGINE ANSWER",
+                (
+                    f"status={answer_response.get('result', 'unknown')} call_id={inbound_call_id} "
+                    f"from_tag={from_tag} to_tag={to_tag} rewritten_sdp_bytes={len(answer_sdp.encode('utf-8'))}"
+                ),
+            )
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
             flow_log.write("RTPENGINE ANSWER FAILED", str(exc))
             self.send_outbound_ack(b2bua_call)
@@ -1515,7 +1542,6 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             },
         )
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
-        flow_log.write("RTPENGINE ANSWER", f"call_id={inbound_call_id} from_tag={from_tag} to_tag={to_tag}")
         dialog.mark_answered()
 
     async def wait_for_outbound_invite(
@@ -1668,6 +1694,29 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     async def _delete_rtpengine_call(self, b2bua_call: B2BUACall) -> None:
         assert self.rtpengine_client is not None
+        try:
+            query_response = await self.rtpengine_client.query(
+                call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
+                from_tag=b2bua_call.rtpengine_from_tag,
+                to_tag=b2bua_call.rtpengine_to_tag,
+            )
+            summary = {
+                key: query_response[key]
+                for key in sorted(query_response)
+                if key in {"result", "created", "last signal", "totals", "tags"}
+            }
+            detail = json.dumps(summary, sort_keys=True)
+            if not b2bua_call.flow_log.enabled:
+                rtp_totals = query_response.get("totals", {}).get("RTP", {})
+                detail = (
+                    f"result={query_response.get('result', 'unknown')} "
+                    f"rtp_packets_total={rtp_totals.get('packets', 0)} "
+                    f"rtp_bytes_total={rtp_totals.get('bytes', 0)} "
+                    f"rtp_errors_total={rtp_totals.get('errors', 0)}"
+                )
+            b2bua_call.flow_log.write("RTPENGINE QUERY", detail)
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            b2bua_call.flow_log.write("RTPENGINE QUERY FAILED", str(exc))
         try:
             await self.rtpengine_client.delete(
                 call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
@@ -1904,6 +1953,27 @@ def choose_payload(remote_payloads: Tuple[int, ...], default_payload: int = PCMU
         if payload in SUPPORTED_CODECS:
             return payload
     return PCMU
+
+
+def rtpengine_codec_policy(remote_payloads: Tuple[int, ...], target_payload: int) -> Dict[str, List[str]]:
+    target_codec = CODEC_NAMES.get(target_payload)
+    if not target_codec:
+        return {}
+
+    offered_codecs = [CODEC_NAMES[payload] for payload in remote_payloads if payload in CODEC_NAMES]
+    if not offered_codecs or target_codec in offered_codecs:
+        return {}
+
+    return {
+        "mask": offered_codecs,
+        "transcode": [target_codec],
+    }
+
+
+def format_rtpengine_codec_policy(policy: Dict[str, List[str]]) -> str:
+    if not policy:
+        return "none"
+    return " ".join(f"{key}={','.join(values)}" for key, values in sorted(policy.items()))
 
 
 def codec_payload(codec_name: str) -> int:

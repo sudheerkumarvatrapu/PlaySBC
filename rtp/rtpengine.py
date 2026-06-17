@@ -77,13 +77,21 @@ class RtpengineClient:
     async def ping(self) -> Dict[str, Any]:
         return await self.request("ping", {})
 
-    async def offer(self, *, call_id: str, from_tag: str, sdp: str) -> Dict[str, Any]:
-        return await self.request("offer", self._sdp_fields(call_id, from_tag, sdp))
+    async def offer(self, *, call_id: str, from_tag: str, sdp: str, codec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return await self.request("offer", self._sdp_fields(call_id, from_tag, sdp, codec=codec))
 
-    async def answer(self, *, call_id: str, from_tag: str, to_tag: str, sdp: str) -> Dict[str, Any]:
-        fields = self._sdp_fields(call_id, from_tag, sdp)
+    async def answer(self, *, call_id: str, from_tag: str, to_tag: str, sdp: str, codec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        fields = self._sdp_fields(call_id, from_tag, sdp, codec=codec)
         fields["to-tag"] = to_tag
         return await self.request("answer", fields)
+
+    async def query(self, *, call_id: str, from_tag: str = "", to_tag: str = "") -> Dict[str, Any]:
+        fields: Dict[str, Any] = {"call-id": call_id}
+        if from_tag:
+            fields["from-tag"] = from_tag
+        if to_tag:
+            fields["to-tag"] = to_tag
+        return await self.request("query", fields)
 
     async def delete(self, *, call_id: str, from_tag: str = "", to_tag: str = "") -> Dict[str, Any]:
         fields: Dict[str, Any] = {"call-id": call_id}
@@ -93,14 +101,17 @@ class RtpengineClient:
             fields["to-tag"] = to_tag
         return await self.request("delete", fields)
 
-    def _sdp_fields(self, call_id: str, from_tag: str, sdp: str) -> Dict[str, Any]:
-        return {
+    def _sdp_fields(self, call_id: str, from_tag: str, sdp: str, codec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        fields: Dict[str, Any] = {
             "call-id": call_id,
             "from-tag": from_tag,
             "sdp": sdp,
+            "flags": ["trust address"],
             "replace": ["origin", "session-connection"],
-            "trust-address": "true",
         }
+        if codec:
+            fields["codec"] = codec
+        return fields
 
 
 def normalize_bencode_value(value: Any) -> Any:

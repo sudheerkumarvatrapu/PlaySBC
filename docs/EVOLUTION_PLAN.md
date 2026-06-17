@@ -4,6 +4,8 @@ This project is an educational SIP/RTP lab server. The goal is to grow it phase 
 
 ## Current Baseline
 
+Current validated baseline: the B2BUA SIPp regression is green for signalling, G.711 media, internal transcoding, registered inbound/outbound, RTPengine signalling, RTPengine G.711 media, RTPengine PCMU-to-PCMA transcoding, and 5 cps / 60 second CHT load profiles.
+
 Implemented:
 
 - SIP over UDP for `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
@@ -15,32 +17,37 @@ Implemented:
 - Registrar-backed B2BUA routing
 - Route policies and static fallback routes
 - SIPp UAC/UAS scripts for B2BUA calls
-- 5 cps / 60 second SIPp load shape
+- 5 cps SIPp load shape with 300 total calls and 60 second CHT
 - 60 second G.711u/G.711a media replay profiles through the B2BUA path
 - SBC-style category logs: `log.sip`, `log.media`, `log.transcoding`, `log.platform`, `log.networking`, `log.call`, `log.sipp`, and transport logs such as `log.udp`
 - Single combined `capture.pcap` generated after non-load B2BUA calls from SIP traces, RTP media packets, and PlaySBC protocol logs
 - Logical PCAP topology view for local B2BUA runs: SIPp A, PlaySBC, and SIPp B can appear as separate IPs while runtime remains on loopback
 - Per-testcase B2BUA SIPp log bundles with no separate saved SIPp A/B leg folders
-- Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine, registered inbound/outbound, and 5 cps / 60 second load
+- Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine signalling, RTPengine G.711 media, RTPengine transcoding, registered inbound/outbound, and 5 cps / 60 second CHT load
 - SIPp XML regression coverage for the former Python smoke scenarios: digest registration, transaction replay, invalid BYE, media call, and two-leg bridge
-- Optional RTPengine NG control backend scaffold for B2BUA SDP offer/answer/delete
+- RTPengine NG control backend for B2BUA SDP offer/answer/query/delete, with preflight blocking when RTPengine is down
+- Local Sipwise RTPengine Docker runbook with a load-sized RTP port range
+- RTPengine media observations from query totals, including RTP packet, byte, and error counters
+- RTPengine-backed load validation: 300 total calls at 5 cps / 60 second CHT with RTPengine media anchored and `0` RTP errors
 - Persistent project logs only for B2BUA SIPp call runs by default
 - Unit tests and SIPp regression harness
 
-## Immediate Priority: RTPengine First
+## RTPengine Status And Future Work
 
-Before expanding more PlaySBC-native media and transcoding behavior, make RTPengine the first stable external media backend. This is important because PlaySBC is still early in media anchoring, codec handling, and transcoding. RTPengine gives the lab a proven media plane while PlaySBC focuses on SIP, B2BUA routing, policy, logs, and regression control.
+RTPengine is now the first stable external media backend. PlaySBC remains the SIP/B2BUA control plane, while RTPengine is used as the RTP anchor and transcoding backend for RTPengine profiles.
 
-Short-term target:
+Done:
 
 - Run the same open-source Sipwise `rtpengine` project used by Kamailio-style SIP deployments
-- Add simple local start/check instructions for macOS via Docker or Linux VM
+- Start RTPengine locally with Docker on macOS using `docker/rtpengine.Dockerfile`
+- Document local Docker and Linux VM startup in `docs/RTPENGINE_LOCAL.md`
 - Keep `tools/check_rtpengine.py` as the readiness gate
 - Make RTPengine-backed SIPp profiles report `BLOCKED` when RTPengine is down
-- Get one basic RTPengine B2BUA call green
-- Then get RTPengine-backed G.711 media green
-- Then add RTPengine-backed transcoding validation
-- Only after that, continue deeper PlaySBC-native media/transcoding work
+- Pass one basic RTPengine B2BUA signalling call
+- Pass RTPengine-backed G.711 media
+- Pass RTPengine-backed PCMU-to-PCMA transcoding validation
+- Pass RTPengine-backed 5 cps / 60 second CHT load with 300 total calls
+- Confirm PlaySBC internal RTP counters remain zero for RTPengine media, proving media is external to PlaySBC
 
 Target division:
 
@@ -48,6 +55,20 @@ Target division:
 PlaySBC   = SIP, dialog/transaction state, B2BUA routing, policies, logs, regression reports
 RTPengine = RTP anchoring, SDP rewrite, media relay, DTMF/media controls, transcoding experiments
 ```
+
+Future RTPengine work:
+
+- Add a separate logical RTPengine IP in generated PCAPs, so signalling can show PlaySBC as `10.10.10.20` and media can show RTPengine as a separate media anchor
+- Add real multi-IP local topology mode for SIPp A, PlaySBC, RTPengine, and SIPp B
+- Add Docker Compose for one-command local RTPengine startup
+- Add RTPengine port-pool and active-session health checks before load runs
+- Add stricter SDP validation around RTPengine offer/answer rewrites
+- Add RTPengine failure scenarios: down before call, timeout during offer, delete failure, and mid-call media loss
+- Add RTCP and RTP quality reporting from RTPengine query data
+- Add RTPengine DTMF/media-control experiments
+- Add SRTP/TLS groundwork for enterprise SBC lab profiles
+- Add longer soak profiles after 5 cps / 60 second CHT remains stable
+- Add optional real packet capture mode for RTPengine runs when local permissions allow it
 
 ## Next Focus
 
@@ -83,8 +104,10 @@ Add more SIPp cases:
 - 60 second G.711 media call
 - B2BUA transcoding call
 - Registered caller origination
-- RTPengine-backed B2BUA call
-- 5 cps / 60 second CHT RTPengine/transcoding load profile
+- RTPengine-backed B2BUA signalling call
+- RTPengine-backed G.711 media call
+- RTPengine-backed PCMU-to-PCMA transcoding call
+- 5 cps / 60 second CHT RTPengine/transcoding load profile with 300 total calls
 - Invalid `BYE`
 - Unknown route
 - Failed outbound leg
@@ -94,7 +117,7 @@ Add more SIPp cases:
 
 ### Phase 3: RTPengine Media Backend
 
-Status: active priority. Added optional media backend selection:
+Status: baseline green. RTPengine can be selected as the media backend:
 
 ```json
 {
@@ -110,7 +133,7 @@ Python B2BUA = SIP, routing, policy, logs
 RTPengine    = RTP/SRTP anchoring, SDP rewrite, DTMF/media controls
 ```
 
-Keep the current internal RTP relay as a fallback. The immediate next step is local runtime validation with the open-source Sipwise RTPengine process, then a green basic RTPengine B2BUA call, then RTPengine-backed media and transcoding.
+Keep the current internal RTP relay as a fallback. The next RTPengine phase is hardening: clearer topology separation, stronger SDP validation, health checks, failure coverage, and deeper media-quality reporting.
 
 ### Phase 4: Enterprise SBC Lab Features
 

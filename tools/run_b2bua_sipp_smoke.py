@@ -111,6 +111,21 @@ B2BUA_PROFILES = {
         "callee": "rtpengine-user",
         "media_backend": "rtpengine",
     },
+    "rtpengine-media": {
+        "callee": "rtpengine-media-user",
+        "media_backend": "rtpengine",
+        "media_codec": "PCMU",
+        "media_driver": "sipp-pcap",
+        "hold_ms": 60000,
+    },
+    "rtpengine-transcoding": {
+        "callee": "rtpengine-transcode-user",
+        "media_backend": "rtpengine",
+        "media_codec": "PCMU",
+        "media_driver": "sipp-pcap",
+        "server_codec": "PCMA",
+        "hold_ms": 60000,
+    },
     "registered-inbound": {
         "caller": "reg-inbound-a",
         "callee": "registered-b",
@@ -126,14 +141,15 @@ B2BUA_PROFILES = {
     },
     "load-5cps-60s": {
         "callee": "load-user",
-        "calls": 5,
+        "calls": 300,
         "rate": 5,
         "hold_ms": 60000,
+        "server_rtp_max": 26500,
         "ladder": False,
     },
     "load-5cps-60s-rtpengine-transcoding": {
         "callee": "load-rtpengine-transcode",
-        "calls": 5,
+        "calls": 300,
         "rate": 5,
         "hold_ms": 60000,
         "media_codec": "PCMU",
@@ -148,10 +164,12 @@ PROFILE_DESCRIPTIONS = {
     "basic-media": "One registered 60 second B2BUA call with PCMU RTP replay.",
     "transcoding": "One registered 60 second B2BUA media call with PCMU media and PCMA server codec preference.",
     "rtpengine": "One registered B2BUA signalling call using RTPengine as the media backend.",
+    "rtpengine-media": "One registered 60 second B2BUA G.711u media call anchored by RTPengine.",
+    "rtpengine-transcoding": "One registered 60 second B2BUA call with PCMU on A leg, PCMA on B leg, and RTPengine transcoding intent.",
     "registered-inbound": "Register SIPp B, then call that registered number through the B2BUA.",
     "registered-outbound": "Register SIPp A and SIPp B, then originate from the registered SIPp A user.",
-    "load-5cps-60s": "Basic 5 cps, 60 second CHT load shape with ladder disabled.",
-    "load-5cps-60s-rtpengine-transcoding": "5 cps, 60 second CHT profile with RTPengine backend and PCMU-to-PCMA transcoding intent.",
+    "load-5cps-60s": "Basic 5 cps for 60 seconds with 60 second CHT and ladder disabled.",
+    "load-5cps-60s-rtpengine-transcoding": "5 cps for 60 seconds with 60 second CHT, RTPengine backend, and PCMU-to-PCMA transcoding intent.",
 }
 
 
@@ -189,6 +207,13 @@ def call_limit(calls: int, rate: int, hold_ms: int) -> int:
     return max(calls, estimated_concurrent, 3)
 
 
+def sipp_timeout_seconds(calls: int, rate: int, hold_ms: int) -> int:
+    safe_rate = max(rate, 1)
+    traffic_seconds = (max(calls, 1) + safe_rate - 1) // safe_rate
+    hold_seconds = max(hold_ms, 0) // 1000
+    return max(30, traffic_seconds + hold_seconds + 60)
+
+
 def resolve_scenario_path(value: str, fallback: Path) -> Path:
     if not value:
         return fallback
@@ -221,6 +246,65 @@ def ensure_sudo_ready_for_sipp_pcap(args: argparse.Namespace) -> None:
         )
 
 
+def check_rtpengine_preflight(url: str, timeout: float) -> Tuple[bool, str]:
+    command = [
+        sys.executable,
+        str(ROOT / "tools" / "check_rtpengine.py"),
+        "--url",
+        url,
+        "--timeout",
+        str(timeout),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=max(timeout + 1.0, 2.0),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "tools/check_rtpengine.py timed out"
+
+    detail = (completed.stdout.strip() or completed.stderr.strip() or f"returncode={completed.returncode}").strip()
+    return completed.returncode == 0, detail
+
+
+def append_rtpengine_blocked_observations(log_dir: Path, args: argparse.Namespace, detail: str, duration: float) -> None:
+    append_log_section(
+        log_dir,
+        "log.platform",
+        "RTPENGINE PREFLIGHT BLOCKED",
+        f"rtpengine_url={args.rtpengine_url}\nreason={detail}\nduration_seconds={duration:.3f}",
+    )
+    append_log_section(
+        log_dir,
+        "log.media",
+        "MEDIA OBSERVATION",
+        "\n".join(
+            [
+                f"expected_rtp={bool(args.media_enabled)} status=blocked",
+                "media_backend=rtpengine",
+                f"rtpengine_url={args.rtpengine_url}",
+                f"reason={detail}",
+            ]
+        ),
+    )
+    transcoding_expected = bool(args.media_codec and args.server_codec and args.media_codec != args.server_codec)
+    append_log_section(
+        log_dir,
+        "log.transcoding",
+        "TRANSCODING OBSERVATION",
+        "\n".join(
+            [
+                f"expected={transcoding_expected} status=blocked",
+                "owner=rtpengine",
+                f"reason={detail}",
+            ]
+        ),
+    )
+
+
 def is_transcoding_profile(args: argparse.Namespace) -> bool:
     media_codec = str(getattr(args, "media_codec", "") or "").upper()
     server_codec = str(getattr(args, "server_codec", "") or "").upper()
@@ -231,6 +315,14 @@ def uas_media_codec(args: argparse.Namespace) -> str:
     media_codec = str(getattr(args, "media_codec", "") or "PCMU").upper()
     server_codec = str(getattr(args, "server_codec", "") or media_codec).upper()
     return server_codec if is_transcoding_profile(args) else media_codec
+
+
+def uac_sdp_payloads(args: argparse.Namespace) -> Tuple[str, str]:
+    if is_transcoding_profile(args):
+        codec = str(getattr(args, "media_codec", "") or "PCMU").upper()
+        payload_type = MEDIA_PAYLOAD_TYPES[codec]
+        return f"{payload_type} 101", MEDIA_RTPMAP_LINES[codec]
+    return "0 8 101", "\n      ".join(MEDIA_RTPMAP_LINES[codec] for codec in ("PCMU", "PCMA"))
 
 
 def uas_sdp_payloads(args: argparse.Namespace) -> Tuple[str, str]:
@@ -260,7 +352,7 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-l",
         str(call_limit(args.calls, args.rate, args.hold_ms)),
         "-timeout",
-        str(max(30, int(args.hold_ms / 1000) + 30)),
+        str(sipp_timeout_seconds(args.calls, args.rate, args.hold_ms)),
         "-timeout_error",
         "-nostdin",
         "-min_rtp_port",
@@ -303,7 +395,7 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-l",
         str(call_limit(args.calls, args.rate, args.hold_ms)),
         "-timeout",
-        str(max(30, int(args.hold_ms / 1000) + 30)),
+        str(sipp_timeout_seconds(args.calls, args.rate, args.hold_ms)),
         "-timeout_error",
         "-nostdin",
         "-min_rtp_port",
@@ -389,6 +481,10 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
     for attr_name, (template, destination) in replacements.items():
         scenario_pcap = uas_pcap_path if attr_name == "uas_scenario" else pcap_path
         text = template.read_text(encoding="ISO-8859-1").replace("[media_pcap]", str(scenario_pcap))
+        if attr_name == "uac_scenario":
+            uac_payloads, uac_rtpmaps = uac_sdp_payloads(args)
+            text = text.replace("[uac_sdp_payloads]", uac_payloads)
+            text = text.replace("[uac_sdp_rtpmaps]", uac_rtpmaps)
         if attr_name == "uas_scenario":
             uas_payloads, uas_rtpmaps = uas_sdp_payloads(args)
             text = text.replace("[uas_sdp_payloads]", uas_payloads)
@@ -656,9 +752,39 @@ def with_rtp_stream_identity(rtp: bytes, codec: str, sequence: int, timestamp: i
     return bytes(rewritten)
 
 
+def sdp_audio_port(payload: bytes) -> Optional[int]:
+    match = re.search(rb"(?im)^m=audio\s+(\d+)\s+RTP/AVP\b", payload)
+    if not match:
+        return None
+    port = int(match.group(1))
+    return port if 0 < port <= 65535 else None
+
+
+def rtpengine_anchor_ports(work_dir: Path) -> Tuple[Optional[int], Optional[int]]:
+    a_leg_port = None
+    b_leg_port = None
+    for trace in sorted((work_dir / "sipp-a-uac").glob("*_messages.log")):
+        for _timestamp, direction, payload in sipp_trace_messages(trace):
+            if direction == "received" and payload.startswith(b"SIP/2.0 200"):
+                a_leg_port = sdp_audio_port(payload) or a_leg_port
+    for trace in sorted((work_dir / "sipp-b-uas").glob("*_messages.log")):
+        for _timestamp, direction, payload in sipp_trace_messages(trace):
+            if direction == "received" and payload.startswith(b"INVITE "):
+                b_leg_port = sdp_audio_port(payload) or b_leg_port
+    return a_leg_port, b_leg_port
+
+
 def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
-    if not getattr(args, "media_enabled", False) or total_logged_rtp_packets(log_dir) <= 0:
+    if not getattr(args, "media_enabled", False):
         return []
+
+    media_backend = str(getattr(args, "media_backend", BASE_DEFAULTS["media_backend"]))
+    if media_backend != "rtpengine" and total_logged_rtp_packets(log_dir) <= 0:
+        return []
+    if media_backend == "rtpengine":
+        media_text = (log_dir / "log.media").read_text(encoding="utf-8", errors="replace") if (log_dir / "log.media").exists() else ""
+        if "RTPENGINE ANSWER" not in media_text:
+            return []
 
     media_pcap = Path(str(getattr(args, "media_pcap_resolved", "") or ""))
     if not media_pcap.exists():
@@ -673,6 +799,12 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
         return []
 
     rtp_by_codec = {media_codec: endpoint_rtp}
+    a_anchor_port = int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"]))
+    b_anchor_port = a_anchor_port + 2
+    if media_backend == "rtpengine":
+        parsed_a_anchor, parsed_b_anchor = rtpengine_anchor_ports(work_dir)
+        a_anchor_port = parsed_a_anchor or a_anchor_port
+        b_anchor_port = parsed_b_anchor or b_anchor_port
 
     def samples_for_codec(codec: str) -> List[Tuple[float, bytes]]:
         normalized_codec = codec.upper()
@@ -683,12 +815,12 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
 
     uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
     endpoint_streams = [
-        (media_codec, uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), 0xA10A0001, 1000, 16000),
-        (b_leg_codec, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, 0xB10B0002, 3000, 48000),
+        (media_codec, uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), server_ip, a_anchor_port, 0xA10A0001, 1000, 16000),
+        (b_leg_codec, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), server_ip, b_anchor_port, 0xB10B0002, 3000, 48000),
     ]
     server_streams = [
-        (media_codec, server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])), uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
-        (server_codec, server_ip, int(getattr(args, "server_rtp_min", BASE_DEFAULTS["server_rtp_min"])) + 2, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), 0xD10D0004, 7000, 112000),
+        (media_codec, server_ip, a_anchor_port, uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
+        (server_codec, server_ip, b_anchor_port, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), 0xD10D0004, 7000, 112000),
     ]
 
     base_time = sip_ack_media_start_timestamp(work_dir)
@@ -1162,6 +1294,54 @@ def media_summary_stats(log_dir: Path) -> dict:
     return stats
 
 
+def rtpengine_query_stats(log_dir: Path) -> dict:
+    path = log_dir / "log.media"
+    stats = {
+        "query_count": 0,
+        "rtp_packets_total": 0,
+        "rtp_bytes_total": 0,
+        "rtp_errors_total": 0,
+    }
+    if not path.exists():
+        return stats
+
+    def parse_query_detail(detail: str) -> bool:
+        compact_packets = re.search(r"\brtp_packets_total=(\d+)", detail)
+        compact_bytes = re.search(r"\brtp_bytes_total=(\d+)", detail)
+        compact_errors = re.search(r"\brtp_errors_total=(\d+)", detail)
+        if compact_packets:
+            stats["rtp_packets_total"] += int(compact_packets.group(1))
+            stats["rtp_bytes_total"] += int(compact_bytes.group(1)) if compact_bytes else 0
+            stats["rtp_errors_total"] += int(compact_errors.group(1)) if compact_errors else 0
+            return True
+
+        if not detail.startswith("{"):
+            return False
+        try:
+            decoded = json.loads(detail)
+        except json.JSONDecodeError:
+            return False
+        rtp_totals = decoded.get("totals", {}).get("RTP", {}) if isinstance(decoded, dict) else {}
+        stats["rtp_packets_total"] += int(rtp_totals.get("packets") or 0)
+        stats["rtp_bytes_total"] += int(rtp_totals.get("bytes") or 0)
+        stats["rtp_errors_total"] += int(rtp_totals.get("errors") or 0)
+        return True
+
+    pending_query = False
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "RTPENGINE QUERY" not in line:
+            if pending_query:
+                parse_query_detail(line)
+                pending_query = False
+            continue
+        stats["query_count"] += 1
+
+        _prefix, separator, payload = line.rpartition(" | ")
+        if not separator or not parse_query_detail(payload):
+            pending_query = True
+    return stats
+
+
 def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
     if not args.media_enabled:
         append_log_section(
@@ -1169,6 +1349,34 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
             "log.media",
             "MEDIA OBSERVATION",
             "expected_rtp=False reason=media_disabled",
+        )
+        return
+
+    if args.media_backend == "rtpengine":
+        media_text = (log_dir / "log.media").read_text(encoding="utf-8", errors="replace") if (log_dir / "log.media").exists() else ""
+        query_stats = rtpengine_query_stats(log_dir)
+        rtpengine_answered = "RTPENGINE ANSWER" in media_text
+        status = "rtpengine_media_anchored" if rtpengine_answered or query_stats["rtp_packets_total"] > 0 else "rtpengine_media_not_confirmed"
+        append_log_section(
+            log_dir,
+            "log.media",
+            "MEDIA OBSERVATION",
+            "\n".join(
+                [
+                    f"expected_rtp=True status={status}",
+                    "media_backend=rtpengine",
+                    f"media_driver={args.media_driver}",
+                    f"media_codec={args.media_codec}",
+                    f"media_pcap={args.media_pcap_resolved}",
+                    f"hold_ms={args.hold_ms}",
+                    f"rtpengine_query_count={query_stats['query_count']}",
+                    f"rtpengine_rtp_packets_total={query_stats['rtp_packets_total']}",
+                    f"rtpengine_rtp_bytes_total={query_stats['rtp_bytes_total']}",
+                    f"rtpengine_rtp_errors_total={query_stats['rtp_errors_total']}",
+                    "server_rtp_received_packets_total=0",
+                    "note=RTPengine anchors RTP externally, so PlaySBC internal RTP counters remain zero",
+                ]
+            ),
         )
         return
 
@@ -1204,6 +1412,36 @@ def append_transcoding_observation(log_dir: Path, args: argparse.Namespace) -> N
 
     path = log_dir / "log.transcoding"
     text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    media_text = (log_dir / "log.media").read_text(encoding="utf-8", errors="replace") if (log_dir / "log.media").exists() else ""
+    if args.media_backend == "rtpengine":
+        query_stats = rtpengine_query_stats(log_dir)
+        delegated = "RTPENGINE CODEC POLICY" in media_text and "RTPENGINE ANSWER" in media_text
+        if delegated and query_stats["rtp_packets_total"] > 0:
+            status = "delegated_and_media_confirmed"
+        elif delegated:
+            status = "delegated"
+        else:
+            status = "not_confirmed"
+        append_log_section(
+            log_dir,
+            "log.transcoding",
+            "TRANSCODING OBSERVATION",
+            "\n".join(
+                [
+                    f"expected=True status={status}",
+                    f"src={args.media_codec} dst={args.server_codec}",
+                    "owner=rtpengine",
+                    f"rtpengine_query_count={query_stats['query_count']}",
+                    f"rtpengine_rtp_packets_total={query_stats['rtp_packets_total']}",
+                    f"rtpengine_rtp_bytes_total={query_stats['rtp_bytes_total']}",
+                    f"rtpengine_rtp_errors_total={query_stats['rtp_errors_total']}",
+                    "server_rtp_received_packets_total=0",
+                    "note=RTPengine performs transcoding externally; validate media stats with RTPengine query/PCAP when available",
+                ]
+            ),
+        )
+        return
+
     active = "TRANSCODE ACTIVE" in text
     bypass = "TRANSCODE BYPASS" in text
     packets = total_logged_rtp_packets(log_dir)
@@ -1249,7 +1487,7 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"uas_media_codec={uas_media_codec(args) if args.media_enabled else ''}",
         f"media_driver={args.media_driver if args.media_enabled else ''}",
         f"sipp_pcap_sudo={args.sipp_pcap_sudo if args.media_enabled and args.media_driver == 'sipp-pcap' else False}",
-        f"media_pcap={args.media_pcap_resolved if args.media_enabled else ''}",
+        f"media_pcap={getattr(args, 'media_pcap_resolved', getattr(args, 'media_pcap', '') or '') if args.media_enabled else ''}",
         f"uas_media_pcap={getattr(args, 'uas_media_pcap_resolved', '') if args.media_enabled else ''}",
         f"media_backend={args.media_backend}",
         f"rtpengine_url={args.rtpengine_url if args.media_backend == 'rtpengine' else ''}",
@@ -1266,7 +1504,7 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         code = "" if result.returncode is None else f" returncode={result.returncode}"
         duration_label = "process_lifetime_seconds" if result.name == "sipp-b-uas" else "duration_seconds"
         lines.append(f"{result.name}: {result.status}{code} {duration_label}={result.duration_seconds:.3f}")
-    if media_stats:
+    if media_stats and media_stats["summary_count"] > 0:
         lines.extend(
             [
                 "",
@@ -1419,6 +1657,7 @@ def main() -> int:
     parser.add_argument("--media-backend", choices=("internal", "rtpengine"), default=BASE_DEFAULTS["media_backend"])
     parser.add_argument("--rtpengine-url", default=BASE_DEFAULTS["rtpengine_url"])
     parser.add_argument("--rtpengine-timeout", type=float, default=BASE_DEFAULTS["rtpengine_timeout"])
+    parser.add_argument("--skip-rtpengine-preflight", action="store_true", help="Start the profile without checking RTPengine NG readiness first")
     parser.add_argument("--registration-driver", choices=("sipp", "python"), default=BASE_DEFAULTS["registration_driver"])
     parser.add_argument("--uac-scenario", default=BASE_DEFAULTS["uac_scenario"], help="Override SIPp UAC scenario XML")
     parser.add_argument("--uas-scenario", default=BASE_DEFAULTS["uas_scenario"], help="Override SIPp UAS scenario XML")
@@ -1459,6 +1698,18 @@ def main() -> int:
     if needs_create:
         log_dir.mkdir(parents=True, exist_ok=True)
     initialize_log_dir(log_dir)
+
+    if args.media_backend == "rtpengine" and not args.skip_rtpengine_preflight and not args.dry_run:
+        started = time.monotonic()
+        ready, detail = check_rtpengine_preflight(args.rtpengine_url, args.rtpengine_timeout)
+        duration = time.monotonic() - started
+        if not ready:
+            result = SmokeResult("rtpengine-preflight", [], None, "blocked", duration)
+            append_rtpengine_blocked_observations(log_dir, args, detail, duration)
+            append_results(log_dir, args, [result])
+            print(f"B2BUA SIPp logs: {log_dir}")
+            print(f"{result.name}: {result.status}")
+            return 2
 
     results: List[SmokeResult] = []
     with tempfile.TemporaryDirectory(prefix=f"{run_id}-work-") as work_tmp:

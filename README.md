@@ -15,12 +15,12 @@
   <img alt="SIPp Regression" src="https://img.shields.io/badge/-SIPp%20Regression-16A34A?style=for-the-badge">
   <img alt="B2BUA Enabled" src="https://img.shields.io/badge/-B2BUA%20Enabled-2563EB?style=for-the-badge">
   <img alt="Transcoding G711u | G711a" src="https://img.shields.io/badge/-Transcoding%20G711u%20%7C%20G711a-9333EA?style=for-the-badge">
-  <img alt="RTPengine Getting Ready" src="https://img.shields.io/badge/-RTPengine%20Getting%20Ready-0F766E?style=for-the-badge">
+  <img alt="RTPengine Preflight" src="https://img.shields.io/badge/-RTPengine%20Preflight-0F766E?style=for-the-badge">
 </p>
 
 ---
 
-For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md).
+For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md). For local RTPengine setup, see [docs/RTPENGINE_LOCAL.md](docs/RTPENGINE_LOCAL.md).
 
 ## Lab Focus
 
@@ -102,13 +102,13 @@ sipp -v
 Recommended one-command local run from any terminal:
 
 ```bash
-cd /path/to/PlaySBC && sudo -v && env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 240
+cd /path/to/PlaySBC && sudo -v && env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 360
 ```
 
 On this Mac, the project may still live in the old folder name:
 
 ```bash
-cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server && sudo -v && env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 240
+cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server && sudo -v && env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 360
 ```
 
 What this does:
@@ -116,7 +116,7 @@ What this does:
 | Step | Behavior |
 | --- | --- |
 | Scope | Runs only B2BUA SIPp regression, not the old smoke suite |
-| Coverage | Runs all 8 B2BUA profiles |
+| Coverage | Runs all 10 B2BUA profiles |
 | Media | Uses SIPp `play_pcap_audio` for media profiles |
 | Sudo | Prompts once, then uses `sudo -n` only for SIPp PCAP replay |
 | Logs | Deletes old passed/blocked bundles; keeps failed bundles |
@@ -129,8 +129,13 @@ python3 tools/run_b2bua_sipp_smoke.py --list-profiles
 python3 tools/run_b2bua_sipp_smoke.py --profile basic-signalling
 python3 tools/run_b2bua_sipp_smoke.py --profile basic-media
 python3 tools/run_b2bua_sipp_smoke.py --profile transcoding
+python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine
+python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-media --sipp-pcap-sudo
+python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-transcoding --sipp-pcap-sudo
 python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s
 ```
+
+The `load-5cps-60s` profiles generate 300 total calls at 5 cps, with 60 second call hold time.
 
 RTPengine-backed profiles are marked `BLOCKED` unless RTPengine NG control is reachable at `udp://127.0.0.1:2223`:
 
