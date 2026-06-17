@@ -120,7 +120,7 @@ What this does:
 | Media | Uses SIPp `play_pcap_audio` for media profiles |
 | Sudo | Prompts once, then uses `sudo -n` only for SIPp PCAP replay |
 | Logs | Deletes old passed/blocked bundles; keeps failed bundles |
-| Report | Writes HTML output to `logs/reports/latest.html` |
+| Report | Writes the latest HTML report to `logs/reports/latest.html` and prunes old report files |
 
 Useful targeted commands:
 
@@ -164,7 +164,7 @@ log.sipp
 
 Single-call profiles include SIP and registration ladders in `log.sip`. Non-load B2BUA profiles also generate one combined `capture.pcap` after the call completes, built from SIP traces, RTP media packets for media-enabled calls, and PlaySBC protocol logs. The PCAP uses a logical lab topology by default so Wireshark shows separate nodes for SIPp A (`10.10.10.10`), PlaySBC (`10.10.10.20`), and SIPp B (`10.10.10.30`) even when the local runtime binds to `127.0.0.1`. Use `--pcap-topology runtime` to preserve runtime loopback IPs, or override the display IPs with `--pcap-uac-ip`, `--pcap-server-ip`, and `--pcap-uas-ip`.
 
-Load profiles do not generate ladders or PCAP captures. SIPp output is consolidated in `log.sipp`; media and transcoding summaries are in `log.media` and `log.transcoding`. Regression reports are written to `logs/reports/`, with the latest report copied to `logs/reports/latest.html`.
+Load profiles do not generate ladders or PCAP captures. SIPp output is consolidated in `log.sipp`; media and transcoding summaries are in `log.media` and `log.transcoding`. Regression reports are written to `logs/reports/`; each completed local run keeps only the latest run report files plus `logs/reports/latest.html`.
 
 ## Manual SIPp Debug Commands
 

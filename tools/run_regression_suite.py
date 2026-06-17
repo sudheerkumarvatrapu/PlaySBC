@@ -202,6 +202,22 @@ def cleanup_non_failed_b2bua_log_bundles(log_root: Path, report_dir: Path) -> Li
     return deleted
 
 
+def cleanup_old_reports(report_dir: Path, current_run_id: str) -> List[Path]:
+    if not report_dir.exists():
+        return []
+
+    keep = {"latest.html", f"{current_run_id}.html", f"{current_run_id}.json"}
+    deleted = []
+    for candidate in sorted(report_dir.iterdir()):
+        if not candidate.is_file() or candidate.name in keep:
+            continue
+        if candidate.suffix.lower() not in {".html", ".json"}:
+            continue
+        candidate.unlink()
+        deleted.append(candidate)
+    return deleted
+
+
 def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[ReportRow]:
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     rows = []
@@ -364,7 +380,18 @@ def main() -> int:
     args = parser.parse_args()
 
     run_id = args.run_id or make_run_id()
+    report_dir = Path(args.report_dir)
     rows: List[ReportRow] = []
+
+    if not args.skip_b2bua:
+        b2bua_log_root = ROOT / "logs" / args.b2bua_log_folder
+        deleted_bundles = cleanup_non_failed_b2bua_log_bundles(b2bua_log_root, report_dir)
+        if deleted_bundles:
+            print(f"Deleted {len(deleted_bundles)} passed/blocked B2BUA log bundle(s) before this run.")
+
+    deleted_reports = cleanup_old_reports(report_dir, run_id)
+    if deleted_reports:
+        print(f"Deleted {len(deleted_reports)} old regression report file(s) before this run.")
 
     if not args.skip_sipp_smoke:
         smoke_run_id = f"{run_id}-sipp-smoke"
@@ -396,10 +423,6 @@ def main() -> int:
 
     if not args.skip_b2bua:
         profiles = ALL_B2BUA_PROFILES if args.all_b2bua_profiles else tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
-        b2bua_log_root = ROOT / "logs" / args.b2bua_log_folder
-        deleted_bundles = cleanup_non_failed_b2bua_log_bundles(b2bua_log_root, Path(args.report_dir))
-        if deleted_bundles:
-            print(f"Deleted {len(deleted_bundles)} passed/blocked B2BUA log bundle(s) before this run.")
         for profile in profiles:
             profile_run_id = f"{run_id}-{profile}"
             profile_log_path = b2bua_log_root / profile_run_id
@@ -442,10 +465,10 @@ def main() -> int:
                 append_bundle_log(actual_log_path, "log.platform", "RUNNER STDOUT", stdout)
             rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, actual_log_path, command_text))
 
-    report_path = write_reports(rows, Path(args.report_dir), run_id)
+    report_path = write_reports(rows, report_dir, run_id)
     failed = [row for row in rows if row.status != "passed"]
     print(f"Regression report: {report_path}")
-    print(f"Latest report: {Path(args.report_dir) / 'latest.html'}")
+    print(f"Latest report: {report_dir / 'latest.html'}")
     for row in rows:
         print(f"{row.suite} / {row.name}: {row.status}")
     return 1 if failed else 0

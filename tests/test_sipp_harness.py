@@ -1076,6 +1076,32 @@ class SippScenarioTests(unittest.TestCase):
             self.assertFalse(blocked.exists())
             self.assertTrue(failed.exists())
 
+    def test_cleanup_old_reports_keeps_latest_and_current_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp)
+            for name in (
+                "regression-old.html",
+                "regression-old.json",
+                "custom-old.html",
+                "custom-old.json",
+                "latest.html",
+                "regression-current.html",
+                "regression-current.json",
+                "notes.txt",
+            ):
+                (report_dir / name).write_text("x", encoding="utf-8")
+
+            deleted = run_regression_suite.cleanup_old_reports(report_dir, "regression-current")
+
+            self.assertEqual(
+                {path.name for path in deleted},
+                {"regression-old.html", "regression-old.json", "custom-old.html", "custom-old.json"},
+            )
+            self.assertEqual(
+                {path.name for path in report_dir.iterdir()},
+                {"latest.html", "regression-current.html", "regression-current.json", "notes.txt"},
+            )
+
     def test_regression_suite_can_target_all_b2bua_profiles(self):
         self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 8)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
