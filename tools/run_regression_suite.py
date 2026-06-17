@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import html
 import json
 import shutil
@@ -19,8 +18,6 @@ from typing import List, Optional
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from rtp.rtpengine import RtpengineClient
-
 DEFAULT_B2BUA_PROFILES = (
     "basic-signalling",
     "basic-media",
@@ -33,6 +30,8 @@ ALL_B2BUA_PROFILES = (
     "basic-media",
     "transcoding",
     "rtpengine",
+    "rtpengine-media",
+    "rtpengine-transcoding",
     "registered-inbound",
     "registered-outbound",
     "load-5cps-60s",
@@ -40,6 +39,8 @@ ALL_B2BUA_PROFILES = (
 )
 RTPENGINE_B2BUA_PROFILES = (
     "rtpengine",
+    "rtpengine-media",
+    "rtpengine-transcoding",
     "load-5cps-60s-rtpengine-transcoding",
 )
 B2BUA_LOG_FILES = (
@@ -82,16 +83,27 @@ def status_from_returncode(returncode: int) -> str:
 
 
 def probe_rtpengine(url: str, timeout: float) -> tuple[bool, str]:
+    command = [
+        sys.executable,
+        str(ROOT / "tools" / "check_rtpengine.py"),
+        "--url",
+        url,
+        "--timeout",
+        str(timeout),
+    ]
     try:
-        response = asyncio.run(RtpengineClient(url, timeout=timeout).ping())
-    except Exception as exc:
-        detail = str(exc) or type(exc).__name__
-        return False, detail
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=max(timeout + 1.0, 2.0),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "tools/check_rtpengine.py timed out"
 
-    result = str(response.get("result", "")).lower()
-    if result in {"ok", "pong"}:
-        return True, f"RTPengine replied with result={response.get('result')}"
-    return False, f"unexpected RTPengine ping response: {response}"
+    detail = (completed.stdout.strip() or completed.stderr.strip() or f"returncode={completed.returncode}").strip()
+    return completed.returncode == 0, detail
 
 
 def rtpengine_blocked_row(profile: str, url: str, detail: str, duration: float, log_path: Path, command: str) -> ReportRow:
