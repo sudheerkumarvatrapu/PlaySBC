@@ -287,6 +287,31 @@ class SippScenarioTests(unittest.TestCase):
             self.assertTrue(args.uas_scenario.exists())
             self.assertIn(str(ROOT / "sipp" / "scenarios" / "pcap" / "g711u_60s.pcap"), args.uac_scenario.read_text(encoding="ISO-8859-1"))
             self.assertNotIn("[media_pcap]", args.uac_scenario.read_text(encoding="ISO-8859-1"))
+            self.assertNotIn("[uas_sdp_payloads]", args.uas_scenario.read_text(encoding="ISO-8859-1"))
+
+    def test_b2bua_transcoding_media_scenario_makes_b_leg_pcma_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "transcoding-run"
+            (run_dir / "sipp-a-uac").mkdir(parents=True)
+            (run_dir / "sipp-b-uas").mkdir(parents=True)
+            args = argparse_namespace(
+                media_enabled=True,
+                media_pcap="pcap/g711u_60s.pcap",
+                media_driver="sipp-pcap",
+                media_codec="PCMU",
+                server_codec="PCMA",
+            )
+
+            run_b2bua_sipp_smoke.prepare_media_scenarios(args, run_dir)
+
+            uac_xml = args.uac_scenario.read_text(encoding="ISO-8859-1")
+            uas_xml = args.uas_scenario.read_text(encoding="ISO-8859-1")
+            self.assertIn(str(ROOT / "sipp" / "scenarios" / "pcap" / "g711u_60s.pcap"), uac_xml)
+            self.assertIn(str(ROOT / "sipp" / "scenarios" / "pcap" / "g711a_60s.pcap"), uas_xml)
+            self.assertIn("m=audio [media_port] RTP/AVP 8 101", uas_xml)
+            self.assertIn("a=rtpmap:8 PCMA/8000", uas_xml)
+            self.assertNotIn("a=rtpmap:0 PCMU/8000", uas_xml)
+            self.assertNotIn("RTP/AVP 0 8 101", uas_xml)
 
     def test_python_media_driver_uses_plain_sipp_scenarios_and_player_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -687,7 +712,7 @@ class SippScenarioTests(unittest.TestCase):
             }
             self.assertEqual(payload_types_by_flow[(36000, 25100)], 0)
             self.assertEqual(payload_types_by_flow[(25100, 36000)], 0)
-            self.assertEqual(payload_types_by_flow[(27000, 25102)], 0)
+            self.assertEqual(payload_types_by_flow[(27000, 25102)], 8)
             self.assertEqual(payload_types_by_flow[(25102, 27000)], 8)
             ssrc_by_flow = {
                 (src, dst): struct.unpack("!I", payload[8:12])[0]
@@ -827,6 +852,7 @@ class SippScenarioTests(unittest.TestCase):
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("profile=transcoding", platform)
             self.assertIn("media_codec=PCMU", platform)
+            self.assertIn("uas_media_codec=PCMA", platform)
             self.assertIn("server_codec=PCMA", platform)
             self.assertIn("hold_ms=60000", platform)
             self.assertIn("transcoding_expected=True", platform)
