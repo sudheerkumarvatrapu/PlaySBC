@@ -575,7 +575,10 @@ class SippScenarioTests(unittest.TestCase):
                         "UDP message sent [180] bytes:",
                         "",
                         "SIP/2.0 200 OK",
+                        "From: <sip:media-user@127.0.0.1>;tag=caller",
+                        "To: <sip:media-user@127.0.0.1>;tag=callee",
                         "Call-ID: unit-media@127.0.0.1",
+                        "Subject: B2BUA outbound leg for unit-media@127.0.0.1",
                         "Content-Type: application/sdp",
                         "Content-Length: 999",
                         "",
@@ -699,6 +702,15 @@ class SippScenarioTests(unittest.TestCase):
             self.assertTrue(sip_payloads)
             self.assertFalse(any(b"127.0.0.1:25062" in payload for payload in sip_payloads))
             self.assertFalse(any(b"127.0.0.1:25082" in payload for payload in sip_payloads))
+            non_call_id_lines = []
+            for payload in sip_payloads:
+                non_call_id_lines.extend(
+                    line for line in payload.split(b"\r\n") if not line.lower().startswith(b"call-id:")
+                )
+            self.assertFalse(any(b"@127.0.0.1" in line for line in non_call_id_lines))
+            self.assertIn(b"From: <sip:media-user@10.10.10.30>;tag=caller", b"\n".join(sip_payloads))
+            self.assertIn(b"To: <sip:media-user@10.10.10.30>;tag=callee", b"\n".join(sip_payloads))
+            self.assertIn(b"Subject: B2BUA outbound leg for unit-media@10.10.10.30", b"\n".join(sip_payloads))
             self.assertIn(b"ACK sip:sipp-b@10.10.10.30:25082 SIP/2.0", b"\n".join(sip_payloads))
             sdp_payloads = [payload for _src, _dst, payload in pcap_packets if b"m=audio 27000" in payload]
             self.assertEqual(len(sdp_payloads), 1)
