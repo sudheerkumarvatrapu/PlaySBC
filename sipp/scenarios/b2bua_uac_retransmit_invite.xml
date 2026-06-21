@@ -1,28 +1,60 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 
-<scenario name="B2BUA UAC A with RTP media">
+<scenario name="B2BUA UAC retransmitted INVITE">
   <send retrans="500" start_rtd="invite">
     <![CDATA[
       INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-retransmit-[call_number]
       From: [caller] <sip:[caller]@[local_ip]:[local_port]>;tag=[call_number]
       To: <sip:[service]@[remote_ip]:[remote_port]>
       Call-ID: [call_id]
       CSeq: 1 INVITE
       Contact: <sip:[caller]@[local_ip]:[local_port]>
       Max-Forwards: 70
-      Subject: SIPp A to PlaySBC B2BUA with RTP media
+      Subject: SIPp B2BUA retransmitted INVITE test
       Content-Type: application/sdp
       Content-Length: [len]
 
       v=0
       o=sipp-a 53655765 2353687637 IN IP4 [local_ip]
-      s=SIPp A
+      s=SIPp A Retransmit
       c=IN IP[media_ip_type] [media_ip]
       t=0 0
-      m=audio [media_port] RTP/AVP [uac_sdp_payloads]
-      [uac_sdp_rtpmaps]
+      m=audio [media_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=fmtp:101 0-16
+      a=ptime:20
+      a=sendrecv
+    ]]>
+  </send>
+
+  <recv response="100" />
+
+  <send>
+    <![CDATA[
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-retransmit-[call_number]
+      From: [caller] <sip:[caller]@[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:[caller]@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Subject: SIPp B2BUA retransmitted INVITE test
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=sipp-a 53655765 2353687637 IN IP4 [local_ip]
+      s=SIPp A Retransmit
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
       a=rtpmap:101 telephone-event/8000
       a=fmtp:101 0-16
       a=ptime:20
@@ -50,12 +82,6 @@
     ]]>
   </send>
 
-  <nop>
-    <action>
-      <exec play_pcap_audio="[media_pcap]"/>
-    </action>
-  </nop>
-
   <pause />
 
   <send retrans="500" start_rtd="bye">
@@ -76,5 +102,5 @@
   <recv response="200" rtd="bye" />
 
   <ResponseTimeRepartition value="10,20,50,100,150,500,1000" />
-  <CallLengthRepartition value="100,250,500,1000,2000,5000,60000" />
+  <CallLengthRepartition value="100,250,500,1000,2000,5000" />
 </scenario>

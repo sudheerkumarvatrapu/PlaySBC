@@ -23,13 +23,32 @@ class RtpengineEncodingTests(unittest.TestCase):
 
         packet = client.build_packet(
             "offer",
-            {"call-id": "call-1", "from-tag": "tag-a", "sdp": "v=0\r\n"},
+            client._sdp_fields("call-1", "tag-a", "v=0\r\n"),
             cookie="cookie1",
         )
 
         self.assertTrue(packet.startswith(b"cookie1 "))
         self.assertIn(b"7:command5:offer", packet)
         self.assertIn(b"7:call-id6:call-1", packet)
+        self.assertIn(b"5:flagsl13:trust addresse", packet)
+
+    def test_client_builds_codec_policy_for_transcoding(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        packet = client.build_packet(
+            "offer",
+            client._sdp_fields(
+                "call-1",
+                "tag-a",
+                "v=0\r\n",
+                codec={"mask": ["PCMU"], "transcode": ["PCMA"]},
+            ),
+            cookie="cookie1",
+        )
+
+        self.assertIn(b"5:codec", packet)
+        self.assertIn(b"4:maskl4:PCMUe", packet)
+        self.assertIn(b"9:transcodel4:PCMAe", packet)
 
     def test_client_decodes_cookie_response(self):
         client = RtpengineClient("udp://127.0.0.1:2223")
@@ -39,6 +58,28 @@ class RtpengineEncodingTests(unittest.TestCase):
 
         self.assertEqual(decoded["result"], "ok")
         self.assertEqual(decoded["sdp"], "v=0\r\n")
+
+    def test_client_builds_ping_packet(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        packet = client.build_packet("ping", {}, cookie="cookie1")
+
+        self.assertTrue(packet.startswith(b"cookie1 "))
+        self.assertIn(b"7:command4:ping", packet)
+
+    def test_client_builds_query_packet(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        packet = client.build_packet(
+            "query",
+            {"call-id": "call-1", "from-tag": "from-a", "to-tag": "to-b"},
+            cookie="cookie1",
+        )
+
+        self.assertTrue(packet.startswith(b"cookie1 "))
+        self.assertIn(b"7:command5:query", packet)
+        self.assertIn(b"8:from-tag6:from-a", packet)
+        self.assertIn(b"6:to-tag4:to-b", packet)
 
     def test_parse_url_requires_udp_host_and_port(self):
         endpoint = parse_rtpengine_url("udp://127.0.0.1:2223")
