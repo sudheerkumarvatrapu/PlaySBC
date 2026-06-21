@@ -99,16 +99,16 @@ sipp -v
 
 ## Quick Local B2BUA Regression
 
-Recommended one-command local run from any terminal:
+Recommended local RTPengine + B2BUA SIPp regression run:
 
 ```bash
-cd /path/to/PlaySBC && sudo -v && env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 360
-```
+cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
 
-On this Mac, the project may still live in the old folder name:
+python3 tools/check_rtpengine.py --url udp://127.0.0.1:2223
 
-```bash
-cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server && sudo -v && env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 360
+sudo -v
+
+env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 360
 ```
 
 What this does:
@@ -116,9 +116,9 @@ What this does:
 | Step | Behavior |
 | --- | --- |
 | Scope | Runs only B2BUA SIPp regression, not the old smoke suite |
-| Coverage | Runs all 10 B2BUA profiles |
+| Coverage | Runs all B2BUA profiles, including signalling, media, transcoding, registration, negative call, load, soak, and RTPengine cases |
 | Media | Uses SIPp `play_pcap_audio` for media profiles |
-| Sudo | Prompts once, then uses `sudo -n` only for SIPp PCAP replay |
+| Sudo | Prompts once with `sudo -v`, then keeps sudo alive for SIPp PCAP replay during longer runs |
 | Logs | Deletes old passed/blocked bundles; keeps failed bundles |
 | Report | Writes the latest HTML report to `logs/reports/latest.html` and prunes old report files |
 
