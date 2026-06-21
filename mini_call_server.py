@@ -76,6 +76,7 @@ class ServerConfig:
     media_backend: str = "internal"
     rtpengine_url: str = "udp://127.0.0.1:2223"
     rtpengine_timeout: float = 3.0
+    reject_unknown_routes: bool = False
     debug: bool = False
 
     @property
@@ -99,6 +100,7 @@ SERVER_CONFIG_KEYS = {
     "media_backend",
     "rtpengine_url",
     "rtpengine_timeout",
+    "reject_unknown_routes",
     "debug",
 }
 
@@ -513,8 +515,10 @@ class B2BUACall:
     rtpengine_to_tag: str = ""
     outbound_to_header: str = ""
     outbound_contact_uri: str = ""
+    outbound_invite_via_header: str = ""
     outbound_cseq: int = 1
     outbound_bye_sent: bool = False
+    outbound_cancel_sent: bool = False
     finalized: bool = False
 
 
@@ -923,6 +927,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_ladder_logs: bool,
         media_backend: str = "internal",
         rtpengine_client: Optional[RtpengineClient] = None,
+        reject_unknown_routes: bool = False,
     ):
         self.local_ip = local_ip
         self.local_port = local_port
@@ -936,6 +941,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.b2bua_ladder_logs = b2bua_ladder_logs
         self.media_backend = media_backend
         self.rtpengine_client = rtpengine_client
+        self.reject_unknown_routes = reject_unknown_routes
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, Registration] = {}
@@ -982,8 +988,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     def handle_response(self, message: SipMessage) -> None:
         call_id = message.header("call-id")
+        cseq_method = parse_cseq_method(message.header("cseq"))
         queue = self.pending_outbound_responses.get(call_id)
-        if queue:
+        if queue and cseq_method == "INVITE":
             queue.put_nowait(message)
             return
 
@@ -994,6 +1001,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 message.status_code,
                 b2bua_call.inbound_call_id,
             )
+            if b2bua_call.outbound_cancel_sent and cseq_method == "CANCEL" and message.status_code >= 200:
+                b2bua_call.flow_log.sip("SIPp B", "B2BUA", f"{message.status_code} {message.reason_phrase or 'OK'}", "CANCEL")
+                return
             if b2bua_call.outbound_bye_sent and message.status_code >= 200:
                 b2bua_call.flow_log.sip("SIPp B", "B2BUA", f"{message.status_code} {message.reason_phrase or 'OK'}")
                 self.finalize_b2bua_call(b2bua_call, "normal")
@@ -1062,7 +1072,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 200,
                 "OK",
                 extra_headers={
-                    "Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE",
+                    "Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE, CANCEL",
                     "Accept": "application/sdp",
                 },
             )
@@ -1114,6 +1124,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     remote_payloads=remote_payloads,
                     dtmf_payload_type=dtmf_payload_type,
                 )
+                return
+
+            if self.reject_unknown_routes:
+                self.send_response(message, 404, "Not Found", to_header=to_header)
+                logging.info("Rejected INVITE for unknown route target %s", target_user)
                 return
 
             self.send_response(message, 180, "Ringing", to_header=to_header)
@@ -1191,6 +1206,18 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     self.send_outbound_ack(b2bua_call)
             return
 
+        if method == "CANCEL":
+            call_id = message.header("call-id")
+            b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+            if not b2bua_call:
+                self.send_response(message, 481, "Call/Transaction Does Not Exist")
+                return
+            b2bua_call.flow_log.sip("SIPp A", "B2BUA", "CANCEL")
+            self.send_response(message, 200, "OK", to_header=message.header("to"))
+            b2bua_call.flow_log.sip("B2BUA", "SIPp A", "200 OK", "CANCEL")
+            self.send_outbound_cancel(b2bua_call)
+            return
+
         if method == "BYE":
             call_id = message.header("call-id")
             session = self.media.get_session(call_id)
@@ -1229,7 +1256,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.media.close_session(call_id)
             return
 
-        self.send_response(message, 405, "Method Not Allowed", extra_headers={"Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE"})
+        self.send_response(message, 405, "Method Not Allowed", extra_headers={"Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE, CANCEL"})
 
     async def handle_b2bua_invite(
         self,
@@ -1337,7 +1364,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
             inbound_rtp.log("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
             flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
-            self.send_outbound_ack(b2bua_call)
+            self.send_outbound_ack(b2bua_call, invite_transaction=True)
             flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
             self.send_response(message, status, reason, to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
@@ -1496,7 +1523,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
         if status < 200 or status >= 300:
             flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
-            self.send_outbound_ack(b2bua_call)
+            self.send_outbound_ack(b2bua_call, invite_transaction=True)
             flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
             self.send_response(message, status, reason, to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
@@ -1579,8 +1606,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return response
 
     def send_outbound_invite(self, b2bua_call: B2BUACall, body: str) -> None:
+        via_header = self.make_via_header()
+        b2bua_call.outbound_invite_via_header = via_header
         headers = {
-            "Via": self.make_via_header(),
+            "Via": via_header,
             "From": b2bua_call.outbound_from_header,
             "To": f"<{b2bua_call.outbound_target.uri}>",
             "Call-ID": b2bua_call.outbound_call_id,
@@ -1602,10 +1631,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if session:
             session.log("B2BUA OUTBOUND INVITE", f"target={b2bua_call.outbound_target.uri}")
 
-    def send_outbound_ack(self, b2bua_call: B2BUACall) -> None:
+    def send_outbound_ack(self, b2bua_call: B2BUACall, invite_transaction: bool = False) -> None:
         request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+        via_header = b2bua_call.outbound_invite_via_header if invite_transaction else self.make_via_header()
         headers = {
-            "Via": self.make_via_header(),
+            "Via": via_header,
             "From": b2bua_call.outbound_from_header,
             "To": b2bua_call.outbound_to_header,
             "Call-ID": b2bua_call.outbound_call_id,
@@ -1622,6 +1652,25 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if session:
             session.mark_ack()
             session.log("B2BUA OUTBOUND ACK")
+
+    def send_outbound_cancel(self, b2bua_call: B2BUACall) -> None:
+        request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+        b2bua_call.outbound_cancel_sent = True
+        via_header = b2bua_call.outbound_invite_via_header or self.make_via_header()
+        headers = {
+            "Via": via_header,
+            "From": b2bua_call.outbound_from_header,
+            "To": b2bua_call.outbound_to_header or f"<{b2bua_call.outbound_target.uri}>",
+            "Call-ID": b2bua_call.outbound_call_id,
+            "CSeq": f"{b2bua_call.outbound_cseq} CANCEL",
+            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Max-Forwards": "69",
+        }
+        self._send_packet(
+            build_sip_request("CANCEL", request_uri, headers),
+            self.outbound_destination(b2bua_call),
+        )
+        b2bua_call.flow_log.sip("B2BUA", "SIPp B", "CANCEL")
 
     def send_outbound_bye(self, b2bua_call: B2BUACall) -> None:
         request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
@@ -1878,6 +1927,11 @@ def extract_user(header_value: str) -> Optional[str]:
 def extract_request_user(start_line: str) -> Optional[str]:
     match = re.search(r"^\S+\s+sip:([^@;:\s>]+)", start_line, re.IGNORECASE)
     return match.group(1) if match else None
+
+
+def parse_cseq_method(cseq_header: str) -> str:
+    parts = cseq_header.strip().split()
+    return parts[1].upper() if len(parts) >= 2 else ""
 
 
 def extract_sip_uri(value: str) -> str:
@@ -2142,7 +2196,7 @@ def coerce_config_value(key: str, value: Any) -> Any:
         return int(value)
     if key == "rtpengine_timeout":
         return float(value)
-    if key in {"debug", "b2bua_ladder_logs"}:
+    if key in {"debug", "b2bua_ladder_logs", "reject_unknown_routes"}:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -2302,6 +2356,7 @@ async def main() -> None:
             config.b2bua_ladder_logs,
             config.media_backend,
             rtpengine_client,
+            config.reject_unknown_routes,
         ),
         local_addr=(config.sip_ip, config.sip_port),
     )

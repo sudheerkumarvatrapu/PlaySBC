@@ -20,6 +20,9 @@ from typing import Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_DIR = ROOT / "sipp" / "scenarios"
 DEFAULT_SCENARIOS = (
+    "options",
+    "register_digest",
+    "register_digest_failure",
     "smoke_register_digest",
     "smoke_transaction_cache",
     "smoke_invalid_bye",
@@ -35,6 +38,10 @@ SCENARIO_PLANS = {
     "register_digest": {
         "mode": "single",
         "steps": [{"name": "register_digest", "xml": "register_digest.xml", "service": "1001", "local_port": 25062}],
+    },
+    "register_digest_failure": {
+        "mode": "single",
+        "steps": [{"name": "register_digest_failure", "xml": "register_digest_failure.xml", "service": "1001", "local_port": 25066}],
     },
     "call_echo": {
         "mode": "single",

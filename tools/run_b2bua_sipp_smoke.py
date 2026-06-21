@@ -50,6 +50,10 @@ LOG_FILES = (
     "log.sipp",
 )
 DEFAULT_LOG_FOLDER = "b2bua-Regression"
+SIPP_PCAP_SUDO_BLOCKED_DETAIL = (
+    "SIPp PCAP sudo mode requires cached sudo credentials. "
+    "Run `sudo -v` in your terminal, then retry with `--sipp-pcap-sudo`."
+)
 BASE_DEFAULTS = {
     "host": "127.0.0.1",
     "server_port": 25062,
@@ -65,7 +69,10 @@ BASE_DEFAULTS = {
     "uas_rtp_max": 27200,
     "caller": "sipp-a",
     "callee": "callee",
+    "register_callee": True,
     "register_caller": False,
+    "start_uas": True,
+    "reject_unknown_routes": False,
     "calls": 1,
     "rate": 1,
     "hold_ms": 1000,
@@ -139,6 +146,50 @@ B2BUA_PROFILES = {
         "uac_scenario": "uac-reg-outbound.xml",
         "uas_scenario": "uas-reg-outbound.xml",
     },
+    "invalid-bye": {
+        "callee": "invalid-bye-b",
+        "uac_scenario": "invalid_bye.xml",
+        "start_uas": False,
+        "register_callee": False,
+        "reject_unknown_routes": False,
+    },
+    "unknown-route": {
+        "callee": "unknown-route-user",
+        "uac_scenario": "b2bua_uac_unknown_route.xml",
+        "start_uas": False,
+        "register_callee": False,
+        "reject_unknown_routes": True,
+    },
+    "failed-outbound": {
+        "callee": "failed-outbound-b",
+        "uac_scenario": "b2bua_uac_failed_outbound.xml",
+        "uas_scenario": "b2bua_uas_failed_outbound.xml",
+    },
+    "cancel": {
+        "callee": "cancel-b",
+        "uac_scenario": "b2bua_uac_cancel.xml",
+        "uas_scenario": "b2bua_uas_cancel.xml",
+    },
+    "retransmission": {
+        "callee": "retransmit-b",
+        "uac_scenario": "b2bua_uac_retransmit_invite.xml",
+    },
+    "small-load-2cps-10s": {
+        "callee": "small-load-user",
+        "calls": 20,
+        "rate": 2,
+        "hold_ms": 10000,
+        "server_rtp_max": 25600,
+        "ladder": False,
+    },
+    "soak-1cps-30s": {
+        "callee": "soak-user",
+        "calls": 30,
+        "rate": 1,
+        "hold_ms": 30000,
+        "server_rtp_max": 25600,
+        "ladder": False,
+    },
     "load-5cps-60s": {
         "callee": "load-user",
         "calls": 300,
@@ -168,6 +219,13 @@ PROFILE_DESCRIPTIONS = {
     "rtpengine-transcoding": "One registered 60 second B2BUA call with PCMU on A leg, PCMA on B leg, and RTPengine transcoding intent.",
     "registered-inbound": "Register SIPp B, then call that registered number through the B2BUA.",
     "registered-outbound": "Register SIPp A and SIPp B, then originate from the registered SIPp A user.",
+    "invalid-bye": "Send a BYE outside any dialog and expect PlaySBC to reject it.",
+    "unknown-route": "Call an unregistered user with unknown-route rejection enabled and expect 404.",
+    "failed-outbound": "Register SIPp B, have the outbound leg reject INVITE, and verify PlaySBC propagates failure.",
+    "cancel": "Cancel an in-progress B2BUA INVITE and verify CANCEL/487 handling across both legs.",
+    "retransmission": "Replay the same inbound INVITE branch/CSeq and verify transaction cache behavior.",
+    "small-load-2cps-10s": "Small B2BUA load profile at 2 cps with 10 second CHT.",
+    "soak-1cps-30s": "Short soak-style B2BUA profile at 1 cps with 30 second CHT.",
     "load-5cps-60s": "Basic 5 cps for 60 seconds with 60 second CHT and ladder disabled.",
     "load-5cps-60s-rtpengine-transcoding": "5 cps for 60 seconds with 60 second CHT, RTPengine backend, and PCMU-to-PCMA transcoding intent.",
 }
@@ -235,15 +293,14 @@ def maybe_sudo_sipp_pcap(args: argparse.Namespace, command: List[str]) -> List[s
     return command
 
 
-def ensure_sudo_ready_for_sipp_pcap(args: argparse.Namespace) -> None:
+def check_sudo_ready_for_sipp_pcap(args: argparse.Namespace) -> Tuple[bool, str]:
     if not should_sudo_sipp_pcap(args) or args.dry_run:
-        return
-    completed = subprocess.run(["sudo", "-n", "true"], text=True, capture_output=True)
-    if completed.returncode != 0:
-        raise SystemExit(
-            "SIPp PCAP sudo mode requires cached sudo credentials. "
-            "Run `sudo -v` in your terminal, then retry with `--sipp-pcap-sudo`."
-        )
+        return True, ""
+    completed = subprocess.run(["sudo", "-n", "-v"], text=True, capture_output=True)
+    detail = (completed.stderr.strip() or completed.stdout.strip() or f"returncode={completed.returncode}").strip()
+    if completed.returncode == 0:
+        return True, "sudo credentials are cached"
+    return False, f"{SIPP_PCAP_SUDO_BLOCKED_DETAIL} sudo_check={detail}"
 
 
 def check_rtpengine_preflight(url: str, timeout: float) -> Tuple[bool, str]:
@@ -300,6 +357,48 @@ def append_rtpengine_blocked_observations(log_dir: Path, args: argparse.Namespac
                 f"expected={transcoding_expected} status=blocked",
                 "owner=rtpengine",
                 f"reason={detail}",
+            ]
+        ),
+    )
+
+
+def append_sipp_pcap_sudo_blocked_observations(log_dir: Path, args: argparse.Namespace, detail: str, duration: float) -> None:
+    append_log_section(
+        log_dir,
+        "log.platform",
+        "SIPP PCAP SUDO PREFLIGHT BLOCKED",
+        "\n".join(
+            [
+                f"reason={detail}",
+                f"duration_seconds={duration:.3f}",
+                "no_sipp_traffic_attempted=true",
+                "next_step=run sudo -v in the same terminal before rerunning --sipp-pcap-sudo profiles",
+            ]
+        ),
+    )
+    append_log_section(
+        log_dir,
+        "log.media",
+        "MEDIA OBSERVATION",
+        "\n".join(
+            [
+                f"expected_rtp={bool(args.media_enabled)} status=blocked",
+                f"media_backend={args.media_backend}",
+                "reason=sipp_pcap_sudo_credentials_not_cached",
+                "no_sipp_or_rtpengine_traffic_attempted=true",
+            ]
+        ),
+    )
+    transcoding_expected = bool(args.media_codec and args.server_codec and args.media_codec != args.server_codec)
+    append_log_section(
+        log_dir,
+        "log.transcoding",
+        "TRANSCODING OBSERVATION",
+        "\n".join(
+            [
+                f"expected={transcoding_expected} status=blocked",
+                f"owner={'rtpengine' if args.media_backend == 'rtpengine' else 'internal'}",
+                "reason=sipp_pcap_sudo_credentials_not_cached",
             ]
         ),
     )
@@ -446,6 +545,7 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "media_backend": args.media_backend,
         "rtpengine_url": args.rtpengine_url,
         "rtpengine_timeout": args.rtpengine_timeout,
+        "reject_unknown_routes": args.reject_unknown_routes,
         "debug": True,
     }
     config_path = work_dir / "server-config.json"
@@ -1476,7 +1576,10 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"profile={args.profile or 'custom'}",
         f"caller={args.caller}",
         f"callee={args.callee}",
+        f"register_callee={args.register_callee}",
         f"register_caller={args.register_caller}",
+        f"start_uas={args.start_uas}",
+        f"reject_unknown_routes={args.reject_unknown_routes}",
         f"registration_driver={args.registration_driver}",
         f"calls={args.calls}",
         f"rate={args.rate}",
@@ -1639,7 +1742,12 @@ def main() -> int:
     parser.add_argument("--uas-rtp-max", type=int, default=BASE_DEFAULTS["uas_rtp_max"])
     parser.add_argument("--caller", default=BASE_DEFAULTS["caller"], help="SIP user used by SIPp A in From/Contact")
     parser.add_argument("--callee", default=BASE_DEFAULTS["callee"])
+    parser.add_argument("--register-callee", dest="register_callee", action="store_true", default=BASE_DEFAULTS["register_callee"], help="REGISTER SIPp B before the UAC call")
+    parser.add_argument("--no-register-callee", dest="register_callee", action="store_false", help="Skip callee registration")
     parser.add_argument("--register-caller", action="store_true", default=BASE_DEFAULTS["register_caller"], help="REGISTER the SIPp A caller before originating")
+    parser.add_argument("--start-uas", dest="start_uas", action="store_true", default=BASE_DEFAULTS["start_uas"], help="Start the SIPp B UAS leg")
+    parser.add_argument("--no-start-uas", dest="start_uas", action="store_false", help="Skip SIPp B UAS startup")
+    parser.add_argument("--reject-unknown-routes", action="store_true", default=BASE_DEFAULTS["reject_unknown_routes"], help="Make PlaySBC reject unrouted INVITEs with 404 instead of echo mode")
     parser.add_argument("--calls", type=int, default=BASE_DEFAULTS["calls"])
     parser.add_argument("--rate", type=int, default=BASE_DEFAULTS["rate"])
     parser.add_argument("--hold-ms", type=int, default=BASE_DEFAULTS["hold_ms"])
@@ -1711,6 +1819,24 @@ def main() -> int:
             print(f"{result.name}: {result.status}")
             return 2
 
+    started = time.monotonic()
+    sudo_ready, sudo_detail = check_sudo_ready_for_sipp_pcap(args)
+    sudo_duration = time.monotonic() - started
+    if not sudo_ready:
+        result = SmokeResult("sipp-pcap-sudo-preflight", [], None, "blocked", sudo_duration)
+        append_sipp_pcap_sudo_blocked_observations(log_dir, args, sudo_detail, sudo_duration)
+        append_results(log_dir, args, [result])
+        print(f"B2BUA SIPp logs: {log_dir}")
+        print(f"{result.name}: {result.status}")
+        return 2
+    if should_sudo_sipp_pcap(args):
+        append_log_section(
+            log_dir,
+            "log.platform",
+            "SIPP PCAP SUDO PREFLIGHT OK",
+            f"detail={sudo_detail}\nduration_seconds={sudo_duration:.3f}",
+        )
+
     results: List[SmokeResult] = []
     with tempfile.TemporaryDirectory(prefix=f"{run_id}-work-") as work_tmp:
         work_dir = Path(work_tmp)
@@ -1722,7 +1848,6 @@ def main() -> int:
         if not sipp_binary and not args.dry_run:
             raise SystemExit("SIPp executable not found")
         sipp = sipp_binary or args.sipp_bin
-        ensure_sudo_ready_for_sipp_pcap(args)
         server_command = build_server_command(args, work_dir, log_dir)
         uas_command = build_uas_command(args, sipp)
         uac_command = build_uac_command(args, sipp)
@@ -1730,9 +1855,10 @@ def main() -> int:
         callee_register_command = build_register_command(args, sipp, args.callee, args.uas_port)
         caller_register_command = build_register_command(args, sipp, args.caller, args.uac_port) if args.register_caller else []
         all_commands = [("server", server_command)]
-        if args.registration_driver == "sipp":
+        if args.registration_driver == "sipp" and args.register_callee:
             all_commands.append(("registration-callee", callee_register_command))
-        all_commands.append(("sipp-b-uas", uas_command))
+        if args.start_uas:
+            all_commands.append(("sipp-b-uas", uas_command))
         if args.registration_driver == "sipp" and caller_register_command:
             all_commands.append(("registration-caller", caller_register_command))
         all_commands.append(("sipp-a-uac", uac_command))
@@ -1745,9 +1871,10 @@ def main() -> int:
         try:
             if args.dry_run:
                 results.append(SmokeResult("server", server_command, None, "dry-run", 0.0))
-                if args.registration_driver == "sipp":
+                if args.registration_driver == "sipp" and args.register_callee:
                     results.append(SmokeResult("registration-callee", callee_register_command, None, "dry-run", 0.0))
-                results.append(SmokeResult("sipp-b-uas", uas_command, None, "dry-run", 0.0))
+                if args.start_uas:
+                    results.append(SmokeResult("sipp-b-uas", uas_command, None, "dry-run", 0.0))
                 if args.registration_driver == "sipp" and caller_register_command:
                     results.append(SmokeResult("registration-caller", caller_register_command, None, "dry-run", 0.0))
                 results.append(SmokeResult("sipp-a-uac", uac_command, None, "dry-run", 0.0))
@@ -1764,15 +1891,17 @@ def main() -> int:
                 raise RuntimeError(f"Mini call server exited early. See {log_dir / 'log.platform'}")
 
             started = time.monotonic()
-            if args.registration_driver == "sipp":
-                registration_rc = run_sipp_registration(callee_register_command, work_dir, "registration-callee")
-            else:
-                registration_rc = register_endpoint(args, log_dir)
-            results.append(SmokeResult("registration", [], registration_rc, "passed" if registration_rc == 0 else "failed", time.monotonic() - started))
+            if args.register_callee:
+                if args.registration_driver == "sipp":
+                    registration_rc = run_sipp_registration(callee_register_command, work_dir, "registration-callee")
+                else:
+                    registration_rc = register_endpoint(args, log_dir)
+                results.append(SmokeResult("registration", [], registration_rc, "passed" if registration_rc == 0 else "failed", time.monotonic() - started))
 
-            uas_started = time.monotonic()
-            uas_process = start_process(uas_command, work_dir / "sipp-b-uas", work_dir / "sipp-b-uas" / "stdout.log")
-            time.sleep(0.75)
+            if args.start_uas:
+                uas_started = time.monotonic()
+                uas_process = start_process(uas_command, work_dir / "sipp-b-uas", work_dir / "sipp-b-uas" / "stdout.log")
+                time.sleep(0.75)
 
             if args.register_caller:
                 started = time.monotonic()
@@ -1816,10 +1945,11 @@ def main() -> int:
                 results.append(SmokeResult(name, command, media_rc, "passed" if media_rc == 0 else "failed", time.monotonic() - media_started))
             media_processes = []
 
-            uas_rc = uas_process.wait(timeout=max(30, int(args.hold_ms / 1000) + 30))
-            uas_duration = time.monotonic() - uas_started if uas_started is not None else 0.0
-            results.append(SmokeResult("sipp-b-uas", uas_command, uas_rc, "passed" if uas_rc == 0 else "failed", uas_duration))
-            uas_process = None
+            if uas_process is not None:
+                uas_rc = uas_process.wait(timeout=max(30, int(args.hold_ms / 1000) + 30))
+                uas_duration = time.monotonic() - uas_started if uas_started is not None else 0.0
+                results.append(SmokeResult("sipp-b-uas", uas_command, uas_rc, "passed" if uas_rc == 0 else "failed", uas_duration))
+                uas_process = None
         finally:
             for _name, _command, process, _started in media_processes:
                 stop_process(process)

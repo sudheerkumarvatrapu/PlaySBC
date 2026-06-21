@@ -9,6 +9,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -34,6 +35,13 @@ ALL_B2BUA_PROFILES = (
     "rtpengine-transcoding",
     "registered-inbound",
     "registered-outbound",
+    "invalid-bye",
+    "unknown-route",
+    "failed-outbound",
+    "cancel",
+    "retransmission",
+    "small-load-2cps-10s",
+    "soak-1cps-30s",
     "load-5cps-60s",
     "load-5cps-60s-rtpengine-transcoding",
 )
@@ -80,6 +88,39 @@ def run_command(command: List[str], timeout: int) -> tuple[int, float, str, str]
 
 def status_from_returncode(returncode: int) -> str:
     return "passed" if returncode == 0 else "failed"
+
+
+class SudoKeepalive:
+    """Refresh cached sudo credentials so late SIPp PCAP profiles can still run."""
+
+    def __init__(self, interval_seconds: float = 60.0):
+        self.interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> tuple[bool, str]:
+        ok, detail = self.refresh()
+        if not ok:
+            return False, detail
+        self._thread = threading.Thread(target=self._run, name="playsbc-sudo-keepalive", daemon=True)
+        self._thread.start()
+        return True, detail
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+
+    def refresh(self) -> tuple[bool, str]:
+        completed = subprocess.run(["sudo", "-n", "-v"], text=True, capture_output=True)
+        detail = (completed.stderr.strip() or completed.stdout.strip() or f"returncode={completed.returncode}").strip()
+        if completed.returncode == 0:
+            return True, "sudo credentials refreshed"
+        return False, detail
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self.refresh()
 
 
 def probe_rtpengine(url: str, timeout: float) -> tuple[bool, str]:
@@ -394,6 +435,7 @@ def main() -> int:
     run_id = args.run_id or make_run_id()
     report_dir = Path(args.report_dir)
     rows: List[ReportRow] = []
+    sudo_keepalive: Optional[SudoKeepalive] = None
 
     if not args.skip_b2bua:
         b2bua_log_root = ROOT / "logs" / args.b2bua_log_folder
@@ -405,85 +447,100 @@ def main() -> int:
     if deleted_reports:
         print(f"Deleted {len(deleted_reports)} old regression report file(s) before this run.")
 
-    if not args.skip_sipp_smoke:
-        smoke_run_id = f"{run_id}-sipp-smoke"
-        smoke_root = Path(args.sipp_smoke_root)
-        if (smoke_root / smoke_run_id).exists():
-            raise SystemExit(f"SIPp smoke run directory already exists: {smoke_root / smoke_run_id}")
-        command = [
-            sys.executable,
-            str(ROOT / "tools" / "run_sipp_regression.py"),
-            "--start-server",
-            "--output-root",
-            str(smoke_root),
-            "--run-id",
-            smoke_run_id,
-        ]
-        command_text = " ".join(command)
-        returncode, duration, stdout, stderr = run_command(command, args.timeout)
-        summary_path = smoke_root / smoke_run_id / "summary.json"
-        if summary_path.exists():
-            rows.extend(parse_sipp_smoke_summary(summary_path, command_text))
-        else:
-            rows.append(
-                ReportRow("SIPp Smoke", "suite", status_from_returncode(returncode), returncode, duration, str(smoke_root / smoke_run_id), command_text)
+    if args.b2bua_sipp_pcap_sudo and not args.skip_b2bua:
+        sudo_keepalive = SudoKeepalive()
+        sudo_ready, sudo_detail = sudo_keepalive.start()
+        if not sudo_ready:
+            raise SystemExit(
+                "SIPp PCAP sudo mode requires cached sudo credentials before the suite starts. "
+                "Run `sudo -v` in your terminal, then rerun the regression. "
+                f"sudo_check={sudo_detail}"
             )
-        if stderr.strip():
-            (smoke_root / smoke_run_id / "stderr.log").write_text(stderr, encoding="utf-8")
-        if stdout.strip():
-            (smoke_root / smoke_run_id / "stdout.log").write_text(stdout, encoding="utf-8")
+        print("SIPp PCAP sudo keepalive started.")
 
-    if not args.skip_b2bua:
-        profiles = ALL_B2BUA_PROFILES if args.all_b2bua_profiles else tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
-        for profile in profiles:
-            profile_run_id = f"{run_id}-{profile}"
-            profile_log_path = b2bua_log_root / profile_run_id
+    try:
+        if not args.skip_sipp_smoke:
+            smoke_run_id = f"{run_id}-sipp-smoke"
+            smoke_root = Path(args.sipp_smoke_root)
+            if (smoke_root / smoke_run_id).exists():
+                raise SystemExit(f"SIPp smoke run directory already exists: {smoke_root / smoke_run_id}")
             command = [
                 sys.executable,
-                str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
-                "--profile",
-                profile,
+                str(ROOT / "tools" / "run_sipp_regression.py"),
+                "--start-server",
+                "--output-root",
+                str(smoke_root),
                 "--run-id",
-                profile_run_id,
-                "--log-folder",
-                args.b2bua_log_folder,
+                smoke_run_id,
             ]
-            if args.b2bua_media_driver:
-                command.extend(["--media-driver", args.b2bua_media_driver])
-            if args.b2bua_sipp_pcap_sudo:
-                command.append("--sipp-pcap-sudo")
-            if profile in RTPENGINE_B2BUA_PROFILES:
-                command.extend(["--rtpengine-url", args.b2bua_rtpengine_url])
             command_text = " ".join(command)
-            if profile in RTPENGINE_B2BUA_PROFILES and not args.skip_rtpengine_preflight:
-                started = time.monotonic()
-                ready, detail = probe_rtpengine(args.b2bua_rtpengine_url, args.rtpengine_preflight_timeout)
-                duration = time.monotonic() - started
-                if not ready:
-                    initialize_b2bua_log_bundle(profile_log_path)
-                    append_bundle_log(
-                        profile_log_path,
-                        "log.platform",
-                        "RTPENGINE PREFLIGHT BLOCKED",
-                        f"rtpengine_url={args.b2bua_rtpengine_url}\nreason={detail}",
-                    )
-                    rows.append(rtpengine_blocked_row(profile, args.b2bua_rtpengine_url, detail, duration, profile_log_path, command_text))
-                    continue
             returncode, duration, stdout, stderr = run_command(command, args.timeout)
-            actual_log_path = extract_b2bua_log_path(stdout, profile_log_path)
+            summary_path = smoke_root / smoke_run_id / "summary.json"
+            if summary_path.exists():
+                rows.extend(parse_sipp_smoke_summary(summary_path, command_text))
+            else:
+                rows.append(
+                    ReportRow("SIPp Smoke", "suite", status_from_returncode(returncode), returncode, duration, str(smoke_root / smoke_run_id), command_text)
+                )
             if stderr.strip():
-                append_bundle_log(actual_log_path, "log.platform", "RUNNER STDERR", stderr)
-            if returncode != 0 and stdout.strip():
-                append_bundle_log(actual_log_path, "log.platform", "RUNNER STDOUT", stdout)
-            rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, actual_log_path, command_text))
+                (smoke_root / smoke_run_id / "stderr.log").write_text(stderr, encoding="utf-8")
+            if stdout.strip():
+                (smoke_root / smoke_run_id / "stdout.log").write_text(stdout, encoding="utf-8")
 
-    report_path = write_reports(rows, report_dir, run_id)
-    failed = [row for row in rows if row.status != "passed"]
-    print(f"Regression report: {report_path}")
-    print(f"Latest report: {report_dir / 'latest.html'}")
-    for row in rows:
-        print(f"{row.suite} / {row.name}: {row.status}")
-    return 1 if failed else 0
+        if not args.skip_b2bua:
+            profiles = ALL_B2BUA_PROFILES if args.all_b2bua_profiles else tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
+            for profile in profiles:
+                profile_run_id = f"{run_id}-{profile}"
+                profile_log_path = b2bua_log_root / profile_run_id
+                command = [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--profile",
+                    profile,
+                    "--run-id",
+                    profile_run_id,
+                    "--log-folder",
+                    args.b2bua_log_folder,
+                ]
+                if args.b2bua_media_driver:
+                    command.extend(["--media-driver", args.b2bua_media_driver])
+                if args.b2bua_sipp_pcap_sudo:
+                    command.append("--sipp-pcap-sudo")
+                if profile in RTPENGINE_B2BUA_PROFILES:
+                    command.extend(["--rtpengine-url", args.b2bua_rtpengine_url])
+                command_text = " ".join(command)
+                if profile in RTPENGINE_B2BUA_PROFILES and not args.skip_rtpengine_preflight:
+                    started = time.monotonic()
+                    ready, detail = probe_rtpengine(args.b2bua_rtpengine_url, args.rtpengine_preflight_timeout)
+                    duration = time.monotonic() - started
+                    if not ready:
+                        initialize_b2bua_log_bundle(profile_log_path)
+                        append_bundle_log(
+                            profile_log_path,
+                            "log.platform",
+                            "RTPENGINE PREFLIGHT BLOCKED",
+                            f"rtpengine_url={args.b2bua_rtpengine_url}\nreason={detail}",
+                        )
+                        rows.append(rtpengine_blocked_row(profile, args.b2bua_rtpengine_url, detail, duration, profile_log_path, command_text))
+                        continue
+                returncode, duration, stdout, stderr = run_command(command, args.timeout)
+                actual_log_path = extract_b2bua_log_path(stdout, profile_log_path)
+                if stderr.strip():
+                    append_bundle_log(actual_log_path, "log.platform", "RUNNER STDERR", stderr)
+                if returncode != 0 and stdout.strip():
+                    append_bundle_log(actual_log_path, "log.platform", "RUNNER STDOUT", stdout)
+                rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, actual_log_path, command_text))
+
+        report_path = write_reports(rows, report_dir, run_id)
+        failed = [row for row in rows if row.status != "passed"]
+        print(f"Regression report: {report_path}")
+        print(f"Latest report: {report_dir / 'latest.html'}")
+        for row in rows:
+            print(f"{row.suite} / {row.name}: {row.status}")
+        return 1 if failed else 0
+    finally:
+        if sudo_keepalive:
+            sudo_keepalive.stop()
 
 
 if __name__ == "__main__":

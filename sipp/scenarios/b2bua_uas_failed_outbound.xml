@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<scenario name="B2BUA UAS failed outbound leg">
+  <recv request="INVITE" crlf="true" />
+
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 503 Service Unavailable
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Retry-After: 1
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv request="ACK" crlf="true" />
+
+  <timewait milliseconds="500" />
+
+  <ResponseTimeRepartition value="10,20,50,100,150,500,1000" />
+  <CallLengthRepartition value="10,50,100,500,1000" />
+</scenario>
