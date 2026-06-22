@@ -33,6 +33,7 @@ ALL_B2BUA_PROFILES = (
     "rtpengine",
     "rtpengine-media",
     "rtpengine-transcoding",
+    "tcp-rtpengine-transcoding",
     "registered-inbound",
     "registered-outbound",
     "invalid-bye",
@@ -49,6 +50,7 @@ RTPENGINE_B2BUA_PROFILES = (
     "rtpengine",
     "rtpengine-media",
     "rtpengine-transcoding",
+    "tcp-rtpengine-transcoding",
     "load-5cps-60s-rtpengine-transcoding",
 )
 B2BUA_LOG_FILES = (
@@ -294,7 +296,8 @@ def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[
 
 def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: float, log_path: Path, command: str) -> List[ReportRow]:
     log_path = extract_b2bua_log_path(stdout, log_path)
-    rows = []
+    statuses = []
+    names = []
     for line in stdout.splitlines():
         if ": " not in line:
             continue
@@ -302,30 +305,31 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
         status = status.strip()
         if status not in {"passed", "failed", "dry-run", "blocked"}:
             continue
-        rows.append(
-            ReportRow(
-                suite=f"B2BUA {profile}",
-                name=name.strip(),
-                status=status,
-                returncode=0 if status == "passed" else None,
-                duration_seconds=0.0,
-                log_path=str(log_path),
-                command=command,
-            )
+        names.append(name.strip())
+        statuses.append(status)
+
+    aggregate_status = summarize_statuses(statuses)
+    if aggregate_status == "unknown":
+        aggregate_status = status_from_returncode(returncode)
+    elif returncode != 0 and aggregate_status in {"passed", "dry-run"}:
+        aggregate_status = "failed"
+
+    aggregate_command = command
+    if names:
+        aggregate_command = f"{command} # steps: {', '.join(f'{name}={status}' for name, status in zip(names, statuses))}"
+
+    aggregate_returncode = 0 if aggregate_status in {"passed", "dry-run"} and returncode == 0 else returncode
+    return [
+        ReportRow(
+            suite=f"B2BUA {profile}",
+            name=profile,
+            status=aggregate_status,
+            returncode=aggregate_returncode,
+            duration_seconds=duration,
+            log_path=str(log_path),
+            command=aggregate_command,
         )
-    if not rows:
-        rows.append(
-            ReportRow(
-                suite=f"B2BUA {profile}",
-                name=profile,
-                status=status_from_returncode(returncode),
-                returncode=returncode,
-                duration_seconds=duration,
-                log_path=str(log_path),
-                command=command,
-            )
-        )
-    return rows
+    ]
 
 
 def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:

@@ -116,7 +116,7 @@ What this does:
 | Step | Behavior |
 | --- | --- |
 | Scope | Runs only B2BUA SIPp regression, not the old smoke suite |
-| Coverage | Runs all B2BUA profiles, including signalling, media, transcoding, registration, negative call, load, soak, and RTPengine cases |
+| Coverage | Runs all B2BUA profiles, including signalling, media, transcoding, registration, negative call, load, soak, RTPengine, and TCP RTPengine transcoding cases |
 | Media | Uses SIPp `play_pcap_audio` for media profiles |
 | Sudo | Prompts once with `sudo -v`, then keeps sudo alive for SIPp PCAP replay during longer runs |
 | Logs | Deletes old passed/blocked bundles; keeps failed bundles |
@@ -132,6 +132,7 @@ python3 tools/run_b2bua_sipp_smoke.py --profile transcoding
 python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine
 python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-media --sipp-pcap-sudo
 python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-transcoding --sipp-pcap-sudo
+python3 tools/run_b2bua_sipp_smoke.py --profile tcp-rtpengine-transcoding --sipp-pcap-sudo
 python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s
 ```
 

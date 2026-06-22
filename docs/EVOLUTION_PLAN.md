@@ -4,7 +4,7 @@ This project is an educational SIP/RTP lab server. The goal is to grow it phase 
 
 ## Current Baseline
 
-Current validated baseline: the B2BUA SIPp regression is green for signalling, G.711 media, internal transcoding, registered inbound/outbound, RTPengine signalling, RTPengine G.711 media, RTPengine PCMU-to-PCMA transcoding, and 5 cps / 60 second CHT load profiles.
+Current validated baseline: the B2BUA SIPp regression is green for signalling, G.711 media, internal transcoding, registered inbound/outbound, RTPengine signalling, RTPengine G.711 media, RTPengine PCMU-to-PCMA transcoding, TCP RTPengine transcoding, and 5 cps / 60 second CHT load profiles.
 
 Implemented:
 
@@ -24,7 +24,7 @@ Implemented:
 - Single combined `capture.pcap` generated after non-load B2BUA calls from SIP traces, RTP media packets, and PlaySBC protocol logs
 - Logical PCAP topology view for local B2BUA runs: SIPp A, PlaySBC, SIPp B, and RTPengine can appear as separate IPs while runtime remains on loopback
 - Per-testcase B2BUA SIPp log bundles with no separate saved SIPp A/B leg folders
-- Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine signalling, RTPengine G.711 media, RTPengine transcoding, registered inbound/outbound, negative call handling, small load, soak, and 5 cps / 60 second CHT load
+- Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine signalling, RTPengine G.711 media, RTPengine transcoding, TCP RTPengine transcoding, registered inbound/outbound, negative call handling, small load, soak, and 5 cps / 60 second CHT load
 - SIPp XML regression coverage for `OPTIONS`, digest registration success/failure, basic B2BUA calls, media calls, transcoding calls, registered inbound/outbound, invalid `BYE`, unknown route, failed outbound leg, `CANCEL`, and INVITE retransmission behavior
 - SIPp PCAP replay sudo keepalive for long macOS regression runs, so one initial `sudo -v` can cover late media/load profiles
 - RTPengine NG control backend for B2BUA SDP offer/answer/query/delete, with preflight blocking when RTPengine is down
@@ -49,6 +49,7 @@ Done:
 - Pass one basic RTPengine B2BUA signalling call
 - Pass RTPengine-backed G.711 media
 - Pass RTPengine-backed PCMU-to-PCMA transcoding validation
+- Pass TCP REGISTER plus TCP B2BUA signalling with RTPengine-backed PCMU-to-PCMA transcoding validation
 - Pass RTPengine-backed 5 cps / 60 second CHT load with 300 total calls
 - Confirm PlaySBC internal RTP counters remain zero for RTPengine media, proving media is external to PlaySBC
 
@@ -112,6 +113,7 @@ Implemented SIPp regression coverage:
 - RTPengine-backed B2BUA signalling call
 - RTPengine-backed G.711 media call
 - RTPengine-backed PCMU-to-PCMA transcoding call
+- TCP REGISTER plus TCP B2BUA RTPengine PCMU-to-PCMA transcoding call
 - 5 cps / 60 second CHT RTPengine/transcoding load profile with 300 total calls
 - Invalid `BYE`
 - Unknown route

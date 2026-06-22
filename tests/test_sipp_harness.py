@@ -55,6 +55,11 @@ class SippScenarioTests(unittest.TestCase):
             with self.subTest(scenario=scenario.name):
                 ET.parse(scenario)
 
+    def test_register_contact_preserves_sip_transport(self):
+        scenario_text = (ROOT / "sipp" / "scenarios" / "register_contact.xml").read_text(encoding="ISO-8859-1")
+
+        self.assertIn("Contact: <sip:[service]@[local_ip]:[local_port];transport=[transport]>", scenario_text)
+
     def test_build_command_enables_traces(self):
         command = run_sipp_regression.build_sipp_command("sipp", "options", "127.0.0.1", 15062, 10, 5)
         self.assertIn("-trace_msg", command)
@@ -1003,6 +1008,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("registered-outbound", completed.stdout)
         self.assertIn("rtpengine-media", completed.stdout)
         self.assertIn("rtpengine-transcoding", completed.stdout)
+        self.assertIn("tcp-rtpengine-transcoding", completed.stdout)
         self.assertIn("unknown-route", completed.stdout)
         self.assertIn("failed-outbound", completed.stdout)
         self.assertIn("cancel", completed.stdout)
@@ -1019,6 +1025,45 @@ class SippScenarioTests(unittest.TestCase):
         self.assertEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["cancel"]["uac_scenario"], "b2bua_uac_cancel.xml")
         self.assertEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["cancel"]["uas_scenario"], "b2bua_uas_cancel.xml")
         self.assertEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["retransmission"]["uac_scenario"], "b2bua_uac_retransmit_invite.xml")
+
+    def test_b2bua_tcp_rtpengine_transcoding_profile_sets_transport_backend_and_codec_mismatch(self):
+        profile = run_b2bua_sipp_smoke.B2BUA_PROFILES["tcp-rtpengine-transcoding"]
+
+        self.assertEqual(profile["sip_transport"], "tcp")
+        self.assertEqual(profile["media_backend"], "rtpengine")
+        self.assertEqual(profile["media_driver"], "sipp-pcap")
+        self.assertEqual(profile["media_codec"], "PCMU")
+        self.assertEqual(profile["server_codec"], "PCMA")
+
+    def test_b2bua_tcp_rtpengine_transcoding_dry_run_writes_tcp_rtpengine_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "tcp-rtpengine-transcoding-profile",
+                    "--profile",
+                    "tcp-rtpengine-transcoding",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "tcp-rtpengine-transcoding-profile"
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
+            self.assertIn("profile=tcp-rtpengine-transcoding", platform)
+            self.assertIn("media_backend=rtpengine", platform)
+            self.assertIn("sip_transport=tcp", platform)
+            self.assertIn("transcoding_expected=True", platform)
+            self.assertIn("transcoding_owner=rtpengine", platform)
+            self.assertIn("-t t1", sipp)
 
     def test_b2bua_unknown_route_dry_run_skips_registration_and_uas(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1190,7 +1235,49 @@ class SippScenarioTests(unittest.TestCase):
             "cmd",
         )
 
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].suite, "B2BUA basic-media")
+        self.assertEqual(rows[0].name, "basic-media")
+        self.assertEqual(rows[0].status, "passed")
         self.assertEqual({row.log_path for row in rows}, {"/tmp/playsbc/basic-media-bundle"})
+        self.assertIn("steps: registration=passed, sipp-a-uac=passed", rows[0].command)
+
+    def test_b2bua_stdout_parser_collapses_failed_steps_into_one_failed_profile_row(self):
+        rows = run_regression_suite.parse_b2bua_stdout(
+            "basic-signalling",
+            (
+                "B2BUA SIPp logs: /tmp/playsbc/basic-signalling-bundle\n"
+                "registration: passed\n"
+                "sipp-a-uac: failed\n"
+                "sipp-b-uas: passed\n"
+            ),
+            1,
+            3.5,
+            Path("/tmp/playsbc/default"),
+            "cmd",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].suite, "B2BUA basic-signalling")
+        self.assertEqual(rows[0].name, "basic-signalling")
+        self.assertEqual(rows[0].status, "failed")
+        self.assertEqual(rows[0].returncode, 1)
+        self.assertEqual(rows[0].duration_seconds, 3.5)
+        self.assertIn("sipp-a-uac=failed", rows[0].command)
+
+    def test_b2bua_stdout_parser_marks_nonzero_command_failed_even_if_steps_passed(self):
+        rows = run_regression_suite.parse_b2bua_stdout(
+            "basic-signalling",
+            "B2BUA SIPp logs: /tmp/playsbc/basic-signalling-bundle\nregistration: passed\nsipp-a-uac: passed\n",
+            1,
+            2.0,
+            Path("/tmp/playsbc/default"),
+            "cmd",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "failed")
+        self.assertEqual(rows[0].returncode, 1)
 
     def test_cleanup_non_failed_b2bua_bundles_keeps_failed_and_unknown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1341,10 +1428,11 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("password is required", detail)
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
-        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 17)
+        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 18)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("unknown-route", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("failed-outbound", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("cancel", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -1352,6 +1440,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("small-load-2cps-10s", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("soak-1cps-30s", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
 
     def test_direct_rtpengine_profile_blocks_before_sipp_when_down(self):
         with tempfile.TemporaryDirectory() as tmp:
