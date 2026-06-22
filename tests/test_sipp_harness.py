@@ -230,8 +230,10 @@ class SippScenarioTests(unittest.TestCase):
 
         self.assertIn("-t", uac)
         self.assertEqual(uac[uac.index("-t") + 1], "tn")
+        self.assertEqual(uac[uac.index("-max_socket") + 1], "128")
         self.assertEqual(uac[uac.index("-p") + 1], "25081")
         self.assertEqual(uas[uas.index("-t") + 1], "t1")
+        self.assertNotIn("-max_socket", uas)
         self.assertEqual(uas[uas.index("-p") + 1], "25082")
 
     def test_b2bua_register_command_uses_tcp_client_mode_with_bind_and_contact_ports(self):
@@ -253,6 +255,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertEqual(command[command.index("-key") + 1 : command.index("-key") + 3], ["contact_port", "25082"])
         self.assertIn("-t", command)
         self.assertEqual(command[command.index("-t") + 1], "tn")
+        self.assertEqual(command[command.index("-max_socket") + 1], "128")
 
     def test_b2bua_register_command_keeps_udp_bind_and_contact_ports(self):
         args = argparse_namespace(
@@ -272,6 +275,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertEqual(command[command.index("-p") + 1], "25083")
         self.assertEqual(command[command.index("-key") + 1 : command.index("-key") + 3], ["contact_port", "25082"])
         self.assertNotIn("-t", command)
+        self.assertNotIn("-max_socket", command)
 
     def test_b2bua_load_profiles_run_5cps_for_60_seconds(self):
         for profile in ("load-5cps-60s", "load-5cps-60s-rtpengine-transcoding"):

@@ -528,7 +528,16 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
 def sipp_transport_args(args: argparse.Namespace, role: str = "client") -> List[str]:
     if str(getattr(args, "sip_transport", "udp")).lower() != "tcp":
         return []
-    return ["-t", "t1" if role == "server" else "tn"]
+    if role == "server":
+        return ["-t", "t1"]
+    return ["-t", "tn", "-max_socket", str(sipp_max_socket_limit(args))]
+
+
+def sipp_max_socket_limit(args: argparse.Namespace) -> int:
+    calls = int(getattr(args, "calls", BASE_DEFAULTS["calls"]))
+    rate = int(getattr(args, "rate", BASE_DEFAULTS["rate"]))
+    hold_ms = int(getattr(args, "hold_ms", BASE_DEFAULTS["hold_ms"]))
+    return min(max(call_limit(calls, rate, hold_ms) + 16, 128), 1024)
 
 
 def build_server_command(args: argparse.Namespace, work_dir: Path, log_dir: Path) -> List[str]:
