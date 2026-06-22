@@ -477,7 +477,7 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-trace_counts",
         "-trace_logs",
     ]
-    command.extend(sipp_transport_args(args))
+    command.extend(sipp_transport_args(args, role="server"))
     return maybe_sudo_sipp_pcap(args, command)
 
 
@@ -525,8 +525,10 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
     return maybe_sudo_sipp_pcap(args, command)
 
 
-def sipp_transport_args(args: argparse.Namespace) -> List[str]:
-    return ["-t", "t1"] if str(getattr(args, "sip_transport", "udp")).lower() == "tcp" else []
+def sipp_transport_args(args: argparse.Namespace, role: str = "client") -> List[str]:
+    if str(getattr(args, "sip_transport", "udp")).lower() != "tcp":
+        return []
+    return ["-t", "t1" if role == "server" else "tn"]
 
 
 def build_server_command(args: argparse.Namespace, work_dir: Path, log_dir: Path) -> List[str]:
@@ -634,7 +636,14 @@ def build_media_player_commands(args: argparse.Namespace) -> List[Tuple[str, Lis
     ]
 
 
-def build_register_command(args: argparse.Namespace, sipp_binary: str, user: str, contact_port: int) -> List[str]:
+def build_register_command(
+    args: argparse.Namespace,
+    sipp_binary: str,
+    user: str,
+    contact_port: int,
+    local_port: Optional[int] = None,
+) -> List[str]:
+    bind_port = contact_port if local_port is None else local_port
     command = [
         sipp_binary,
         f"{args.host}:{args.server_port}",
@@ -647,6 +656,9 @@ def build_register_command(args: argparse.Namespace, sipp_binary: str, user: str
         "-mi",
         args.host,
         "-p",
+        str(bind_port),
+        "-key",
+        "contact_port",
         str(contact_port),
         "-m",
         "1",
@@ -1025,10 +1037,10 @@ def normalize_sip_payload(payload_text: str) -> bytes:
 
 def sipp_leg_port(args: argparse.Namespace, leg: str) -> Optional[int]:
     ports = {
-        "registration-callee": args.uas_port,
-        "registration-caller": args.uac_port,
-        "sipp-a-uac": args.uac_port,
-        "sipp-b-uas": args.uas_port,
+        "registration-callee": getattr(args, "register_port", BASE_DEFAULTS["register_port"]),
+        "registration-caller": getattr(args, "caller_register_port", BASE_DEFAULTS["caller_register_port"]),
+        "sipp-a-uac": getattr(args, "uac_port", BASE_DEFAULTS["uac_port"]),
+        "sipp-b-uas": getattr(args, "uas_port", BASE_DEFAULTS["uas_port"]),
     }
     return ports.get(leg)
 
@@ -1900,8 +1912,12 @@ def main() -> int:
         uas_command = build_uas_command(args, sipp)
         uac_command = build_uac_command(args, sipp)
         media_commands = build_media_player_commands(args)
-        callee_register_command = build_register_command(args, sipp, args.callee, args.uas_port)
-        caller_register_command = build_register_command(args, sipp, args.caller, args.uac_port) if args.register_caller else []
+        callee_register_command = build_register_command(args, sipp, args.callee, args.uas_port, args.register_port)
+        caller_register_command = (
+            build_register_command(args, sipp, args.caller, args.uac_port, args.caller_register_port)
+            if args.register_caller
+            else []
+        )
         all_commands = [("server", server_command)]
         if args.registration_driver == "sipp" and args.register_callee:
             all_commands.append(("registration-callee", callee_register_command))

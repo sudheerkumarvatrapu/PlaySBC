@@ -56,6 +56,43 @@ class SipParsingTests(unittest.TestCase):
             "sip:1002@127.0.0.1:25082;transport=tcp",
         )
 
+    def test_b2bua_outbound_transport_inherits_tcp_when_contact_omits_transport(self):
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media=None,
+            logger=server.SbcLogger(None),
+            default_payload=server.PCMU,
+            auth_realm="playsbc",
+            users={},
+            bridge_rooms=(),
+            b2bua_routes={},
+            route_policies=(),
+            b2bua_ladder_logs=False,
+        )
+        route = server.RouteResult(
+            target=server.SipUri("callee", "127.0.0.1", 25082, "tcp"),
+            policy_name="registered",
+            source="registrar",
+        )
+        flow = server.B2BUAFlowLog(None, "inbound-call", "callee", route, enabled=False)
+        call = server.B2BUACall(
+            inbound_call_id="inbound-call",
+            outbound_call_id="outbound-call",
+            outbound_target=route.target,
+            outbound_from_header="<sip:b2bua@127.0.0.1>",
+            target_user="callee",
+            route_policy="registered",
+            route_source="registrar",
+            flow_log=flow,
+        )
+
+        call.outbound_contact_uri = "sip:sipp-b@127.0.0.1:25082"
+        self.assertEqual(protocol.outbound_transport(call), "tcp")
+
+        call.outbound_contact_uri = "sip:sipp-b@127.0.0.1:25082;transport=udp"
+        self.assertEqual(protocol.outbound_transport(call), "udp")
+
     def test_register_expires_parsing_prefers_contact_parameter(self):
         self.assertEqual(server.parse_register_expires("300", "<sip:bob@127.0.0.1>;expires=60"), 60)
         self.assertEqual(server.parse_register_expires("120", "<sip:bob@127.0.0.1>"), 120)

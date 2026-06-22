@@ -58,7 +58,8 @@ class SippScenarioTests(unittest.TestCase):
     def test_register_contact_preserves_sip_transport(self):
         scenario_text = (ROOT / "sipp" / "scenarios" / "register_contact.xml").read_text(encoding="ISO-8859-1")
 
-        self.assertIn("Contact: <sip:[service]@[local_ip]:[local_port];transport=[transport]>", scenario_text)
+        self.assertIn("Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]", scenario_text)
+        self.assertIn("Contact: <sip:[service]@[local_ip]:[contact_port];transport=[transport]>", scenario_text)
 
     def test_build_command_enables_traces(self):
         command = run_sipp_regression.build_sipp_command("sipp", "options", "127.0.0.1", 15062, 10, 5)
@@ -228,8 +229,49 @@ class SippScenarioTests(unittest.TestCase):
         uas = run_b2bua_sipp_smoke.build_uas_command(args, "sipp")
 
         self.assertIn("-t", uac)
-        self.assertIn("t1", uac)
-        self.assertIn("t1", uas)
+        self.assertEqual(uac[uac.index("-t") + 1], "tn")
+        self.assertEqual(uac[uac.index("-p") + 1], "25081")
+        self.assertEqual(uas[uas.index("-t") + 1], "t1")
+        self.assertEqual(uas[uas.index("-p") + 1], "25082")
+
+    def test_b2bua_register_command_uses_tcp_client_mode_with_bind_and_contact_ports(self):
+        args = argparse_namespace(
+            host="127.0.0.1",
+            server_port=25062,
+            sip_transport="tcp",
+        )
+
+        command = run_b2bua_sipp_smoke.build_register_command(
+            args,
+            "sipp",
+            "tcp-b",
+            contact_port=25082,
+            local_port=25083,
+        )
+
+        self.assertEqual(command[command.index("-p") + 1], "25083")
+        self.assertEqual(command[command.index("-key") + 1 : command.index("-key") + 3], ["contact_port", "25082"])
+        self.assertIn("-t", command)
+        self.assertEqual(command[command.index("-t") + 1], "tn")
+
+    def test_b2bua_register_command_keeps_udp_bind_and_contact_ports(self):
+        args = argparse_namespace(
+            host="127.0.0.1",
+            server_port=25062,
+            sip_transport="udp",
+        )
+
+        command = run_b2bua_sipp_smoke.build_register_command(
+            args,
+            "sipp",
+            "udp-b",
+            contact_port=25082,
+            local_port=25083,
+        )
+
+        self.assertEqual(command[command.index("-p") + 1], "25083")
+        self.assertEqual(command[command.index("-key") + 1 : command.index("-key") + 3], ["contact_port", "25082"])
+        self.assertNotIn("-t", command)
 
     def test_b2bua_load_profiles_run_5cps_for_60_seconds(self):
         for profile in ("load-5cps-60s", "load-5cps-60s-rtpengine-transcoding"):

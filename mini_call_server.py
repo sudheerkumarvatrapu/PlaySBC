@@ -1804,7 +1804,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     def outbound_transport(self, b2bua_call: B2BUACall) -> str:
         if b2bua_call.outbound_contact_uri:
             try:
-                return parse_sip_uri(b2bua_call.outbound_contact_uri).transport
+                contact = parse_sip_uri(b2bua_call.outbound_contact_uri)
+                if ";transport=" in b2bua_call.outbound_contact_uri.lower() or contact.transport != "udp":
+                    return contact.transport
             except ValueError:
                 pass
         return b2bua_call.outbound_target.transport
