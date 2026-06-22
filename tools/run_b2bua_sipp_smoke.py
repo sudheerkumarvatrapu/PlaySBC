@@ -261,6 +261,7 @@ class PcapPacket:
     dst_ip: str
     dst_port: int
     payload: bytes
+    protocol: str = "udp"
 
 
 def make_run_id(prefix: str = "b2bua") -> str:
@@ -765,12 +766,52 @@ def ethernet_ipv4_udp_packet(packet: PcapPacket, packet_id: int) -> bytes:
     return ethernet_header + ip_header + udp_header + payload
 
 
+def tcp_checksum(src_ip: bytes, dst_ip: bytes, tcp_segment: bytes) -> int:
+    pseudo_header = src_ip + dst_ip + struct.pack("!BBH", 0, 6, len(tcp_segment))
+    return checksum(pseudo_header + tcp_segment)
+
+
+def ethernet_ipv4_tcp_packet(packet: PcapPacket, packet_id: int, seq: int, ack: int) -> bytes:
+    payload = packet.payload
+    src_ip = socket.inet_aton(packet.src_ip)
+    dst_ip = socket.inet_aton(packet.dst_ip)
+    tcp_offset_words = 5
+    tcp_flags = 0x18  # PSH + ACK; synthetic captures preserve payload timing, not handshake setup.
+    tcp_header = struct.pack(
+        "!HHIIBBHHH",
+        packet.src_port & 0xFFFF,
+        packet.dst_port & 0xFFFF,
+        seq & 0xFFFFFFFF,
+        ack & 0xFFFFFFFF,
+        tcp_offset_words << 4,
+        tcp_flags,
+        65535,
+        0,
+        0,
+    )
+    tcp_header = tcp_header[:16] + struct.pack("!H", tcp_checksum(src_ip, dst_ip, tcp_header + payload)) + tcp_header[18:]
+    total_length = 20 + len(tcp_header) + len(payload)
+    ip_header = struct.pack("!BBHHHBBH4s4s", 0x45, 0, total_length, packet_id & 0xFFFF, 0, 64, 6, 0, src_ip, dst_ip)
+    ip_header = ip_header[:10] + struct.pack("!H", checksum(ip_header)) + ip_header[12:]
+    ethernet_header = b"\x02\x00\x00\x00\x00\x02" + b"\x02\x00\x00\x00\x00\x01" + struct.pack("!H", 0x0800)
+    return ethernet_header + ip_header + tcp_header + payload
+
+
 def write_udp_pcap(path: Path, packets: List[PcapPacket]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    tcp_sequence_by_flow: dict[Tuple[str, int, str, int], int] = {}
     with path.open("wb") as fh:
         fh.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
         for index, packet in enumerate(sorted(packets, key=lambda item: item.timestamp), start=1):
-            frame = ethernet_ipv4_udp_packet(packet, index)
+            if packet.protocol.lower() == "tcp":
+                flow = (packet.src_ip, packet.src_port, packet.dst_ip, packet.dst_port)
+                reverse_flow = (packet.dst_ip, packet.dst_port, packet.src_ip, packet.src_port)
+                seq = tcp_sequence_by_flow.setdefault(flow, 1_000_000 + (len(tcp_sequence_by_flow) * 100_000))
+                ack = tcp_sequence_by_flow.get(reverse_flow, 1)
+                frame = ethernet_ipv4_tcp_packet(packet, index, seq, ack)
+                tcp_sequence_by_flow[flow] = seq + max(len(packet.payload), 1)
+            else:
+                frame = ethernet_ipv4_udp_packet(packet, index)
             timestamp_seconds = int(packet.timestamp)
             timestamp_microseconds = int((packet.timestamp - timestamp_seconds) * 1_000_000)
             fh.write(struct.pack("<IIII", timestamp_seconds, timestamp_microseconds, len(frame), len(frame)))
@@ -1003,10 +1044,10 @@ def parse_log_timestamp(line: str) -> float:
         return time.time()
 
 
-def sipp_trace_messages(path: Path) -> List[Tuple[float, str, bytes]]:
+def sipp_trace_protocol_messages(path: Path) -> List[Tuple[float, str, str, bytes]]:
     text = path.read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(
-        r"^-{10,}\s+([0-9T:.\-]+)\n(?:UDP|TCP) message (sent|received) \[(\d+)\] bytes:\n\n",
+        r"^-{10,}\s+([0-9T:.\-]+)\n(UDP|TCP) message (sent|received) \[(\d+)\] bytes:\n\n",
         re.MULTILINE,
     )
     matches = list(pattern.finditer(text))
@@ -1017,8 +1058,12 @@ def sipp_trace_messages(path: Path) -> List[Tuple[float, str, bytes]]:
         payload = normalize_sip_payload(text[payload_start:payload_end])
         if not payload:
             continue
-        messages.append((parse_iso_timestamp(match.group(1)), match.group(2), payload))
+        messages.append((parse_iso_timestamp(match.group(1)), match.group(2).lower(), match.group(3), payload))
     return messages
+
+
+def sipp_trace_messages(path: Path) -> List[Tuple[float, str, bytes]]:
+    return [(timestamp, direction, payload) for timestamp, _protocol, direction, payload in sipp_trace_protocol_messages(path)]
 
 
 def normalize_sip_payload(payload_text: str) -> bytes:
@@ -1253,7 +1298,7 @@ def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPac
             continue
         local_ip = pcap_leg_ip(args, leg)
         for trace in sorted((work_dir / leg).glob("*_messages.log")):
-            for timestamp, direction, payload in sipp_trace_messages(trace):
+            for timestamp, protocol, direction, payload in sipp_trace_protocol_messages(trace):
                 if direction == "sent":
                     src_port, dst_port = local_port, args.server_port
                     src_ip, dst_ip = local_ip, server_ip
@@ -1261,7 +1306,7 @@ def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPac
                     src_port, dst_port = args.server_port, local_port
                     src_ip, dst_ip = server_ip, local_ip
                 payload = rewrite_sip_payload_for_pcap(payload, args, src_port, dst_port, rtpengine_ports=rtpengine_ports)
-                packets.append(PcapPacket(timestamp, src_ip, src_port, dst_ip, dst_port, payload))
+                packets.append(PcapPacket(timestamp, src_ip, src_port, dst_ip, dst_port, payload, protocol=protocol))
     return packets
 
 
@@ -1279,6 +1324,7 @@ def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[Pcap
         path = log_dir / filename
         if not path.exists():
             continue
+        protocol = "tcp" if filename in {"log.tcp", "log.tls"} else "udp"
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             if "LOG START" in line or not line.strip():
                 continue
@@ -1298,7 +1344,7 @@ def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[Pcap
             else:
                 src_ip = dst_ip = server_ip
             payload = f"PlaySBC diagnostic event | {line}\n".encode("utf-8")
-            packets.append(PcapPacket(timestamp, src_ip, DIAGNOSTIC_PCAP_PORT, dst_ip, DIAGNOSTIC_PCAP_PORT, payload))
+            packets.append(PcapPacket(timestamp, src_ip, DIAGNOSTIC_PCAP_PORT, dst_ip, DIAGNOSTIC_PCAP_PORT, payload, protocol=protocol))
     return packets
 
 
@@ -1337,6 +1383,8 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
                 f"sip_packets={len(sip_packets)}",
                 f"rtp_packets={len(rtp_packets)}",
                 f"diagnostic_packets={len(diagnostic_packets)}",
+                f"udp_packets={sum(1 for packet in packets if packet.protocol.lower() == 'udp')}",
+                f"tcp_packets={sum(1 for packet in packets if packet.protocol.lower() == 'tcp')}",
                 f"topology={getattr(args, 'pcap_topology', BASE_DEFAULTS['pcap_topology'])}",
                 f"topology_uac_ip={uac_ip}",
                 f"topology_server_ip={server_ip}",

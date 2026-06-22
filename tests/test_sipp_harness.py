@@ -26,6 +26,14 @@ def read_udp_pcap_records(path: Path):
 
 
 def read_udp_pcap_flow_records(path: Path):
+    return [
+        (timestamp, src_ip, src_port, dst_ip, dst_port, payload)
+        for timestamp, protocol, src_ip, src_port, dst_ip, dst_port, payload in read_ip_pcap_flow_records(path)
+        if protocol == 17
+    ]
+
+
+def read_ip_pcap_flow_records(path: Path):
     data = path.read_bytes()
     packets = []
     offset = 24
@@ -34,12 +42,37 @@ def read_udp_pcap_flow_records(path: Path):
         offset += 16
         frame = data[offset : offset + included_length]
         offset += included_length
-        if len(frame) < 42:
+        if len(frame) < 34:
+            continue
+        ip_header_length = (frame[14] & 0x0F) * 4
+        ip_protocol = frame[23]
+        l4_offset = 14 + ip_header_length
+        if len(frame) < l4_offset + 4:
             continue
         src_ip = socket.inet_ntoa(frame[26:30])
         dst_ip = socket.inet_ntoa(frame[30:34])
-        src_port, dst_port, _udp_length, _checksum = struct.unpack("!HHHH", frame[34:42])
-        packets.append((ts_sec + (ts_usec / 1_000_000), src_ip, src_port, dst_ip, dst_port, frame[42:]))
+        src_port, dst_port = struct.unpack("!HH", frame[l4_offset : l4_offset + 4])
+        if ip_protocol == 6:
+            if len(frame) < l4_offset + 20:
+                continue
+            l4_header_length = ((frame[l4_offset + 12] >> 4) & 0x0F) * 4
+        elif ip_protocol == 17:
+            if len(frame) < l4_offset + 8:
+                continue
+            l4_header_length = 8
+        else:
+            continue
+        packets.append(
+            (
+                ts_sec + (ts_usec / 1_000_000),
+                ip_protocol,
+                src_ip,
+                src_port,
+                dst_ip,
+                dst_port,
+                frame[l4_offset + l4_header_length :],
+            )
+        )
     return packets
 
 
@@ -661,6 +694,93 @@ class SippScenarioTests(unittest.TestCase):
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("PCAP GENERATION", platform)
             self.assertIn("file=capture.pcap", platform)
+
+    def test_b2bua_tcp_pcap_generation_preserves_tcp_transport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "bundle"
+            work_dir = root / "work"
+            trace_dir = work_dir / "sipp-a-uac"
+            trace_dir.mkdir(parents=True)
+            (work_dir / "sipp-b-uas").mkdir()
+            (work_dir / "registration-callee").mkdir()
+            (work_dir / "registration-caller").mkdir()
+            trace_dir.joinpath("b2bua_uac_a_messages.log").write_text(
+                "\n".join(
+                    [
+                        "----------------------------------------------- 2026-06-22T10:00:00.100000",
+                        "TCP message sent [190] bytes:",
+                        "",
+                        "INVITE sip:tcp-b@127.0.0.1:25062 SIP/2.0",
+                        "Via: SIP/2.0/TCP 127.0.0.1:25081;branch=z9hG4bK-unit",
+                        "From: <sip:tcp-a@127.0.0.1:25081>;tag=1",
+                        "To: <sip:tcp-b@127.0.0.1:25062>",
+                        "Call-ID: unit-tcp@127.0.0.1",
+                        "CSeq: 1 INVITE",
+                        "Content-Length: 0",
+                        "",
+                        "----------------------------------------------- 2026-06-22T10:00:00.200000",
+                        "TCP message received [148] bytes:",
+                        "",
+                        "SIP/2.0 100 Trying",
+                        "Via: SIP/2.0/TCP 127.0.0.1:25081;branch=z9hG4bK-unit",
+                        "Call-ID: unit-tcp@127.0.0.1",
+                        "CSeq: 1 INVITE",
+                        "Content-Length: 0",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            run_b2bua_sipp_smoke.append_log_section(
+                log_dir,
+                "log.tcp",
+                "TCP RX",
+                "protocol=sip source=127.0.0.1:25081 bytes=190",
+            )
+            args = argparse_namespace(
+                dry_run=False,
+                profile="tcp-rtpengine-transcoding",
+                calls=1,
+                rate=1,
+                host="127.0.0.1",
+                server_port=25062,
+                server_rtp_min=25100,
+                uac_port=25081,
+                uas_port=25082,
+                sip_transport="tcp",
+                media_enabled=False,
+            )
+
+            created = run_b2bua_sipp_smoke.generate_pcap_artifacts(log_dir, work_dir, args)
+
+            self.assertEqual([path.name for path in created], ["capture.pcap"])
+            records = read_ip_pcap_flow_records(log_dir / "capture.pcap")
+            sip_records = [
+                (protocol, src_ip, src_port, dst_ip, dst_port, payload)
+                for _timestamp, protocol, src_ip, src_port, dst_ip, dst_port, payload in records
+                if payload.startswith((b"INVITE ", b"SIP/2.0 "))
+            ]
+            self.assertEqual({protocol for protocol, *_rest in sip_records}, {6})
+            self.assertIn((6, "10.10.10.10", 25081, "10.10.10.20", 25062), [record[:5] for record in sip_records])
+            self.assertIn((6, "10.10.10.20", 25062, "10.10.10.10", 25081), [record[:5] for record in sip_records])
+            self.assertFalse(
+                [
+                    payload
+                    for _timestamp, protocol, _src_ip, _src_port, _dst_ip, _dst_port, payload in records
+                    if protocol == 17 and payload.startswith((b"INVITE ", b"SIP/2.0 "))
+                ]
+            )
+            tcp_diagnostics = [
+                payload
+                for _timestamp, protocol, _src_ip, _src_port, _dst_ip, _dst_port, payload in records
+                if protocol == 6 and payload.startswith(b"PlaySBC diagnostic event")
+            ]
+            self.assertTrue(tcp_diagnostics)
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            self.assertIn("tcp_packets=4", platform)
+            self.assertIn("udp_packets=0", platform)
 
     def test_b2bua_pcap_generation_includes_rtp_for_media_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
