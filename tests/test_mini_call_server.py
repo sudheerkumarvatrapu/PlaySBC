@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -198,6 +199,52 @@ class ResponseTests(unittest.TestCase):
 
         self.assertTrue(protocol.make_via_header("tcp").startswith("SIP/2.0/TCP 127.0.0.1:25062;branch="))
         self.assertEqual(protocol.local_contact_uri("tcp"), "sip:b2bua@127.0.0.1:25062;transport=tcp")
+
+
+class RtpengineRetryTests(unittest.TestCase):
+    def make_flow_log(self):
+        route = server.RouteResult(
+            target=server.SipUri("callee", "127.0.0.1", 25082, "udp"),
+            policy_name="registered",
+            source="registrar",
+        )
+        return server.B2BUAFlowLog(None, "rtpengine-retry-call", "callee", route, enabled=False)
+
+    def test_retry_rtpengine_control_recovers_from_transient_timeout(self):
+        attempts = {"count": 0}
+
+        async def request():
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise asyncio.TimeoutError()
+            return {"result": "ok", "sdp": "v=0\r\n"}
+
+        result = asyncio.run(
+            server.retry_rtpengine_control("ANSWER", request, self.make_flow_log(), base_delay=0)
+        )
+
+        self.assertEqual(result["result"], "ok")
+        self.assertEqual(attempts["count"], 2)
+
+    def test_retry_rtpengine_control_raises_after_exhaustion(self):
+        attempts = {"count": 0}
+
+        async def request():
+            attempts["count"] += 1
+            raise asyncio.TimeoutError()
+
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(
+                server.retry_rtpengine_control(
+                    "OFFER",
+                    request,
+                    self.make_flow_log(),
+                    attempts=3,
+                    base_delay=0,
+                )
+            )
+
+        self.assertEqual(attempts["count"], 3)
 
 
 class DigestAuthTests(unittest.TestCase):

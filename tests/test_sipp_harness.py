@@ -317,6 +317,8 @@ class SippScenarioTests(unittest.TestCase):
                 self.assertEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES[profile]["rate"], 5)
                 self.assertEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES[profile]["hold_ms"], 60000)
         self.assertGreaterEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s"]["server_rtp_max"], 26500)
+        rtpengine_load = run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s-rtpengine-transcoding"]
+        self.assertEqual(rtpengine_load["rtpengine_timeout"], 8.0)
 
     def test_b2bua_sipp_commands_can_enable_g711_pcap_media(self):
         args = argparse_namespace(
@@ -1156,6 +1158,25 @@ class SippScenarioTests(unittest.TestCase):
             platform = (log_dir / "log.platform").read_text(encoding="utf-8")
             self.assertIn("media_backend=rtpengine", platform)
             self.assertIn("rtpengine_url=udp://127.0.0.1:2223", platform)
+
+    def test_b2bua_load_rtpengine_timeout_is_written_to_server_config(self):
+        rtpengine_load = run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s-rtpengine-transcoding"]
+        values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        values.update(
+            media_backend="rtpengine",
+            server_codec="PCMA",
+            rtpengine_timeout=rtpengine_load["rtpengine_timeout"],
+            ladder_enabled=False,
+        )
+        args = argparse_namespace(**values)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = run_b2bua_sipp_smoke.write_dynamic_config(args, tmp_path, tmp_path / "logs")
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(config["media_backend"], "rtpengine")
+        self.assertEqual(config["rtpengine_timeout"], 8.0)
 
     def test_b2bua_profiles_are_listed(self):
         completed = subprocess.run(

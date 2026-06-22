@@ -31,7 +31,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
@@ -532,6 +532,31 @@ class B2BUACall:
     outbound_bye_sent: bool = False
     outbound_cancel_sent: bool = False
     finalized: bool = False
+
+
+async def retry_rtpengine_control(
+    action: str,
+    request: Callable[[], Awaitable[Dict[str, Any]]],
+    flow_log: B2BUAFlowLog,
+    attempts: int = 3,
+    base_delay: float = 0.150,
+) -> Dict[str, Any]:
+    last_error: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await request()
+        except (asyncio.TimeoutError, OSError) as exc:
+            last_error = exc
+            detail = f"attempt={attempt}/{attempts} error={type(exc).__name__}"
+            if str(exc):
+                detail += f" detail={exc}"
+            if attempt >= attempts:
+                flow_log.write(f"RTPENGINE {action} RETRY EXHAUSTED", detail)
+                break
+            flow_log.write(f"RTPENGINE {action} RETRY", detail)
+            await asyncio.sleep(base_delay * attempt)
+    assert last_error is not None
+    raise last_error
 
 
 @dataclass
@@ -1546,11 +1571,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             ),
         )
         try:
-            offer_response = await self.rtpengine_client.offer(
-                call_id=inbound_call_id,
-                from_tag=from_tag,
-                sdp=message.body,
-                codec=codec_policy,
+            offer_response = await retry_rtpengine_control(
+                "OFFER",
+                lambda: self.rtpengine_client.offer(
+                    call_id=inbound_call_id,
+                    from_tag=from_tag,
+                    sdp=message.body,
+                    codec=codec_policy,
+                ),
+                flow_log,
             )
             outbound_body = str(offer_response.get("sdp") or "")
             if not outbound_body:
@@ -1624,12 +1653,16 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         to_tag = extract_header_tag(final_response.header("to")) or secrets.token_hex(6)
         b2bua_call.rtpengine_to_tag = to_tag
         try:
-            answer_response = await self.rtpengine_client.answer(
-                call_id=inbound_call_id,
-                from_tag=from_tag,
-                to_tag=to_tag,
-                sdp=final_response.body,
-                codec=codec_policy,
+            answer_response = await retry_rtpengine_control(
+                "ANSWER",
+                lambda: self.rtpengine_client.answer(
+                    call_id=inbound_call_id,
+                    from_tag=from_tag,
+                    to_tag=to_tag,
+                    sdp=final_response.body,
+                    codec=codec_policy,
+                ),
+                flow_log,
             )
             answer_sdp = str(answer_response.get("sdp") or "")
             if not answer_sdp:

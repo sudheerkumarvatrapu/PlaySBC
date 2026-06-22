@@ -219,6 +219,7 @@ B2BUA_PROFILES = {
         "media_driver": "sipp-pcap",
         "server_codec": "PCMA",
         "media_backend": "rtpengine",
+        "rtpengine_timeout": 8.0,
         "ladder": False,
     },
 }
