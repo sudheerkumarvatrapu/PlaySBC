@@ -18,28 +18,15 @@
   <img alt="RTPengine Preflight" src="https://img.shields.io/badge/-RTPengine%20Preflight-0F766E?style=for-the-badge">
 </p>
 
----
+PlaySBC is a Python SIP/RTP lab server for learning B2BUA routing, SIPp regression, G.711 media, transcoding, and RTPengine media anchoring.
 
-For the roadmap, see [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md). For local RTPengine setup, see [docs/RTPENGINE_LOCAL.md](docs/RTPENGINE_LOCAL.md).
+Roadmap: [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md)
 
-## Lab Focus
-
-| Area | Current focus |
-| --- | --- |
-| SIP signaling | Registrar-backed SIPp flows, B2BUA call setup, clear ladders |
-| RTP media | G.711u/G.711a PCAP replay, packet summaries, media logs |
-| Transcoding | Internal PCMU/PCMA checks and RTPengine-oriented profiles |
-| Regression | One-command local B2BUA regression with HTML pass/fail report |
-
-## Contributors
-
-- [Sudheer Kumar Vatrapu](https://github.com/sudheerkumarvatrapu) - Project owner and maintainer
-
-See [CONTRIBUTORS.md](CONTRIBUTORS.md).
+RTPengine setup: [docs/RTPENGINE_LOCAL.md](docs/RTPENGINE_LOCAL.md)
 
 ## Download
 
-macOS or Linux:
+macOS/Linux:
 
 ```bash
 git clone https://github.com/sudheerkumarvatrapu/PlaySBC.git
@@ -47,21 +34,13 @@ cd PlaySBC
 python3 --version
 ```
 
-Windows PowerShell:
-
-```powershell
-git clone https://github.com/sudheerkumarvatrapu/PlaySBC.git
-cd PlaySBC
-py -3 --version
-```
-
-For Windows SIPp regression, use WSL/Ubuntu:
+Windows: use WSL/Ubuntu for SIPp regression.
 
 ```powershell
 wsl --install -d Ubuntu
 ```
 
-Then inside Ubuntu:
+Inside Ubuntu:
 
 ```bash
 sudo apt update
@@ -70,7 +49,7 @@ git clone https://github.com/sudheerkumarvatrapu/PlaySBC.git
 cd PlaySBC
 ```
 
-## SIPp Setup
+## Dependencies
 
 macOS:
 
@@ -78,28 +57,22 @@ macOS:
 brew install sipp
 ```
 
-Ubuntu/Debian Linux:
+Ubuntu/Debian:
 
 ```bash
 sudo apt update
 sudo apt install -y sipp
 ```
 
-Windows:
-
-```text
-Use WSL/Ubuntu and install SIPp there.
-```
-
-Check SIPp:
+Check:
 
 ```bash
 sipp -v
 ```
 
-## Quick Local B2BUA Regression
+## Main Regression
 
-Recommended local RTPengine + B2BUA SIPp regression run:
+Start RTPengine first when running RTPengine profiles. See [docs/RTPENGINE_LOCAL.md](docs/RTPENGINE_LOCAL.md).
 
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
@@ -111,101 +84,66 @@ sudo -v
 env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 360
 ```
 
-What this does:
+Latest report:
 
-| Step | Behavior |
-| --- | --- |
-| Scope | Runs only B2BUA SIPp regression, not the old smoke suite |
-| Coverage | Runs all B2BUA profiles, including signalling, media, transcoding, registration, negative call, load, soak, RTPengine, and TCP RTPengine transcoding cases |
-| Media | Uses SIPp `play_pcap_audio` for media profiles |
-| Sudo | Prompts once with `sudo -v`, then keeps sudo alive for SIPp PCAP replay during longer runs |
-| Logs | Deletes old passed/blocked bundles; keeps failed bundles |
-| Report | Writes the latest HTML report to `logs/reports/latest.html` and prunes old report files |
+```text
+logs/reports/latest.html
+```
 
-Useful targeted commands:
+## Targeted Runs
 
 ```bash
 python3 tools/run_b2bua_sipp_smoke.py --list-profiles
 python3 tools/run_b2bua_sipp_smoke.py --profile basic-signalling
 python3 tools/run_b2bua_sipp_smoke.py --profile basic-media
 python3 tools/run_b2bua_sipp_smoke.py --profile transcoding
-python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine
-python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-media --sipp-pcap-sudo
 python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-transcoding --sipp-pcap-sudo
 python3 tools/run_b2bua_sipp_smoke.py --profile tcp-rtpengine-transcoding --sipp-pcap-sudo
 python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s
 ```
 
-The `load-5cps-60s` profiles generate 300 total calls at 5 cps, with 60 second call hold time.
+## Logs
 
-RTPengine-backed profiles are marked `BLOCKED` unless RTPengine NG control is reachable at `udp://127.0.0.1:2223`:
-
-```bash
-python3 tools/check_rtpengine.py --url udp://127.0.0.1:2223
-```
-
-## Local Logs
-
-Each B2BUA testcase gets one clean log bundle:
+Each B2BUA testcase writes one bundle:
 
 ```text
-logs/b2bua-Regression/<run-id-or-profile-run-id>/
+logs/b2bua-Regression/<run-id-or-profile>/
 ```
 
-Important files:
+Useful files:
 
 ```text
-capture.pcap
 log.sip
 log.media
 log.transcoding
 log.platform
-log.networking
-log.udp
-log.tcp
-log.tls
-log.call
 log.sipp
+capture.pcap
 ```
 
-Single-call profiles include SIP and registration ladders in `log.sip`. Non-load B2BUA profiles also generate one combined `capture.pcap` after the call completes, built from SIP traces, RTP media packets for media-enabled calls, and PlaySBC protocol logs. The PCAP uses a logical lab topology by default so Wireshark shows separate nodes for SIPp A (`10.10.10.10`), PlaySBC (`10.10.10.20`), SIPp B (`10.10.10.30`), and RTPengine (`10.10.10.40`) even when the local runtime binds to `127.0.0.1`. Use `--pcap-topology runtime` to preserve runtime loopback IPs, or override the display IPs with `--pcap-uac-ip`, `--pcap-server-ip`, `--pcap-uas-ip`, and `--pcap-rtpengine-ip`.
+Single-call profiles include SIP ladders and one combined `capture.pcap`. Load profiles skip ladders and PCAPs.
 
-Load profiles do not generate ladders or PCAP captures. SIPp output is consolidated in `log.sipp`; media and transcoding summaries are in `log.media` and `log.transcoding`. Regression reports are written to `logs/reports/`; each completed local run keeps only the latest run report files plus `logs/reports/latest.html`.
+## Manual SIPp
 
-## Manual SIPp Debug Commands
-
-For a direct SIPp UAC call into PlaySBC:
+Start PlaySBC:
 
 ```bash
 python3 mini_call_server.py --ip 127.0.0.1 --sip-port 5062 --rtp-min 10000 --rtp-max 10100 --debug
 ```
 
+Run a basic SIPp UAC:
+
 ```bash
 sipp 127.0.0.1:5062 -sn uac -s 1001 -m 1 -r 1 -trace_msg -trace_err
 ```
 
-For manual B2BUA scenario debugging, start SIPp B:
-
-```bash
-sipp -sf sipp/scenarios/b2bua_uas_b.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25082 -m 1 -trace_msg -trace_err -trace_logs -min_rtp_port 27000 -max_rtp_port 27200
-```
-
-Then start SIPp A toward a running PlaySBC B2BUA on port `25062`:
-
-```bash
-sipp 127.0.0.1:25062 -sf sipp/scenarios/b2bua_uac_a.xml -s alice -i 127.0.0.1 -mi 127.0.0.1 -p 25081 -m 1 -r 1 -d 1000 -trace_msg -trace_err -trace_logs -min_rtp_port 36000 -max_rtp_port 36200
-```
-
-For full B2BUA validation, prefer the quick regression command above because it starts the server, registers users, runs SIPp A/B, and collects the log bundle automatically.
-
-For a TCP listener/client smoke path, start PlaySBC with TCP:
+For TCP:
 
 ```bash
 python3 mini_call_server.py --ip 127.0.0.1 --sip-port 5062 --sip-transport tcp --rtp-min 10000 --rtp-max 10100 --debug
-```
-
-Then add `-t t1` to SIPp:
-
-```bash
 sipp 127.0.0.1:5062 -sn uac -s 1001 -m 1 -r 1 -t t1 -trace_msg -trace_err
 ```
+
+## Contributor
+
+- [Sudheer Kumar Vatrapu](https://github.com/sudheerkumarvatrapu)
