@@ -167,7 +167,7 @@ log.call
 log.sipp
 ```
 
-Single-call profiles include SIP and registration ladders in `log.sip`. Non-load B2BUA profiles also generate one combined `capture.pcap` after the call completes, built from SIP traces, RTP media packets for media-enabled calls, and PlaySBC protocol logs. The PCAP uses a logical lab topology by default so Wireshark shows separate nodes for SIPp A (`10.10.10.10`), PlaySBC (`10.10.10.20`), and SIPp B (`10.10.10.30`) even when the local runtime binds to `127.0.0.1`. Use `--pcap-topology runtime` to preserve runtime loopback IPs, or override the display IPs with `--pcap-uac-ip`, `--pcap-server-ip`, and `--pcap-uas-ip`.
+Single-call profiles include SIP and registration ladders in `log.sip`. Non-load B2BUA profiles also generate one combined `capture.pcap` after the call completes, built from SIP traces, RTP media packets for media-enabled calls, and PlaySBC protocol logs. The PCAP uses a logical lab topology by default so Wireshark shows separate nodes for SIPp A (`10.10.10.10`), PlaySBC (`10.10.10.20`), SIPp B (`10.10.10.30`), and RTPengine (`10.10.10.40`) even when the local runtime binds to `127.0.0.1`. Use `--pcap-topology runtime` to preserve runtime loopback IPs, or override the display IPs with `--pcap-uac-ip`, `--pcap-server-ip`, `--pcap-uas-ip`, and `--pcap-rtpengine-ip`.
 
 Load profiles do not generate ladders or PCAP captures. SIPp output is consolidated in `log.sipp`; media and transcoding summaries are in `log.media` and `log.transcoding`. Regression reports are written to `logs/reports/`; each completed local run keeps only the latest run report files plus `logs/reports/latest.html`.
 
@@ -196,3 +196,15 @@ sipp 127.0.0.1:25062 -sf sipp/scenarios/b2bua_uac_a.xml -s alice -i 127.0.0.1 -m
 ```
 
 For full B2BUA validation, prefer the quick regression command above because it starts the server, registers users, runs SIPp A/B, and collects the log bundle automatically.
+
+For a TCP listener/client smoke path, start PlaySBC with TCP:
+
+```bash
+python3 mini_call_server.py --ip 127.0.0.1 --sip-port 5062 --sip-transport tcp --rtp-min 10000 --rtp-max 10100 --debug
+```
+
+Then add `-t t1` to SIPp:
+
+```bash
+sipp 127.0.0.1:5062 -sn uac -s 1001 -m 1 -r 1 -t t1 -trace_msg -trace_err
+```

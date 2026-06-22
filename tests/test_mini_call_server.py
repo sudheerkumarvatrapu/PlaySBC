@@ -40,9 +40,21 @@ class SipParsingTests(unittest.TestCase):
         explicit = server.parse_sip_uri("<sip:1002@127.0.0.1:25082>")
         self.assertEqual(explicit.user, "1002")
         self.assertEqual(explicit.address, ("127.0.0.1", 25082))
+        self.assertEqual(explicit.transport, "udp")
 
         default = server.parse_sip_uri("sip:1003@example.test")
         self.assertEqual(default.address, ("example.test", 5060))
+
+    def test_parse_sip_uri_preserves_transport_parameter(self):
+        uri = server.parse_sip_uri("<sip:1002@127.0.0.1:25082;transport=tcp>")
+
+        self.assertEqual(uri.address, ("127.0.0.1", 25082))
+        self.assertEqual(uri.transport, "tcp")
+        self.assertEqual(uri.uri, "sip:1002@127.0.0.1:25082;transport=tcp")
+        self.assertEqual(
+            server.extract_sip_uri("<sip:1002@127.0.0.1:25082;transport=tcp>;expires=300"),
+            "sip:1002@127.0.0.1:25082;transport=tcp",
+        )
 
     def test_register_expires_parsing_prefers_contact_parameter(self):
         self.assertEqual(server.parse_register_expires("300", "<sip:bob@127.0.0.1>;expires=60"), 60)
@@ -67,6 +79,20 @@ class CodecTests(unittest.TestCase):
 
     def test_choose_payload_falls_back_to_remote_supported_codec(self):
         self.assertEqual(server.choose_payload((0,), server.PCMA), server.PCMU)
+
+    def test_internal_b2bua_transcoding_offer_uses_b_leg_codec_only(self):
+        payloads = server.b2bua_outbound_offer_payloads((server.PCMU, 101), server.PCMU, server.PCMA)
+        sdp = server.make_sdp("127.0.0.1", 25102, server.PCMA, dtmf_payload_type=101, payloads=payloads)
+
+        self.assertEqual(payloads, (server.PCMA,))
+        self.assertIn("m=audio 25102 RTP/AVP 8 101", sdp)
+        self.assertIn("a=rtpmap:8 PCMA/8000", sdp)
+        self.assertNotIn("a=rtpmap:0 PCMU/8000", sdp)
+
+    def test_internal_b2bua_same_codec_offer_keeps_original_payloads(self):
+        payloads = server.b2bua_outbound_offer_payloads((server.PCMU, server.PCMA, 101), server.PCMU, server.PCMU)
+
+        self.assertEqual(payloads, (server.PCMU, server.PCMA, 101))
 
 
 class ResponseTests(unittest.TestCase):
@@ -114,6 +140,27 @@ class ResponseTests(unittest.TestCase):
         packet = transport.sent[0][0].decode("utf-8")
         self.assertIn("To: <sip:bob@127.0.0.1:25062>\r\n", packet)
         self.assertNotIn("To: <sip:bob@127.0.0.1:25062>;tag=", packet)
+
+    def test_tcp_via_and_contact_include_transport_parameter(self):
+        logger = server.SbcLogger(None)
+        media = server.MediaServer("127.0.0.1", 12000, 12010, None, logger)
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media,
+            logger,
+            server.PCMU,
+            "playsbc",
+            {},
+            (),
+            {},
+            (),
+            False,
+            sip_transport="tcp",
+        )
+
+        self.assertTrue(protocol.make_via_header("tcp").startswith("SIP/2.0/TCP 127.0.0.1:25062;branch="))
+        self.assertEqual(protocol.local_contact_uri("tcp"), "sip:b2bua@127.0.0.1:25062;transport=tcp")
 
 
 class DigestAuthTests(unittest.TestCase):

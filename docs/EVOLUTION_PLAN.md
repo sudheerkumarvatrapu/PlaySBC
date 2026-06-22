@@ -8,7 +8,7 @@ Current validated baseline: the B2BUA SIPp regression is green for signalling, G
 
 Implemented:
 
-- SIP over UDP for `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
+- SIP over UDP and TCP for `REGISTER`, `OPTIONS`, `INVITE`, `ACK`, and `BYE`
 - Optional SIP digest authentication for `REGISTER`
 - Initial PCMU/PCMA RTP echo, relay, and basic transcoding scaffolding
 - RFC 2833 DTMF detection
@@ -16,12 +16,13 @@ Implemented:
 - RTP metrics: packet loss, jitter, out-of-order, late packets, silence, clock drift, MOS-style score
 - Registrar-backed B2BUA routing
 - Route policies and static fallback routes
+- Internal B2BUA transcoding offer/answer hygiene: A leg and B leg can negotiate different G.711 codecs cleanly
 - SIPp UAC/UAS scripts for B2BUA calls
 - 5 cps SIPp load shape with 300 total calls and 60 second CHT
 - 60 second G.711u/G.711a media replay profiles through the B2BUA path
 - SBC-style category logs: `log.sip`, `log.media`, `log.transcoding`, `log.platform`, `log.networking`, `log.call`, `log.sipp`, and transport logs such as `log.udp`
 - Single combined `capture.pcap` generated after non-load B2BUA calls from SIP traces, RTP media packets, and PlaySBC protocol logs
-- Logical PCAP topology view for local B2BUA runs: SIPp A, PlaySBC, and SIPp B can appear as separate IPs while runtime remains on loopback
+- Logical PCAP topology view for local B2BUA runs: SIPp A, PlaySBC, SIPp B, and RTPengine can appear as separate IPs while runtime remains on loopback
 - Per-testcase B2BUA SIPp log bundles with no separate saved SIPp A/B leg folders
 - Named B2BUA SIPp profiles for signalling, media, transcoding, RTPengine signalling, RTPengine G.711 media, RTPengine transcoding, registered inbound/outbound, negative call handling, small load, soak, and 5 cps / 60 second CHT load
 - SIPp XML regression coverage for `OPTIONS`, digest registration success/failure, basic B2BUA calls, media calls, transcoding calls, registered inbound/outbound, invalid `BYE`, unknown route, failed outbound leg, `CANCEL`, and INVITE retransmission behavior
@@ -30,6 +31,7 @@ Implemented:
 - Local Sipwise RTPengine Docker runbook with a load-sized RTP port range
 - RTPengine media observations from query totals, including RTP packet, byte, and error counters
 - RTPengine-backed load validation: 300 total calls at 5 cps / 60 second CHT with RTPengine media anchored and `0` RTP errors
+- RTPengine logical PCAP view uses a distinct media-anchor IP for SDP and RTP flows
 - Persistent project logs only for B2BUA SIPp call runs by default
 - Unit tests and SIPp regression harness
 
@@ -59,7 +61,6 @@ RTPengine = RTP anchoring, SDP rewrite, media relay, DTMF/media controls, transc
 
 Future RTPengine work:
 
-- Add a separate logical RTPengine IP in generated PCAPs, so signalling can show PlaySBC as `10.10.10.20` and media can show RTPengine as a separate media anchor
 - Add real multi-IP local topology mode for SIPp A, PlaySBC, RTPengine, and SIPp B
 - Add Docker Compose for one-command local RTPengine startup
 - Add RTPengine port-pool and active-session health checks before load runs

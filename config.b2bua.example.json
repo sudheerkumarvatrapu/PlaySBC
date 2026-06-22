@@ -1,6 +1,7 @@
 {
   "sip_ip": "127.0.0.1",
   "sip_port": 25062,
+  "sip_transport": "udp",
   "rtp_min": 25100,
   "rtp_max": 25140,
   "default_codec": "PCMU",

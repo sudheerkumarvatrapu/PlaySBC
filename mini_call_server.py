@@ -63,6 +63,7 @@ CODEC_PAYLOADS = {
 class ServerConfig:
     sip_ip: str = "0.0.0.0"
     sip_port: int = 5060
+    sip_transport: str = "udp"
     rtp_min: int = 10000
     rtp_max: int = 10100
     log_dir: str = ""
@@ -87,6 +88,7 @@ class ServerConfig:
 SERVER_CONFIG_KEYS = {
     "sip_ip",
     "sip_port",
+    "sip_transport",
     "rtp_min",
     "rtp_max",
     "log_dir",
@@ -105,6 +107,7 @@ SERVER_CONFIG_KEYS = {
 }
 
 MEDIA_BACKENDS = {"internal", "rtpengine"}
+SIP_TRANSPORTS = {"udp", "tcp"}
 
 DTMF_EVENTS = {
     0: "0",
@@ -132,6 +135,8 @@ class SipMessage:
     headers: Dict[str, str]
     body: str
     source: Tuple[str, int]
+    transport: str = "udp"
+    connection: Any = None
 
     @property
     def method(self) -> str:
@@ -164,10 +169,14 @@ class SipUri:
     user: str
     host: str
     port: int = 5060
+    transport: str = "udp"
 
     @property
     def uri(self) -> str:
-        return f"sip:{self.user}@{self.host}:{self.port}"
+        uri = f"sip:{self.user}@{self.host}:{self.port}"
+        if self.transport.lower() != "udp":
+            uri += f";transport={self.transport.lower()}"
+        return uri
 
     @property
     def address(self) -> Tuple[str, int]:
@@ -320,6 +329,9 @@ class SbcLogger:
 
     def udp(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
         self.write("udp", event, detail, call_id=call_id, leg=leg)
+
+    def tcp(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("tcp", event, detail, call_id=call_id, leg=leg)
 
     def write_block(self, category: str, title: str, block: str, call_id: str = "") -> None:
         if not self.enabled:
@@ -911,6 +923,60 @@ class MediaServer:
         return True
 
 
+class SipTcpConnectionProtocol(asyncio.Protocol):
+    def __init__(self, server: "SipServerProtocol"):
+        self.server = server
+        self.transport: Optional[asyncio.Transport] = None
+        self.peer: Tuple[str, int] = ("0.0.0.0", 0)
+        self.buffer = bytearray()
+        self.closed = False
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = transport  # type: ignore[assignment]
+        peer = transport.get_extra_info("peername")
+        if isinstance(peer, tuple) and len(peer) >= 2:
+            self.peer = (str(peer[0]), int(peer[1]))
+        self.server.register_tcp_connection(self.peer, self)
+        self.server.logger.tcp("TCP CONNECTED", f"protocol=sip peer={self.peer[0]}:{self.peer[1]}")
+
+    def data_received(self, data: bytes) -> None:
+        self.buffer.extend(data)
+        self.server.logger.tcp("TCP RX BYTES", f"protocol=sip source={self.peer[0]}:{self.peer[1]} bytes={len(data)}")
+        for message in self._pop_complete_messages():
+            self.server.receive_sip_data(message, self.peer, transport_name="tcp", connection=self)
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        self.closed = True
+        self.server.unregister_tcp_connection(self.peer, self)
+        detail = f"protocol=sip peer={self.peer[0]}:{self.peer[1]}"
+        if exc:
+            detail += f" error={exc}"
+        self.server.logger.tcp("TCP DISCONNECTED", detail)
+
+    def send(self, packet: bytes) -> None:
+        if not self.transport or self.closed:
+            raise ConnectionError(f"TCP connection to {self.peer[0]}:{self.peer[1]} is closed")
+        self.transport.write(packet)
+
+    def _pop_complete_messages(self) -> List[bytes]:
+        messages: List[bytes] = []
+        separator = b"\r\n\r\n"
+        while True:
+            header_end = self.buffer.find(separator)
+            if header_end < 0:
+                break
+
+            header_bytes = bytes(self.buffer[:header_end])
+            content_length = tcp_content_length(header_bytes)
+            message_end = header_end + len(separator) + content_length
+            if len(self.buffer) < message_end:
+                break
+
+            messages.append(bytes(self.buffer[:message_end]))
+            del self.buffer[:message_end]
+        return messages
+
+
 class SipServerProtocol(asyncio.DatagramProtocol):
     def __init__(
         self,
@@ -928,9 +994,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         media_backend: str = "internal",
         rtpengine_client: Optional[RtpengineClient] = None,
         reject_unknown_routes: bool = False,
+        sip_transport: str = "udp",
     ):
         self.local_ip = local_ip
         self.local_port = local_port
+        self.sip_transport = sip_transport
         self.media = media
         self.logger = logger
         self.default_payload = default_payload
@@ -951,6 +1019,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.pending_outbound_responses: Dict[str, asyncio.Queue] = {}
         self.b2bua_calls_by_inbound: Dict[str, B2BUACall] = {}
         self.b2bua_calls_by_outbound: Dict[str, B2BUACall] = {}
+        self.tcp_connections: Dict[Tuple[str, int], SipTcpConnectionProtocol] = {}
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -958,21 +1027,42 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.logger.platform("SIP SERVER STARTED", f"transport=udp local={self.local_ip}:{self.local_port}")
         self.logger.udp("UDP LISTENING", f"protocol=sip local={self.local_ip}:{self.local_port}")
 
+    def tcp_server_started(self) -> None:
+        logging.info("SIP listening on tcp:%s:%s", self.local_ip, self.local_port)
+        self.logger.platform("SIP SERVER STARTED", f"transport=tcp local={self.local_ip}:{self.local_port}")
+        self.logger.tcp("TCP LISTENING", f"protocol=sip local={self.local_ip}:{self.local_port}")
+
+    def register_tcp_connection(self, peer: Tuple[str, int], connection: SipTcpConnectionProtocol) -> None:
+        self.tcp_connections[peer] = connection
+
+    def unregister_tcp_connection(self, peer: Tuple[str, int], connection: SipTcpConnectionProtocol) -> None:
+        if self.tcp_connections.get(peer) is connection:
+            self.tcp_connections.pop(peer, None)
+
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
+        self.receive_sip_data(data, addr, transport_name="udp")
+
+    def receive_sip_data(
+        self,
+        data: bytes,
+        addr: Tuple[str, int],
+        transport_name: str = "udp",
+        connection: Optional[SipTcpConnectionProtocol] = None,
+    ) -> None:
         try:
             text = data.decode("utf-8", errors="replace")
-            message = parse_sip_message(text, addr)
+            message = parse_sip_message(text, addr, transport_name=transport_name, connection=connection)
         except Exception:
-            logging.exception("Could not parse SIP message from %s:%s", *addr)
-            self.logger.networking("SIP PARSE FAILED", f"source={addr[0]}:{addr[1]} bytes={len(data)}")
+            logging.exception("Could not parse SIP message from %s:%s over %s", addr[0], addr[1], transport_name)
+            self.logger.networking("SIP PARSE FAILED", f"transport={transport_name} source={addr[0]}:{addr[1]} bytes={len(data)}")
             return
 
-        self.logger.udp("UDP RX", f"protocol=sip source={addr[0]}:{addr[1]} bytes={len(data)}")
+        self.logger.write(transport_name, f"{transport_name.upper()} RX", f"protocol=sip source={addr[0]}:{addr[1]} bytes={len(data)}")
         if message.is_response:
             logging.info("SIP response %s from %s:%s", message.status_code, *addr)
             self.logger.sip(
                 "SIP RX RESPONSE",
-                f"status={message.status_code} reason={message.reason_phrase} source={addr[0]}:{addr[1]} cseq={message.header('cseq')}",
+                f"transport={transport_name} status={message.status_code} reason={message.reason_phrase} source={addr[0]}:{addr[1]} cseq={message.header('cseq')}",
                 call_id=message.header("call-id"),
             )
             self.handle_response(message)
@@ -981,7 +1071,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         logging.info("SIP %s from %s:%s", message.method, *addr)
         self.logger.sip(
             "SIP RX REQUEST",
-            f"method={message.method} source={addr[0]}:{addr[1]} target={message.start_line} cseq={message.header('cseq')}",
+            f"transport={transport_name} method={message.method} source={addr[0]}:{addr[1]} target={message.start_line} cseq={message.header('cseq')}",
             call_id=message.header("call-id"),
         )
         asyncio.create_task(self.handle_message(message))
@@ -1011,7 +1101,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     async def handle_message(self, message: SipMessage) -> None:
         method = message.method
 
-        if method != "ACK":
+        if message.transport == "udp" and method != "ACK":
             _, duplicate = self.transactions.receive_request(
                 method,
                 message.header("via"),
@@ -1197,7 +1287,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 except DialogError as exc:
                     logging.info("Ignored invalid ACK for %s: %s", call_id, exc)
                     return
-                self.transactions.acknowledge_invite(call_id, message.header("cseq"))
+                if message.transport == "udp":
+                    self.transactions.acknowledge_invite(call_id, message.header("cseq"))
                 if session:
                     session.mark_ack()
                     session.log("DIALOG STATE", f"state={dialog.state.name} acknowledged=true")
@@ -1283,7 +1374,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
 
         inbound_payload = choose_payload(remote_payloads, PCMU)
-        outbound_payload = preferred_payload
+        outbound_payload = self.default_payload if self.default_payload in SUPPORTED_CODECS else preferred_payload
+        outbound_offer_payloads = b2bua_outbound_offer_payloads(remote_payloads, inbound_payload, outbound_payload)
         inbound_rtp = await self.media.create_session(
             inbound_call_id,
             inbound_payload,
@@ -1301,7 +1393,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         outbound_rtp = await self.media.create_session(
             outbound_call_id,
             outbound_payload,
-            remote_payloads,
+            outbound_offer_payloads,
             dtmf_payload_type,
             media_mode="b2bua",
             leg_label="outbound",
@@ -1336,7 +1428,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             outbound_rtp.local_port,
             outbound_payload,
             dtmf_payload_type=dtmf_payload_type,
-            payloads=remote_payloads,
+            payloads=outbound_offer_payloads,
         )
         self.send_outbound_invite(b2bua_call, outbound_body)
 
@@ -1606,7 +1698,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return response
 
     def send_outbound_invite(self, b2bua_call: B2BUACall, body: str) -> None:
-        via_header = self.make_via_header()
+        transport_name = b2bua_call.outbound_target.transport
+        via_header = self.make_via_header(transport_name)
         b2bua_call.outbound_invite_via_header = via_header
         headers = {
             "Via": via_header,
@@ -1614,13 +1707,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "To": f"<{b2bua_call.outbound_target.uri}>",
             "Call-ID": b2bua_call.outbound_call_id,
             "CSeq": f"{b2bua_call.outbound_cseq} INVITE",
-            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
             "Subject": f"B2BUA outbound leg for {b2bua_call.inbound_call_id}",
             "Content-Type": "application/sdp",
         }
         packet = build_sip_request("INVITE", b2bua_call.outbound_target.uri, headers, body)
-        self._send_packet(packet, b2bua_call.outbound_target.address)
+        self._send_packet(packet, b2bua_call.outbound_target.address, transport_name=transport_name)
         b2bua_call.flow_log.sip(
             "B2BUA",
             "SIPp B",
@@ -1633,19 +1726,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     def send_outbound_ack(self, b2bua_call: B2BUACall, invite_transaction: bool = False) -> None:
         request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
-        via_header = b2bua_call.outbound_invite_via_header if invite_transaction else self.make_via_header()
+        transport_name = self.outbound_transport(b2bua_call)
+        via_header = b2bua_call.outbound_invite_via_header if invite_transaction else self.make_via_header(transport_name)
         headers = {
             "Via": via_header,
             "From": b2bua_call.outbound_from_header,
             "To": b2bua_call.outbound_to_header,
             "Call-ID": b2bua_call.outbound_call_id,
             "CSeq": f"{b2bua_call.outbound_cseq} ACK",
-            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
         self._send_packet(
             build_sip_request("ACK", request_uri, headers),
             self.outbound_destination(b2bua_call),
+            transport_name=transport_name,
         )
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "ACK")
         session = self.media.get_session(b2bua_call.outbound_call_id)
@@ -1656,19 +1751,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     def send_outbound_cancel(self, b2bua_call: B2BUACall) -> None:
         request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
         b2bua_call.outbound_cancel_sent = True
-        via_header = b2bua_call.outbound_invite_via_header or self.make_via_header()
+        transport_name = self.outbound_transport(b2bua_call)
+        via_header = b2bua_call.outbound_invite_via_header or self.make_via_header(transport_name)
         headers = {
             "Via": via_header,
             "From": b2bua_call.outbound_from_header,
             "To": b2bua_call.outbound_to_header or f"<{b2bua_call.outbound_target.uri}>",
             "Call-ID": b2bua_call.outbound_call_id,
             "CSeq": f"{b2bua_call.outbound_cseq} CANCEL",
-            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
         self._send_packet(
             build_sip_request("CANCEL", request_uri, headers),
             self.outbound_destination(b2bua_call),
+            transport_name=transport_name,
         )
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "CANCEL")
 
@@ -1676,18 +1773,20 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
         b2bua_call.outbound_cseq += 1
         b2bua_call.outbound_bye_sent = True
+        transport_name = self.outbound_transport(b2bua_call)
         headers = {
-            "Via": self.make_via_header(),
+            "Via": self.make_via_header(transport_name),
             "From": b2bua_call.outbound_from_header,
             "To": b2bua_call.outbound_to_header,
             "Call-ID": b2bua_call.outbound_call_id,
             "CSeq": f"{b2bua_call.outbound_cseq} BYE",
-            "Contact": f"<sip:b2bua@{self.local_ip}:{self.local_port}>",
+            "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
         self._send_packet(
             build_sip_request("BYE", request_uri, headers),
             self.outbound_destination(b2bua_call),
+            transport_name=transport_name,
         )
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "BYE")
         session = self.media.get_session(b2bua_call.outbound_call_id)
@@ -1701,6 +1800,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             except ValueError:
                 pass
         return b2bua_call.outbound_target.address
+
+    def outbound_transport(self, b2bua_call: B2BUACall) -> str:
+        if b2bua_call.outbound_contact_uri:
+            try:
+                return parse_sip_uri(b2bua_call.outbound_contact_uri).transport
+            except ValueError:
+                pass
+        return b2bua_call.outbound_target.transport
 
     def cleanup_b2bua_call(self, b2bua_call: B2BUACall) -> None:
         self.finalize_b2bua_call(b2bua_call, "cleanup")
@@ -1783,8 +1890,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.registrations.pop(user, None)
             logging.info("Expired registration for %s", user)
 
-    def make_via_header(self) -> str:
-        return f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK-{secrets.token_hex(8)}"
+    def make_via_header(self, transport_name: str = "udp") -> str:
+        return f"SIP/2.0/{normalize_sip_transport(transport_name).upper()} {self.local_ip}:{self.local_port};branch=z9hG4bK-{secrets.token_hex(8)}"
+
+    def local_contact_uri(self, transport_name: str = "udp") -> str:
+        return SipUri("b2bua", self.local_ip, self.local_port, normalize_sip_transport(transport_name)).uri
 
     def authenticate_register(self, message: SipMessage, user: str) -> str:
         if not self.users:
@@ -1833,9 +1943,6 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         extra_headers: Optional[Dict[str, str]] = None,
         to_header: Optional[str] = None,
     ) -> None:
-        if not self.transport:
-            return
-
         headers = {
             "Via": request.header("via"),
             "From": request.header("from"),
@@ -1853,30 +1960,70 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         packet = (CRLF.join(lines) + CRLF + CRLF + body).encode("utf-8")
         self.logger.sip(
             "SIP TX RESPONSE",
-            f"status={status} reason={reason} destination={request.source[0]}:{request.source[1]} cseq={request.header('cseq')}",
+            f"transport={request.transport} status={status} reason={reason} destination={request.source[0]}:{request.source[1]} cseq={request.header('cseq')}",
             call_id=request.header("call-id"),
         )
-        self._send_packet(packet, request.source)
-        self.transactions.cache_response(
-            request.method,
-            request.header("via"),
-            request.header("cseq"),
-            request.header("call-id"),
-            packet,
-            request.source,
-            status,
-        )
+        self._send_packet(packet, request.source, transport_name=request.transport, connection=request.connection)
+        if request.transport == "udp":
+            self.transactions.cache_response(
+                request.method,
+                request.header("via"),
+                request.header("cseq"),
+                request.header("call-id"),
+                packet,
+                request.source,
+                status,
+            )
 
-    def _send_packet(self, packet: bytes, destination: Tuple[str, int]) -> None:
+    def _send_packet(
+        self,
+        packet: bytes,
+        destination: Tuple[str, int],
+        transport_name: str = "udp",
+        connection: Optional[SipTcpConnectionProtocol] = None,
+    ) -> None:
+        transport_name = normalize_sip_transport(transport_name)
+        if transport_name == "tcp":
+            if connection:
+                try:
+                    connection.send(packet)
+                    self.logger.tcp("TCP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
+                    return
+                except ConnectionError as exc:
+                    self.logger.networking("TCP TX FAILED", f"destination={destination[0]}:{destination[1]} error={exc}")
+            asyncio.create_task(self._send_tcp_packet(packet, destination))
+            return
+
         if self.transport:
             self.logger.udp("UDP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
             self.transport.sendto(packet, destination)
+
+    async def _send_tcp_packet(self, packet: bytes, destination: Tuple[str, int]) -> None:
+        connection = self.tcp_connections.get(destination)
+        try:
+            if not connection or connection.closed:
+                loop = asyncio.get_running_loop()
+                _transport, protocol = await loop.create_connection(
+                    lambda: SipTcpConnectionProtocol(self),
+                    destination[0],
+                    destination[1],
+                )
+                connection = protocol  # type: ignore[assignment]
+            connection.send(packet)
+            self.logger.tcp("TCP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
+        except (OSError, ConnectionError) as exc:
+            self.logger.networking("TCP TX FAILED", f"destination={destination[0]}:{destination[1]} error={exc}")
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.transactions.close()
 
 
-def parse_sip_message(text: str, source: Tuple[str, int]) -> SipMessage:
+def parse_sip_message(
+    text: str,
+    source: Tuple[str, int],
+    transport_name: str = "udp",
+    connection: Optional[SipTcpConnectionProtocol] = None,
+) -> SipMessage:
     head, _, body = text.partition(CRLF + CRLF)
     lines = head.splitlines()
     start_line = lines[0].strip()
@@ -1892,7 +2039,14 @@ def parse_sip_message(text: str, source: Tuple[str, int]) -> SipMessage:
         current_name = normalize_header_name(name.strip())
         headers[current_name] = value.strip()
 
-    return SipMessage(start_line=start_line, headers=headers, body=body, source=source)
+    return SipMessage(
+        start_line=start_line,
+        headers=headers,
+        body=body,
+        source=source,
+        transport=normalize_sip_transport(transport_name),
+        connection=connection,
+    )
 
 
 def normalize_header_name(name: str) -> str:
@@ -1935,19 +2089,55 @@ def parse_cseq_method(cseq_header: str) -> str:
 
 
 def extract_sip_uri(value: str) -> str:
-    match = re.search(r"sip:[^;>\s]+", value, re.IGNORECASE)
+    bracketed = re.search(r"<\s*(sip:[^>\s]+)\s*>", value, re.IGNORECASE)
+    if bracketed:
+        return bracketed.group(1)
+    match = re.search(r"sip:[^,>\s]+", value, re.IGNORECASE)
     return match.group(0) if match else ""
 
 
 def parse_sip_uri(value: str) -> SipUri:
-    match = re.search(r"sip:([^@;>\s]+)@([^;:>\s]+)(?::(\d+))?", value, re.IGNORECASE)
+    match = re.search(r"sip:([^@;>\s]+)@([^;:>\s]+)(?::(\d+))?((?:;[^>\s,]+)*)", value, re.IGNORECASE)
     if not match:
         raise ValueError(f"Invalid SIP URI {value!r}")
 
     port = int(match.group(3)) if match.group(3) else 5060
     if port <= 0 or port > 65535:
         raise ValueError(f"Invalid SIP URI port {port}")
-    return SipUri(user=match.group(1), host=match.group(2), port=port)
+    params = parse_uri_params(match.group(4) or "")
+    transport = normalize_sip_transport(params.get("transport", "udp"))
+    return SipUri(user=match.group(1), host=match.group(2), port=port, transport=transport)
+
+
+def parse_uri_params(value: str) -> Dict[str, str]:
+    params: Dict[str, str] = {}
+    for raw_param in value.split(";"):
+        if not raw_param:
+            continue
+        key, _, raw_value = raw_param.partition("=")
+        params[key.strip().lower()] = raw_value.strip()
+    return params
+
+
+def normalize_sip_transport(value: str) -> str:
+    transport = (value or "udp").strip().lower()
+    if transport not in SIP_TRANSPORTS:
+        raise ValueError(f"Unsupported SIP transport {value!r}. Supported values: {', '.join(sorted(SIP_TRANSPORTS))}")
+    return transport
+
+
+def parse_sip_transport_set(value: str) -> Tuple[str, ...]:
+    transports = tuple(dict.fromkeys(normalize_sip_transport(item) for item in re.split(r"[,/+\s]+", value) if item.strip()))
+    return transports or ("udp",)
+
+
+def tcp_content_length(headers: bytes) -> int:
+    for line in headers.decode("utf-8", errors="replace").splitlines():
+        name, _, value = line.partition(":")
+        if normalize_header_name(name.strip()) == "content-length":
+            stripped = value.strip()
+            return int(stripped) if stripped.isdigit() else 0
+    return 0
 
 
 def format_route_target(target: str, user: str) -> str:
@@ -2007,6 +2197,16 @@ def choose_payload(remote_payloads: Tuple[int, ...], default_payload: int = PCMU
         if payload in SUPPORTED_CODECS:
             return payload
     return PCMU
+
+
+def b2bua_outbound_offer_payloads(
+    remote_payloads: Tuple[int, ...],
+    inbound_payload: int,
+    outbound_payload: int,
+) -> Tuple[int, ...]:
+    if outbound_payload != inbound_payload:
+        return (outbound_payload,)
+    return remote_payloads
 
 
 def rtpengine_codec_policy(remote_payloads: Tuple[int, ...], target_payload: int) -> Dict[str, List[str]]:
@@ -2225,6 +2425,8 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if isinstance(value, list):
             return tuple(str(room) for room in value)
         raise ValueError("bridge_rooms must be a string or list of strings")
+    if key == "sip_transport":
+        return ",".join(parse_sip_transport_set(str(value)))
     if key in {
         "sip_ip",
         "log_dir",
@@ -2241,6 +2443,7 @@ def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> Serve
     overrides = {
         "sip_ip": getattr(args, "sip_ip", None),
         "sip_port": getattr(args, "sip_port", None),
+        "sip_transport": getattr(args, "sip_transport", None),
         "rtp_min": getattr(args, "rtp_min", None),
         "rtp_max": getattr(args, "rtp_max", None),
         "log_dir": getattr(args, "log_dir", None),
@@ -2261,6 +2464,7 @@ def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> Serve
 def validate_config(config: ServerConfig) -> None:
     config.default_codec = config.default_codec.upper()
     codec_payload(config.default_codec)
+    config.sip_transport = ",".join(parse_sip_transport_set(config.sip_transport))
     if config.sip_port <= 0 or config.sip_port > 65535:
         raise ValueError("sip_port must be between 1 and 65535")
     if config.rtp_min <= 0 or config.rtp_max > 65535 or config.rtp_min > config.rtp_max:
@@ -2294,7 +2498,8 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Small SIP/RTP call server")
     parser.add_argument("--config", help="Path to a JSON config file")
     parser.add_argument("--ip", dest="sip_ip", help="IP address to bind and advertise")
-    parser.add_argument("--sip-port", type=int, help="SIP UDP port")
+    parser.add_argument("--sip-port", type=int, help="SIP port")
+    parser.add_argument("--sip-transport", help="SIP transport to listen on: udp, tcp, or udp,tcp")
     parser.add_argument("--rtp-min", type=int, help="First RTP UDP port")
     parser.add_argument("--rtp-max", type=int, help="Last RTP UDP port")
     parser.add_argument("--log-dir", help="Directory for per-call log files")
@@ -2325,7 +2530,7 @@ async def main() -> None:
     sbc_logger = SbcLogger(log_dir)
     sbc_logger.platform(
         "SERVER CONFIG",
-        f"sip={config.sip_ip}:{config.sip_port} rtp_range={config.rtp_min}-{config.rtp_max} media_backend={config.media_backend}",
+        f"sip={config.sip_ip}:{config.sip_port} sip_transport={config.sip_transport} rtp_range={config.rtp_min}-{config.rtp_max} media_backend={config.media_backend}",
     )
 
     media = MediaServer(
@@ -2340,26 +2545,40 @@ async def main() -> None:
         rtpengine_client = RtpengineClient(config.rtpengine_url, timeout=config.rtpengine_timeout)
         logging.info("Using RTPengine media backend at %s", config.rtpengine_url)
         sbc_logger.platform("RTPENGINE BACKEND ENABLED", f"url={config.rtpengine_url} timeout={config.rtpengine_timeout}")
+    sip_protocol = SipServerProtocol(
+        config.sip_ip,
+        config.sip_port,
+        media,
+        sbc_logger,
+        config.default_payload,
+        config.auth_realm,
+        config.users,
+        config.bridge_rooms,
+        config.b2bua_routes,
+        config.route_policies,
+        config.b2bua_ladder_logs,
+        config.media_backend,
+        rtpengine_client,
+        config.reject_unknown_routes,
+        config.sip_transport,
+    )
     loop = asyncio.get_running_loop()
-    await loop.create_datagram_endpoint(
-        lambda: SipServerProtocol(
+    sip_transports = parse_sip_transport_set(config.sip_transport)
+    sip_listeners: List[Any] = []
+    if "udp" in sip_transports:
+        udp_transport, _protocol = await loop.create_datagram_endpoint(
+            lambda: sip_protocol,
+            local_addr=(config.sip_ip, config.sip_port),
+        )
+        sip_listeners.append(udp_transport)
+    if "tcp" in sip_transports:
+        tcp_server = await loop.create_server(
+            lambda: SipTcpConnectionProtocol(sip_protocol),
             config.sip_ip,
             config.sip_port,
-            media,
-            sbc_logger,
-            config.default_payload,
-            config.auth_realm,
-            config.users,
-            config.bridge_rooms,
-            config.b2bua_routes,
-            config.route_policies,
-            config.b2bua_ladder_logs,
-            config.media_backend,
-            rtpengine_client,
-            config.reject_unknown_routes,
-        ),
-        local_addr=(config.sip_ip, config.sip_port),
-    )
+        )
+        sip_listeners.append(tcp_server)
+        sip_protocol.tcp_server_started()
 
     await asyncio.Future()
 
