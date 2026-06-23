@@ -22,7 +22,7 @@ PlaySBC is a Python SIP/RTP lab server for learning B2BUA routing, SIPp regressi
 
 Roadmap: [docs/EVOLUTION_PLAN.md](docs/EVOLUTION_PLAN.md)
 
-Architecture diagrams: [docs/ARCHITECTURE_NETWORK.md](docs/ARCHITECTURE_NETWORK.md)
+Architecture diagrams: [docs/ARCHITECTURE_NETWORK.md](docs/ARCHITECTURE_NETWORK.md) | [PDF](docs/PlaySBC_Service_Network_Diagrams.pdf)
 
 RTPengine setup: [docs/RTPENGINE_LOCAL.md](docs/RTPENGINE_LOCAL.md)
 
