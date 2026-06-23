@@ -1,13 +1,13 @@
 <p align="center">
   <a href="docs/assets/playsbc-logo.svg">
-    <img src="docs/assets/playsbc-logo.svg?raw=1&amp;v=20260614-tagline-small" alt="PlaySBC logo" width="720">
+    <img src="docs/assets/playsbc-logo.svg?raw=1&amp;v=20260623-playful-sbc" alt="PlaySBC logo" width="720">
   </a>
 </p>
 
 <h1 align="center">PlaySBC</h1>
 
 <p align="center">
-  <strong>SIP, RTP, B2BUA, Transcoding and regression play ground.</strong>
+  <strong>Playful Session Border Controller: break SIP here, not in production.</strong>
 </p>
 
 <p align="center">
