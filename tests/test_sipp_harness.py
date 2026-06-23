@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
+import mini_call_server as server
 from tools import run_sipp_regression
 from tools import run_b2bua_sipp_smoke
 from tools import run_regression_suite
@@ -319,6 +320,31 @@ class SippScenarioTests(unittest.TestCase):
         self.assertGreaterEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s"]["server_rtp_max"], 26500)
         rtpengine_load = run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s-rtpengine-transcoding"]
         self.assertEqual(rtpengine_load["rtpengine_timeout"], 8.0)
+
+    def test_b2bua_load_runs_use_stats_only_sipp_tracing(self):
+        values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        values.update(calls=300, rate=5, hold_ms=60000, media_enabled=False, media_codec=None, media_pcap="")
+        args = argparse_namespace(**values)
+
+        uac = run_b2bua_sipp_smoke.build_uac_command(args, "sipp")
+        uas = run_b2bua_sipp_smoke.build_uas_command(args, "sipp")
+
+        for command in (uac, uas):
+            self.assertIn("-trace_err", command)
+            self.assertIn("-trace_stat", command)
+            self.assertIn("-trace_counts", command)
+            self.assertNotIn("-trace_msg", command)
+            self.assertNotIn("-trace_logs", command)
+
+    def test_b2bua_single_call_runs_keep_full_sipp_tracing(self):
+        values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        values.update(calls=1, rate=1, hold_ms=1000, media_enabled=False, media_codec=None, media_pcap="")
+        args = argparse_namespace(**values)
+
+        uac = run_b2bua_sipp_smoke.build_uac_command(args, "sipp")
+
+        self.assertIn("-trace_msg", uac)
+        self.assertIn("-trace_logs", uac)
 
     def test_b2bua_sipp_commands_can_enable_g711_pcap_media(self):
         args = argparse_namespace(
@@ -1173,10 +1199,25 @@ class SippScenarioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config_path = run_b2bua_sipp_smoke.write_dynamic_config(args, tmp_path, tmp_path / "logs")
-            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config = server.load_config_file(str(config_path))
 
-        self.assertEqual(config["media_backend"], "rtpengine")
-        self.assertEqual(config["rtpengine_timeout"], 8.0)
+        self.assertEqual(config_path.name, "server-config.yaml")
+        self.assertEqual(config.media_backend, "rtpengine")
+        self.assertEqual(config.rtpengine_timeout, 8.0)
+
+    def test_helm_chart_renders_server_yaml_from_values(self):
+        chart = ROOT / "charts" / "playsbc"
+
+        self.assertTrue((chart / "Chart.yaml").exists())
+        values = (chart / "values.yaml").read_text(encoding="utf-8")
+        configmap = (chart / "templates" / "configmap.yaml").read_text(encoding="utf-8")
+        deployment = (chart / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("playsbc:", values)
+        self.assertIn("route_policies:", values)
+        self.assertIn("server.yaml: |", configmap)
+        self.assertIn("toYaml .Values.playsbc.config", configmap)
+        self.assertIn("/etc/playsbc/server.yaml", deployment)
 
     def test_b2bua_profiles_are_listed(self):
         completed = subprocess.run(
@@ -1200,7 +1241,74 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("failed-outbound", completed.stdout)
         self.assertIn("cancel", completed.stdout)
         self.assertIn("retransmission", completed.stdout)
+        self.assertIn("esbc-options-keepalive", completed.stdout)
+        self.assertIn("esbc-static-trunk-route", completed.stdout)
+        self.assertIn("esbc-e164-route-policy", completed.stdout)
+        self.assertIn("esbc-trunk-failure", completed.stdout)
         self.assertIn("load-5cps-60s-rtpengine-transcoding", completed.stdout)
+
+    def test_esbc_profiles_wire_expected_scenarios_and_policies(self):
+        options = run_b2bua_sipp_smoke.B2BUA_PROFILES["esbc-options-keepalive"]
+        self.assertEqual(options["uac_scenario"], "options.xml")
+        self.assertFalse(options["register_callee"])
+        self.assertFalse(options["start_uas"])
+
+        static_trunk = run_b2bua_sipp_smoke.B2BUA_PROFILES["esbc-static-trunk-route"]
+        self.assertFalse(static_trunk["register_callee"])
+        self.assertEqual(static_trunk["route_policies"][0]["name"], "esbc-static-trunk")
+        self.assertEqual(static_trunk["route_policies"][0]["target"], "sip:{user}@{host}:{uas_port}")
+
+        e164 = run_b2bua_sipp_smoke.B2BUA_PROFILES["esbc-e164-route-policy"]
+        self.assertEqual(e164["callee"], "+18005550100")
+        self.assertEqual(e164["route_policies"][0]["match"], "+1800*")
+
+        trunk_failure = run_b2bua_sipp_smoke.B2BUA_PROFILES["esbc-trunk-failure"]
+        self.assertEqual(trunk_failure["uac_scenario"], "b2bua_uac_failed_outbound.xml")
+        self.assertEqual(trunk_failure["uas_scenario"], "b2bua_uas_failed_outbound.xml")
+
+    def test_esbc_static_trunk_profile_renders_static_route_policy_config(self):
+        values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        values.update(run_b2bua_sipp_smoke.B2BUA_PROFILES["esbc-static-trunk-route"])
+        values.update(ladder_enabled=True, media_enabled=False, server_codec="PCMU")
+        args = argparse_namespace(**values)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = run_b2bua_sipp_smoke.write_dynamic_config(args, tmp_path, tmp_path / "logs")
+            config = server.load_config_file(str(config_path))
+
+        self.assertEqual(config.route_policies[0]["name"], "esbc-static-trunk")
+        self.assertEqual(config.route_policies[0]["target"], "sip:{user}@127.0.0.1:25082")
+
+    def test_esbc_e164_route_policy_dry_run_logs_policy_and_skips_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
+                    "--dry-run",
+                    "--output-root",
+                    tmp,
+                    "--run-id",
+                    "esbc-e164-profile",
+                    "--profile",
+                    "esbc-e164-route-policy",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            log_dir = Path(tmp) / run_b2bua_sipp_smoke.DEFAULT_LOG_FOLDER / "esbc-e164-profile"
+            platform = (log_dir / "log.platform").read_text(encoding="utf-8")
+            sipp = (log_dir / "log.sipp").read_text(encoding="utf-8")
+            self.assertIn("profile=esbc-e164-route-policy", platform)
+            self.assertIn("callee=+18005550100", platform)
+            self.assertIn('"match": "+1800*"', platform)
+            self.assertIn('"target": "sip:{user}@127.0.0.1:25082"', platform)
+            self.assertIn("register_callee=False", platform)
+            self.assertNotIn("registration-callee:", sipp)
 
     def test_b2bua_negative_profiles_wire_expected_scenarios(self):
         self.assertEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["unknown-route"]["uac_scenario"], "b2bua_uac_unknown_route.xml")
@@ -1615,7 +1723,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("password is required", detail)
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
-        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 18)
+        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 22)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -1624,6 +1732,10 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("failed-outbound", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("cancel", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("retransmission", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("esbc-options-keepalive", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("esbc-static-trunk-route", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("esbc-e164-route-policy", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("esbc-trunk-failure", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("small-load-2cps-10s", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("soak-1cps-30s", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)

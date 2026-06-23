@@ -316,6 +316,56 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.rtpengine_url, "udp://127.0.0.1:2223")
             self.assertEqual(config.rtpengine_timeout, 1.5)
 
+    def test_load_yaml_config_file(self):
+        config = server.load_config_file(str(Path(__file__).resolve().parents[1] / "configs" / "config.b2bua.example.yaml"))
+
+        self.assertEqual(config.sip_ip, "127.0.0.1")
+        self.assertEqual(config.sip_port, 25062)
+        self.assertEqual(config.route_policies[0]["name"], "registered-endpoints")
+        self.assertEqual(config.bridge_rooms, ("bridge",))
+        self.assertTrue(config.debug)
+
+    def test_simple_yaml_parser_supports_config_shapes(self):
+        parsed = server.parse_simple_yaml(
+            """
+            sip_port: 5062
+            debug: true
+            users:
+              "1001": "secret-password"
+            route_policies:
+              - name: registered
+                match: "*"
+                target: registration
+                priority: 10
+            bridge_rooms: [bridge, lab]
+            b2bua_routes: {}
+            """
+        )
+
+        self.assertEqual(parsed["sip_port"], 5062)
+        self.assertTrue(parsed["debug"])
+        self.assertEqual(parsed["users"]["1001"], "secret-password")
+        self.assertEqual(parsed["route_policies"][0]["priority"], 10)
+        self.assertEqual(parsed["bridge_rooms"], ["bridge", "lab"])
+        self.assertEqual(parsed["b2bua_routes"], {})
+
+    def test_simple_yaml_parser_supports_helm_toyaml_list_indentation(self):
+        parsed = server.parse_simple_yaml(
+            """
+            bridge_rooms:
+            - bridge
+            route_policies:
+            - match: '*'
+              name: registered-endpoints
+              priority: 10
+              target: registration
+            """
+        )
+
+        self.assertEqual(parsed["bridge_rooms"], ["bridge"])
+        self.assertEqual(parsed["route_policies"][0]["name"], "registered-endpoints")
+        self.assertEqual(parsed["route_policies"][0]["target"], "registration")
+
     def test_invalid_rtpengine_config_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"

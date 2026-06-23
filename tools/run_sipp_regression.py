@@ -244,7 +244,7 @@ def start_server(args: argparse.Namespace, run_dir: Path) -> subprocess.Popen:
         sys.executable,
         str(ROOT / "mini_call_server.py"),
         "--config",
-        str(ROOT / "config.example.json"),
+        str(ROOT / "configs" / "config.example.json"),
         "--ip",
         args.host,
         "--sip-port",

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "playsbc.fullname" . }}
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "playsbc.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "playsbc.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      hostNetwork: {{ .Values.hostNetwork }}
+      containers:
+        - name: playsbc
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python3
+            - /app/mini_call_server.py
+            - --config
+            - /etc/playsbc/server.yaml
+          ports:
+            - name: sip-udp
+              containerPort: {{ .Values.service.sipPort }}
+              protocol: UDP
+            - name: sip-tcp
+              containerPort: {{ .Values.service.sipPort }}
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/playsbc
+              readOnly: true
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "playsbc.fullname" . }}-config

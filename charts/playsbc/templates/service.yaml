@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: sip-udp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-udp
+      protocol: UDP
+    - name: sip-tcp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-tcp
+      protocol: TCP

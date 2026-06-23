@@ -1,0 +1,19 @@
+sip_ip: 0.0.0.0
+sip_port: 5062
+sip_transport: udp
+rtp_min: 10000
+rtp_max: 10100
+default_codec: PCMU
+auth_realm: playsbc
+users:
+  "1001": secret-password
+bridge_rooms:
+  - bridge
+b2bua_routes: {}
+route_policies: []
+b2bua_ladder_logs: true
+media_backend: internal
+rtpengine_url: udp://127.0.0.1:2223
+rtpengine_timeout: 3.0
+reject_unknown_routes: false
+debug: false

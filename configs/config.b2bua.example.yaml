@@ -1,0 +1,22 @@
+sip_ip: 127.0.0.1
+sip_port: 25062
+sip_transport: udp
+rtp_min: 25100
+rtp_max: 25140
+default_codec: PCMU
+auth_realm: playsbc
+users: {}
+bridge_rooms:
+  - bridge
+b2bua_routes: {}
+route_policies:
+  - name: registered-endpoints
+    match: "*"
+    target: registration
+    priority: 10
+b2bua_ladder_logs: true
+media_backend: internal
+rtpengine_url: udp://127.0.0.1:2223
+rtpengine_timeout: 3.0
+reject_unknown_routes: false
+debug: true

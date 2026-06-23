@@ -1,0 +1,6 @@
+apiVersion: v2
+name: playsbc
+description: PlaySBC SIP, RTP, B2BUA, transcoding and regression lab server
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -2410,7 +2410,11 @@ def load_config_file(path: Optional[str]) -> ServerConfig:
 
     config_path = Path(path)
     try:
-        raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+        config_text = config_path.read_text(encoding="utf-8")
+        if config_path.suffix.lower() in {".yaml", ".yml"}:
+            raw_config = parse_simple_yaml(config_text)
+        else:
+            raw_config = json.loads(config_text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON config {config_path}: {exc}") from exc
 
@@ -2424,6 +2428,222 @@ def load_config_file(path: Optional[str]) -> ServerConfig:
 
     validate_config(config)
     return config
+
+
+def parse_simple_yaml(text: str) -> Any:
+    """Parse the small YAML subset used by PlaySBC config files.
+
+    The project intentionally has no Python package dependency file yet, so
+    this keeps `--config server.yaml` usable with only the standard library.
+    It is not a general YAML parser.
+    """
+
+    lines: List[Tuple[int, str]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        if "\t" in raw_line[: len(raw_line) - len(raw_line.lstrip())]:
+            raise ValueError(f"YAML indentation must use spaces, line {line_number}")
+        stripped = raw_line.strip()
+        if not stripped or stripped in {"---", "..."}:
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        content = strip_yaml_comment(raw_line[indent:]).strip()
+        if content:
+            lines.append((indent, content))
+
+    if not lines:
+        return {}
+    value, index = parse_yaml_block(lines, 0, lines[0][0])
+    if index != len(lines):
+        raise ValueError(f"Could not parse YAML near: {lines[index][1]}")
+    return value
+
+
+def strip_yaml_comment(value: str) -> str:
+    quote = ""
+    escaped = False
+    for index, character in enumerate(value):
+        if quote:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote == '"':
+                escaped = True
+                continue
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            continue
+        if character == "#":
+            return value[:index]
+    return value
+
+
+def parse_yaml_block(lines: List[Tuple[int, str]], index: int, indent: int) -> Tuple[Any, int]:
+    if index >= len(lines):
+        return None, index
+    current_indent, content = lines[index]
+    if current_indent < indent:
+        return None, index
+    if content.startswith("- "):
+        return parse_yaml_list(lines, index, current_indent)
+    return parse_yaml_map(lines, index, current_indent)
+
+
+def parse_yaml_map(lines: List[Tuple[int, str]], index: int, indent: int) -> Tuple[Dict[str, Any], int]:
+    result: Dict[str, Any] = {}
+    while index < len(lines):
+        current_indent, content = lines[index]
+        if current_indent < indent:
+            break
+        if current_indent > indent:
+            raise ValueError(f"Unexpected YAML indentation near: {content}")
+        if content.startswith("- "):
+            break
+
+        key, raw_value = split_yaml_key_value(content)
+        index += 1
+        if raw_value:
+            result[key] = parse_yaml_scalar(raw_value)
+            continue
+        if index < len(lines) and lines[index][0] == current_indent and lines[index][1].startswith("- "):
+            result[key], index = parse_yaml_list(lines, index, current_indent)
+            continue
+        if index < len(lines) and lines[index][0] > current_indent:
+            result[key], index = parse_yaml_block(lines, index, lines[index][0])
+        else:
+            result[key] = None
+    return result, index
+
+
+def parse_yaml_list(lines: List[Tuple[int, str]], index: int, indent: int) -> Tuple[List[Any], int]:
+    result: List[Any] = []
+    while index < len(lines):
+        current_indent, content = lines[index]
+        if current_indent < indent:
+            break
+        if current_indent > indent:
+            raise ValueError(f"Unexpected YAML indentation near: {content}")
+        if not content.startswith("- "):
+            break
+
+        item = content[2:].strip()
+        index += 1
+        key_value = maybe_split_yaml_key_value(item)
+        if key_value:
+            key, raw_value = key_value
+            parsed_item: Dict[str, Any] = {}
+            if raw_value:
+                parsed_item[key] = parse_yaml_scalar(raw_value)
+            elif index < len(lines) and lines[index][0] > current_indent:
+                parsed_item[key], index = parse_yaml_block(lines, index, lines[index][0])
+            else:
+                parsed_item[key] = None
+            if index < len(lines) and lines[index][0] > current_indent:
+                child, index = parse_yaml_block(lines, index, lines[index][0])
+                if isinstance(child, dict):
+                    parsed_item.update(child)
+                else:
+                    raise ValueError(f"YAML list item mapping expected near: {item}")
+            result.append(parsed_item)
+            continue
+
+        if item:
+            result.append(parse_yaml_scalar(item))
+            continue
+        if index < len(lines) and lines[index][0] > current_indent:
+            child, index = parse_yaml_block(lines, index, lines[index][0])
+            result.append(child)
+        else:
+            result.append(None)
+    return result, index
+
+
+def split_yaml_key_value(content: str) -> Tuple[str, str]:
+    parsed = maybe_split_yaml_key_value(content)
+    if not parsed:
+        raise ValueError(f"Expected YAML key/value near: {content}")
+    return parsed
+
+
+def maybe_split_yaml_key_value(content: str) -> Optional[Tuple[str, str]]:
+    quote = ""
+    escaped = False
+    for index, character in enumerate(content):
+        if quote:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote == '"':
+                escaped = True
+                continue
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            continue
+        if character == ":" and (index + 1 == len(content) or content[index + 1].isspace()):
+            key = parse_yaml_key(content[:index].strip())
+            return key, content[index + 1 :].strip()
+    return None
+
+
+def parse_yaml_key(value: str) -> str:
+    parsed = parse_yaml_scalar(value)
+    return str(parsed)
+
+
+def parse_yaml_scalar(value: str) -> Any:
+    value = value.strip()
+    if value in {"{}", "[]"}:
+        return {} if value == "{}" else []
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [parse_yaml_scalar(item) for item in split_yaml_inline_items(inner)]
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        if value.startswith('"'):
+            return bytes(value[1:-1], "utf-8").decode("unicode_escape")
+        return value[1:-1].replace("''", "'")
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"null", "~"}:
+        return None
+    if re.fullmatch(r"[-+]?\d+", value):
+        return int(value)
+    if re.fullmatch(r"[-+]?\d+\.\d+", value):
+        return float(value)
+    return value
+
+
+def split_yaml_inline_items(value: str) -> List[str]:
+    items = []
+    quote = ""
+    escaped = False
+    start = 0
+    for index, character in enumerate(value):
+        if quote:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote == '"':
+                escaped = True
+                continue
+            if character == quote:
+                quote = ""
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            continue
+        if character == ",":
+            items.append(value[start:index].strip())
+            start = index + 1
+    items.append(value[start:].strip())
+    return items
 
 
 def coerce_config_value(key: str, value: Any) -> Any:
@@ -2531,7 +2751,7 @@ def resolve_log_dir(config: ServerConfig) -> Optional[Path]:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Small SIP/RTP call server")
-    parser.add_argument("--config", help="Path to a JSON config file")
+    parser.add_argument("--config", help="Path to a JSON or YAML config file")
     parser.add_argument("--ip", dest="sip_ip", help="IP address to bind and advertise")
     parser.add_argument("--sip-port", type=int, help="SIP port")
     parser.add_argument("--sip-transport", help="SIP transport to listen on: udp, tcp, or udp,tcp")

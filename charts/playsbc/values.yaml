@@ -1,0 +1,39 @@
+replicaCount: 1
+
+image:
+  repository: playsbc
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  sipPort: 5062
+
+hostNetwork: false
+
+resources: {}
+
+playsbc:
+  config:
+    sip_ip: 0.0.0.0
+    sip_port: 5062
+    sip_transport: udp
+    rtp_min: 30000
+    rtp_max: 30100
+    default_codec: PCMU
+    auth_realm: playsbc
+    users: {}
+    bridge_rooms:
+      - bridge
+    b2bua_routes: {}
+    route_policies:
+      - name: registered-endpoints
+        match: "*"
+        target: registration
+        priority: 10
+    b2bua_ladder_logs: true
+    media_backend: internal
+    rtpengine_url: udp://rtpengine:2223
+    rtpengine_timeout: 3.0
+    reject_unknown_routes: false
+    debug: false

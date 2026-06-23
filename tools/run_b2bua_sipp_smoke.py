@@ -35,6 +35,22 @@ MEDIA_RTPMAP_LINES = {
     "PCMU": "a=rtpmap:0 PCMU/8000",
     "PCMA": "a=rtpmap:8 PCMA/8000",
 }
+DEFAULT_ROUTE_POLICIES = [
+    {
+        "name": "registered-endpoints",
+        "match": "*",
+        "target": "registration",
+        "priority": 10,
+    }
+]
+STATIC_TRUNK_ROUTE_POLICY = [
+    {
+        "name": "esbc-static-trunk",
+        "match": "*",
+        "target": "sip:{user}@{host}:{uas_port}",
+        "priority": 20,
+    }
+]
 CRLF = "\r\n"
 DIAGNOSTIC_PCAP_PORT = 65530
 LOG_FILES = (
@@ -94,6 +110,7 @@ BASE_DEFAULTS = {
     "log_folder": DEFAULT_LOG_FOLDER,
     "run_id": "",
     "sipp_bin": "sipp",
+    "helm_bin": "helm",
     "pcap_topology": "logical",
     "pcap_uac_ip": "10.10.10.10",
     "pcap_server_ip": "10.10.10.20",
@@ -222,6 +239,39 @@ B2BUA_PROFILES = {
         "rtpengine_timeout": 8.0,
         "ladder": False,
     },
+    "esbc-options-keepalive": {
+        "callee": "esbc-options",
+        "uac_scenario": "options.xml",
+        "register_callee": False,
+        "start_uas": False,
+    },
+    "esbc-static-trunk-route": {
+        "caller": "enterprise-a",
+        "callee": "trunk-b",
+        "register_callee": False,
+        "route_policies": STATIC_TRUNK_ROUTE_POLICY,
+    },
+    "esbc-e164-route-policy": {
+        "caller": "enterprise-a",
+        "callee": "+18005550100",
+        "register_callee": False,
+        "route_policies": [
+            {
+                "name": "esbc-e164-outbound",
+                "match": "+1800*",
+                "target": "sip:{user}@{host}:{uas_port}",
+                "priority": 20,
+            }
+        ],
+    },
+    "esbc-trunk-failure": {
+        "caller": "enterprise-a",
+        "callee": "trunk-failure-b",
+        "register_callee": False,
+        "uac_scenario": "b2bua_uac_failed_outbound.xml",
+        "uas_scenario": "b2bua_uas_failed_outbound.xml",
+        "route_policies": STATIC_TRUNK_ROUTE_POLICY,
+    },
 }
 PROFILE_DESCRIPTIONS = {
     "basic-signalling": "One SIPp A -> B2BUA -> registered SIPp B call without RTP replay.",
@@ -242,6 +292,10 @@ PROFILE_DESCRIPTIONS = {
     "soak-1cps-30s": "Short soak-style B2BUA profile at 1 cps with 30 second CHT.",
     "load-5cps-60s": "Basic 5 cps for 60 seconds with 60 second CHT and ladder disabled.",
     "load-5cps-60s-rtpengine-transcoding": "5 cps for 60 seconds with 60 second CHT, RTPengine backend, and PCMU-to-PCMA transcoding intent.",
+    "esbc-options-keepalive": "Enterprise SBC-style OPTIONS keepalive check against the PlaySBC SIP listener.",
+    "esbc-static-trunk-route": "Enterprise SBC-style static trunk route from SIPp A through B2BUA to SIPp B without registrar lookup.",
+    "esbc-e164-route-policy": "Enterprise SBC-style E.164 prefix route policy from SIPp A through B2BUA to SIPp B.",
+    "esbc-trunk-failure": "Enterprise SBC-style trunk failure propagation when the outbound trunk returns 503.",
 }
 
 
@@ -340,6 +394,17 @@ def check_rtpengine_preflight(url: str, timeout: float) -> Tuple[bool, str]:
 
     detail = (completed.stdout.strip() or completed.stderr.strip() or f"returncode={completed.returncode}").strip()
     return completed.returncode == 0, detail
+
+
+def is_load_like_run(args: argparse.Namespace) -> bool:
+    return int(getattr(args, "calls", BASE_DEFAULTS["calls"])) > 1 or int(getattr(args, "rate", BASE_DEFAULTS["rate"])) > 1
+
+
+def sipp_trace_args(args: argparse.Namespace) -> List[str]:
+    trace_args = ["-trace_err", "-trace_stat", "-trace_counts"]
+    if not is_load_like_run(args):
+        trace_args.extend(["-trace_msg", "-trace_logs"])
+    return trace_args
 
 
 def append_rtpengine_blocked_observations(log_dir: Path, args: argparse.Namespace, detail: str, duration: float) -> None:
@@ -473,12 +538,8 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         str(args.uas_rtp_min),
         "-max_rtp_port",
         str(args.uas_rtp_max),
-        "-trace_err",
-        "-trace_msg",
-        "-trace_stat",
-        "-trace_counts",
-        "-trace_logs",
     ]
+    command.extend(sipp_trace_args(args))
     command.extend(sipp_transport_args(args, role="server"))
     return maybe_sudo_sipp_pcap(args, command)
 
@@ -517,12 +578,8 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         str(args.uac_rtp_min),
         "-max_rtp_port",
         str(args.uac_rtp_max),
-        "-trace_err",
-        "-trace_msg",
-        "-trace_stat",
-        "-trace_counts",
-        "-trace_logs",
     ]
+    command.extend(sipp_trace_args(args))
     command.extend(sipp_transport_args(args))
     return maybe_sudo_sipp_pcap(args, command)
 
@@ -553,6 +610,33 @@ def build_server_command(args: argparse.Namespace, work_dir: Path, log_dir: Path
     ]
 
 
+def render_harness_config_templates(value: object, args: argparse.Namespace) -> object:
+    if isinstance(value, dict):
+        return {key: render_harness_config_templates(item, args) for key, item in value.items()}
+    if isinstance(value, list):
+        return [render_harness_config_templates(item, args) for item in value]
+    if isinstance(value, str):
+        return (
+            value.replace("{host}", str(getattr(args, "host", BASE_DEFAULTS["host"])))
+            .replace("{server_port}", str(getattr(args, "server_port", BASE_DEFAULTS["server_port"])))
+            .replace("{uas_port}", str(getattr(args, "uas_port", BASE_DEFAULTS["uas_port"])))
+            .replace("{uac_port}", str(getattr(args, "uac_port", BASE_DEFAULTS["uac_port"])))
+        )
+    return value
+
+
+def effective_route_policies(args: argparse.Namespace) -> List[dict]:
+    policies = getattr(args, "route_policies", None) or DEFAULT_ROUTE_POLICIES
+    rendered = render_harness_config_templates(policies, args)
+    return rendered if isinstance(rendered, list) else DEFAULT_ROUTE_POLICIES
+
+
+def effective_b2bua_routes(args: argparse.Namespace) -> dict:
+    routes = getattr(args, "b2bua_routes", None) or {}
+    rendered = render_harness_config_templates(routes, args)
+    return rendered if isinstance(rendered, dict) else {}
+
+
 def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path) -> Path:
     config = {
         "sip_ip": args.host,
@@ -565,15 +649,8 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "auth_realm": "playsbc",
         "users": {},
         "bridge_rooms": ["bridge"],
-        "b2bua_routes": {},
-        "route_policies": [
-            {
-                "name": "registered-endpoints",
-                "match": "*",
-                "target": "registration",
-                "priority": 10,
-            }
-        ],
+        "b2bua_routes": effective_b2bua_routes(args),
+        "route_policies": effective_route_policies(args),
         "b2bua_ladder_logs": args.ladder_enabled,
         "media_backend": args.media_backend,
         "rtpengine_url": args.rtpengine_url,
@@ -581,9 +658,112 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "reject_unknown_routes": args.reject_unknown_routes,
         "debug": True,
     }
-    config_path = work_dir / "server-config.json"
-    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    values_path = work_dir / "helm-values.yaml"
+    values_path.write_text(dump_simple_yaml({"playsbc": {"config": config}}), encoding="utf-8")
+    helm = resolve_binary(args.helm_bin)
+    if not helm:
+        raise SystemExit(
+            "Helm executable not found. Install Helm and retry; PlaySBC regression uses Helm-rendered YAML config."
+        )
+    rendered = subprocess.run(
+        [
+            helm,
+            "template",
+            "playsbc",
+            str(ROOT / "charts" / "playsbc"),
+            "-f",
+            str(values_path),
+            "--show-only",
+            "templates/configmap.yaml",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if rendered.returncode != 0:
+        raise SystemExit(f"Helm config render failed:\n{rendered.stderr.strip() or rendered.stdout.strip()}")
+    config_path = work_dir / "server-config.yaml"
+    config_path.write_text(extract_helm_server_yaml(rendered.stdout), encoding="utf-8")
     return config_path
+
+
+def extract_helm_server_yaml(rendered: str) -> str:
+    lines = rendered.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "server.yaml: |":
+            continue
+        content_indent: Optional[int] = None
+        collected: List[str] = []
+        for content_line in lines[index + 1 :]:
+            if not content_line.strip():
+                collected.append("")
+                continue
+            indent = len(content_line) - len(content_line.lstrip(" "))
+            if content_indent is None:
+                content_indent = indent
+            if indent < content_indent:
+                break
+            collected.append(content_line[content_indent:])
+        if not collected:
+            raise SystemExit("Helm ConfigMap did not include server.yaml content")
+        return "\n".join(collected).rstrip() + "\n"
+    raise SystemExit("Helm ConfigMap did not include server.yaml")
+
+
+def dump_simple_yaml(value: object, indent: int = 0) -> str:
+    lines = list(iter_simple_yaml_lines(value, indent))
+    return "\n".join(lines) + "\n"
+
+
+def iter_simple_yaml_lines(value: object, indent: int = 0):
+    prefix = " " * indent
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if item == {}:
+                yield f"{prefix}{key}: {{}}"
+                continue
+            if item == []:
+                yield f"{prefix}{key}: []"
+                continue
+            if isinstance(item, (dict, list)):
+                yield f"{prefix}{key}:"
+                yield from iter_simple_yaml_lines(item, indent + 2)
+            else:
+                yield f"{prefix}{key}: {format_simple_yaml_scalar(item)}"
+        return
+    if isinstance(value, list):
+        for item in value:
+            if item == {}:
+                yield f"{prefix}- {{}}"
+                continue
+            if item == []:
+                yield f"{prefix}- []"
+                continue
+            if isinstance(item, dict):
+                yield f"{prefix}-"
+                yield from iter_simple_yaml_lines(item, indent + 2)
+            elif isinstance(item, list):
+                yield f"{prefix}-"
+                yield from iter_simple_yaml_lines(item, indent + 2)
+            else:
+                yield f"{prefix}- {format_simple_yaml_scalar(item)}"
+        return
+    yield f"{prefix}{format_simple_yaml_scalar(value)}"
+
+
+def format_simple_yaml_scalar(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    if text == "":
+        return '""'
+    if re.fullmatch(r"[A-Za-z0-9_./:@+-]+", text) and text.lower() not in {"true", "false", "null"}:
+        return text
+    return json.dumps(text)
 
 
 def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
@@ -1696,6 +1876,9 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"sip_transport={getattr(args, 'sip_transport', BASE_DEFAULTS['sip_transport'])}",
         f"reject_unknown_routes={args.reject_unknown_routes}",
         f"registration_driver={args.registration_driver}",
+        f"route_policies={json.dumps(effective_route_policies(args), sort_keys=True)}",
+        f"b2bua_routes={json.dumps(effective_b2bua_routes(args), sort_keys=True)}",
+        f"sipp_trace_mode={'stats-only' if is_load_like_run(args) else 'full'}",
         f"calls={args.calls}",
         f"rate={args.rate}",
         f"hold_ms={args.hold_ms}",
@@ -1906,6 +2089,7 @@ def main() -> int:
     parser.add_argument("--pcap-rtpengine-ip", default=BASE_DEFAULTS["pcap_rtpengine_ip"], help="Logical RTPengine media-anchor IP written to capture.pcap")
     parser.add_argument("--run-id", default=BASE_DEFAULTS["run_id"])
     parser.add_argument("--sipp-bin", default=BASE_DEFAULTS["sipp_bin"])
+    parser.add_argument("--helm-bin", default=BASE_DEFAULTS["helm_bin"])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.list_profiles:
