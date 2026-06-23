@@ -60,24 +60,24 @@ flowchart LR
 
     SippA -->|SIP| Listener
     RegA -->|REGISTER / INVITE| Listener
-    FuturePhone -.->|SIP TLS later| Listener
-    FutureWeb -.->|SIP WebSocket later| Listener
+    FuturePhone -->|future: SIP TLS| Listener
+    FutureWeb -->|future: SIP WebSocket| Listener
 
     Listener --> Auth --> Registrar
     Listener --> B2BUA --> Router
     Router --> Registrar
     Router --> StaticTrunk
     Router --> E164
-    Router -.-> FutureCarrier
-    Policy -.-> Router
+    Router -->|future trunk| FutureCarrier
+    Policy -->|future policy| Router
 
     B2BUA -->|internal media| Internal
     B2BUA -->|NG control| RTPE
     SippA -->|RTP| Internal
     Internal -->|RTP| SippB
-    SippA ==>|RTP| RTPE
-    RTPE ==>|RTP| SippB
-    RTPE -.-> FutureQoS
+    SippA -->|RTP via RTPengine| RTPE
+    RTPE -->|RTP via RTPengine| SippB
+    RTPE -->|future metrics| FutureQoS
 
     Helm --> Listener
     B2BUA --> Logs
@@ -85,14 +85,14 @@ flowchart LR
     RTPE --> Logs
     Logs --> Pcap
     Logs --> Report
-    FutureQoS -.-> FutureMetrics
+    FutureQoS -->|future metrics| FutureMetrics
 
     classDef access fill:#E0F2FE,stroke:#0369A1,color:#0C4A6E,stroke-width:2px
     classDef control fill:#DBEAFE,stroke:#1D4ED8,color:#1E3A8A,stroke-width:2px
     classDef media fill:#ECFDF5,stroke:#047857,color:#064E3B,stroke-width:2px
     classDef peer fill:#F5F3FF,stroke:#7C3AED,color:#3B0764,stroke-width:2px
     classDef ops fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:2px
-    classDef future fill:#FFF7ED,stroke:#F97316,color:#7C2D12,stroke-width:2px,stroke-dasharray:5 4
+    classDef future fill:#FFF7ED,stroke:#F97316,color:#7C2D12,stroke-width:2px
 
     class SippA,RegA access
     class FuturePhone,FutureWeb,Policy,FutureQoS,FutureCarrier,FutureMetrics future
@@ -124,15 +124,18 @@ flowchart LR
     Helm --> Config
     Config --> SBC
 
-    A <-->|SIP INVITE / REGISTER / ACK / BYE| SBC
-    SBC <-->|SIP outbound leg| B
+    A -->|SIP INVITE / REGISTER / ACK / BYE| SBC
+    SBC -->|SIP responses| A
+    SBC -->|SIP outbound leg| B
+    B -->|SIP responses| SBC
 
-    A -.->|Internal-media profiles: RTP| SBC
-    SBC -.->|Internal-media profiles: RTP / transcoding| B
+    A -->|Internal-media profiles: RTP| SBC
+    SBC -->|Internal-media profiles: RTP / transcoding| B
 
-    SBC <-->|RTPengine offer / answer / query| RTPE
-    A ==>|RTPengine profiles: RTP| RTPE
-    RTPE ==>|RTPengine profiles: RTP| B
+    SBC -->|RTPengine offer / answer / query| RTPE
+    RTPE -->|RTPengine result| SBC
+    A -->|RTPengine profiles: RTP| RTPE
+    RTPE -->|RTPengine profiles: RTP| B
 
     SBC --> Logs
     Runner --> Logs
@@ -150,12 +153,6 @@ flowchart LR
     class Dev,Runner,Helm,Config config
     class Logs,Report observability
 
-    linkStyle 0,1,2,3 stroke:#0284c7,stroke-width:2px
-    linkStyle 4,5 stroke:#16a34a,stroke-width:3px
-    linkStyle 6,7 stroke:#f97316,stroke-width:3px,stroke-dasharray:6 4
-    linkStyle 8 stroke:#7c3aed,stroke-width:3px
-    linkStyle 9,10 stroke:#dc2626,stroke-width:4px
-    linkStyle 11,12,13 stroke:#64748b,stroke-width:2px
 ```
 
 ## Low-Level Service Network
@@ -175,7 +172,7 @@ flowchart TB
         Dialog["Dialog State<br/>Call-ID, tags, CSeq"]
         Registrar["Registrar<br/>REGISTER Contact store"]
         Router["Routing Engine<br/>registrar, static trunk, E.164 policy"]
-        B2BUA["B2BUA Leg Manager<br/>A-leg <-> B-leg"]
+        B2BUA["B2BUA Leg Manager<br/>A-leg to B-leg"]
     end
 
     subgraph MediaPlane["Media Plane"]
@@ -226,11 +223,6 @@ flowchart TB
     class RtpengineClient,Rtpengine rtpengine
     class SipLog,MediaLog,TransLog,PlatformLog,Pcap,Html obs
 
-    linkStyle 0,1,2 stroke:#0284c7,stroke-width:2px
-    linkStyle 3,4,5,6,7,8,9 stroke:#16a34a,stroke-width:3px
-    linkStyle 10 stroke:#f97316,stroke-width:3px
-    linkStyle 11,12 stroke:#7c3aed,stroke-width:3px
-    linkStyle 13,14,15,16,17,18,19,20,21,22 stroke:#64748b,stroke-width:2px
 ```
 
 ## SIPp Regression Testing Network
@@ -284,12 +276,6 @@ flowchart TD
     class Media,PcapReplay media
     class Capture,Result,More,Report report
 
-    linkStyle 0,1,2,3,4 stroke:#0284c7,stroke-width:2px
-    linkStyle 5,6,7,8 stroke:#7c3aed,stroke-width:2px
-    linkStyle 9 stroke:#dc2626,stroke-width:3px
-    linkStyle 10,11,12,13 stroke:#16a34a,stroke-width:3px
-    linkStyle 14,15,16 stroke:#f97316,stroke-width:3px
-    linkStyle 17,18,19,20,21 stroke:#64748b,stroke-width:2px
 ```
 
 ## Basic B2BUA Call Path
@@ -311,8 +297,8 @@ flowchart LR
     SBC -->|"08 200 OK"| A
     A -->|"09 ACK"| SBC
     SBC -->|"10 ACK"| B
-    A ==>|"11 RTP"| Media
-    Media ==>|"12 RTP"| B
+    A -->|"11 RTP"| Media
+    Media -->|"12 RTP"| B
     A -->|"13 BYE"| SBC
     SBC -->|"14 200 OK"| A
     SBC -->|"15 BYE"| B
@@ -326,9 +312,6 @@ flowchart LR
     class SBC sbc
     class Media media
 
-    linkStyle 0,2,8,9,12,14 stroke:#16a34a,stroke-width:3px
-    linkStyle 1,3,4,5,6,7,13,15 stroke:#22c55e,stroke-width:2px
-    linkStyle 10,11 stroke:#f97316,stroke-width:4px
 ```
 
 ## Network Roles
@@ -387,13 +370,13 @@ flowchart TB
     Current --> Esbc
     Current --> MediaQuality
     Current --> Kubernetes
-    Current -.-> WebRTC
-    Current -.-> AiVoice
+    Current --> WebRTC
+    Current --> AiVoice
     Current --> Observability
 
     classDef current fill:#DBEAFE,stroke:#1D4ED8,color:#1E3A8A,stroke-width:3px
     classDef near fill:#ECFDF5,stroke:#047857,color:#064E3B,stroke-width:2px
-    classDef future fill:#FFF7ED,stroke:#F97316,color:#7C2D12,stroke-width:2px,stroke-dasharray:5 4
+    classDef future fill:#FFF7ED,stroke:#F97316,color:#7C2D12,stroke-width:2px
     classDef obs fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:2px
 
     class Current current
