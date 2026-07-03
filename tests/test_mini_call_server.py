@@ -317,10 +317,32 @@ class RtpengineRetryTests(unittest.TestCase):
         async def request():
             return next(responses)
 
-        response, samples = asyncio.run(server.query_rtpengine_until_stable(request, delay=0))
+        response, samples, retries = asyncio.run(server.query_rtpengine_until_stable(request, delay=0))
 
         self.assertEqual(server.rtpengine_packet_total(response), 6000)
         self.assertEqual(samples, (5999, 6000, 6000))
+        self.assertEqual(retries, 0)
+
+    def test_rtpengine_query_retries_transient_timeout_before_stability_check(self):
+        responses = iter(
+            [
+                asyncio.TimeoutError(),
+                {"totals": {"RTP": {"packets": 6000}}},
+                {"totals": {"RTP": {"packets": 6000}}},
+            ]
+        )
+
+        async def request():
+            response = next(responses)
+            if isinstance(response, BaseException):
+                raise response
+            return response
+
+        response, samples, retries = asyncio.run(server.query_rtpengine_until_stable(request, delay=0))
+
+        self.assertEqual(server.rtpengine_packet_total(response), 6000)
+        self.assertEqual(samples, (6000, 6000))
+        self.assertEqual(retries, 1)
 
 class DigestAuthTests(unittest.TestCase):
     def test_parse_digest_header_and_response(self):

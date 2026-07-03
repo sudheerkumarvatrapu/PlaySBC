@@ -1988,11 +1988,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     async def _delete_rtpengine_call(self, b2bua_call: B2BUACall) -> None:
         assert self.rtpengine_client is not None
         try:
-            query_response, packet_samples = await query_rtpengine_until_stable(
-                lambda: self.rtpengine_client.query(
-                    call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
-                    from_tag=b2bua_call.rtpengine_from_tag,
-                    to_tag=b2bua_call.rtpengine_to_tag,
+            query_timeout = min(max(self.rtpengine_client.timeout, 0.050), 1.0)
+            query_response, packet_samples, retry_count = await query_rtpengine_until_stable(
+                lambda: asyncio.wait_for(
+                    self.rtpengine_client.query(
+                        call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
+                        from_tag=b2bua_call.rtpengine_from_tag,
+                        to_tag=b2bua_call.rtpengine_to_tag,
+                    ),
+                    timeout=query_timeout,
                 )
             )
             summary = {
@@ -2012,11 +2016,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     f"rtcp_packets_total={rtcp_totals.get('packets', 0)} "
                     f"rtcp_bytes_total={rtcp_totals.get('bytes', 0)} "
                     f"rtcp_errors_total={rtcp_totals.get('errors', 0)} "
-                    f"query_packet_samples={','.join(str(value) for value in packet_samples)}"
+                    f"query_packet_samples={','.join(str(value) for value in packet_samples)} "
+                    f"query_retry_count={retry_count}"
                 )
             b2bua_call.flow_log.write("RTPENGINE QUERY", detail)
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
-            b2bua_call.flow_log.write("RTPENGINE QUERY FAILED", str(exc))
+            error = str(exc) or "no additional detail"
+            b2bua_call.flow_log.write("RTPENGINE QUERY FAILED", f"error_type={type(exc).__name__} error={error}")
         try:
             await self.rtpengine_client.delete(
                 call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
@@ -2519,21 +2525,29 @@ def rtpengine_packet_total(response: Dict[str, Any]) -> int:
 
 async def query_rtpengine_until_stable(
     request: Callable[[], Awaitable[Dict[str, Any]]],
-    attempts: int = 3,
+    attempts: int = 4,
     delay: float = 0.050,
-) -> Tuple[Dict[str, Any], Tuple[int, ...]]:
+) -> Tuple[Dict[str, Any], Tuple[int, ...], int]:
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
     samples: List[int] = []
     response: Dict[str, Any] = {}
+    retry_count = 0
     for attempt in range(attempts):
-        response = await request()
+        try:
+            response = await request()
+        except (asyncio.TimeoutError, OSError, RtpengineError):
+            retry_count += 1
+            if attempt + 1 >= attempts:
+                raise
+            await asyncio.sleep(delay * retry_count)
+            continue
         samples.append(rtpengine_packet_total(response))
         if len(samples) >= 2 and samples[-1] == samples[-2]:
             break
         if attempt + 1 < attempts:
             await asyncio.sleep(delay)
-    return response, tuple(samples)
+    return response, tuple(samples), retry_count
 
 
 def build_sip_request(method: str, request_uri: str, headers: Dict[str, str], body: str = "") -> bytes:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -100,7 +101,8 @@ BASE_DEFAULTS = {
     "media_driver": "python",
     "sipp_pcap_sudo": False,
     "media_start_delay": 1.0,
-    "media_teardown_guard_ms": 0,
+    "media_delivery_threshold_percent": 100.0,
+    "media_per_call_threshold_percent": 100.0,
     "server_codec": None,
     "media_backend": "internal",
     "rtpengine_url": "udp://127.0.0.1:2223",
@@ -240,7 +242,8 @@ B2BUA_PROFILES = {
         "server_codec": "PCMA",
         "media_backend": "rtpengine",
         "rtpengine_timeout": 8.0,
-        "media_teardown_guard_ms": 1000,
+        "media_delivery_threshold_percent": 99.5,
+        "media_per_call_threshold_percent": 99.0,
         "ladder": False,
     },
     "esbc-options-keepalive": {
@@ -352,10 +355,6 @@ def sipp_timeout_seconds(calls: int, rate: int, hold_ms: int) -> int:
     traffic_seconds = (max(calls, 1) + safe_rate - 1) // safe_rate
     hold_seconds = max(hold_ms, 0) // 1000
     return max(30, traffic_seconds + hold_seconds + 60)
-
-
-def signaling_hold_ms(args: argparse.Namespace) -> int:
-    return int(args.hold_ms) + max(int(getattr(args, "media_teardown_guard_ms", 0)), 0)
 
 
 def resolve_scenario_path(value: str, fallback: Path) -> Path:
@@ -546,9 +545,9 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-m",
         str(args.calls),
         "-l",
-        str(call_limit(args.calls, args.rate, signaling_hold_ms(args))),
+        str(call_limit(args.calls, args.rate, args.hold_ms)),
         "-timeout",
-        str(sipp_timeout_seconds(args.calls, args.rate, signaling_hold_ms(args))),
+        str(sipp_timeout_seconds(args.calls, args.rate, args.hold_ms)),
         "-timeout_error",
         "-nostdin",
         "-min_rtp_port",
@@ -586,9 +585,9 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-d",
         str(args.hold_ms),
         "-l",
-        str(call_limit(args.calls, args.rate, signaling_hold_ms(args))),
+        str(call_limit(args.calls, args.rate, args.hold_ms)),
         "-timeout",
-        str(sipp_timeout_seconds(args.calls, args.rate, signaling_hold_ms(args))),
+        str(sipp_timeout_seconds(args.calls, args.rate, args.hold_ms)),
         "-timeout_error",
         "-nostdin",
         "-min_rtp_port",
@@ -815,13 +814,6 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
             uac_payloads, uac_rtpmaps = uac_sdp_payloads(args)
             text = text.replace("[uac_sdp_payloads]", uac_payloads)
             text = text.replace("[uac_sdp_rtpmaps]", uac_rtpmaps)
-            teardown_guard = max(int(getattr(args, "media_teardown_guard_ms", 0)), 0)
-            if teardown_guard:
-                text = text.replace(
-                    "<pause />",
-                    f'<pause milliseconds="{signaling_hold_ms(args)}" />',
-                    1,
-                )
             if str(getattr(args, "sip_transport", "udp")).lower() == "tcp":
                 text = re.sub(
                     r"(?m)^(\s+(?:ACK|BYE) sip:\[service\]@\[remote_ip\]:\[remote_port\]) SIP/2\.0$",
@@ -1952,7 +1944,11 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
     path = log_dir / "log.media"
     stats = {
         "query_count": 0,
+        "query_failures": 0,
+        "query_retries": 0,
         "rtp_packets_total": 0,
+        "rtp_packets_min": 0,
+        "rtp_packets_max": 0,
         "rtp_bytes_total": 0,
         "rtp_errors_total": 0,
         "rtcp_packets_total": 0,
@@ -1962,6 +1958,11 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
     if not path.exists():
         return stats
 
+    def record_rtp_packets(packet_count: int) -> None:
+        stats["rtp_packets_total"] += packet_count
+        stats["rtp_packets_min"] = packet_count if stats["rtp_packets_min"] == 0 else min(stats["rtp_packets_min"], packet_count)
+        stats["rtp_packets_max"] = max(stats["rtp_packets_max"], packet_count)
+
     def parse_query_detail(detail: str) -> bool:
         compact_packets = re.search(r"\brtp_packets_total=(\d+)", detail)
         compact_bytes = re.search(r"\brtp_bytes_total=(\d+)", detail)
@@ -1970,12 +1971,14 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
         compact_rtcp_bytes = re.search(r"\brtcp_bytes_total=(\d+)", detail)
         compact_rtcp_errors = re.search(r"\brtcp_errors_total=(\d+)", detail)
         if compact_packets:
-            stats["rtp_packets_total"] += int(compact_packets.group(1))
+            record_rtp_packets(int(compact_packets.group(1)))
             stats["rtp_bytes_total"] += int(compact_bytes.group(1)) if compact_bytes else 0
             stats["rtp_errors_total"] += int(compact_errors.group(1)) if compact_errors else 0
             stats["rtcp_packets_total"] += int(compact_rtcp_packets.group(1)) if compact_rtcp_packets else 0
             stats["rtcp_bytes_total"] += int(compact_rtcp_bytes.group(1)) if compact_rtcp_bytes else 0
             stats["rtcp_errors_total"] += int(compact_rtcp_errors.group(1)) if compact_rtcp_errors else 0
+            compact_retries = re.search(r"\bquery_retry_count=(\d+)", detail)
+            stats["query_retries"] += int(compact_retries.group(1)) if compact_retries else 0
             return True
 
         if not detail.startswith("{"):
@@ -1986,7 +1989,7 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
             return False
         rtp_totals = decoded.get("totals", {}).get("RTP", {}) if isinstance(decoded, dict) else {}
         rtcp_totals = decoded.get("totals", {}).get("RTCP", {}) if isinstance(decoded, dict) else {}
-        stats["rtp_packets_total"] += int(rtp_totals.get("packets") or 0)
+        record_rtp_packets(int(rtp_totals.get("packets") or 0))
         stats["rtp_bytes_total"] += int(rtp_totals.get("bytes") or 0)
         stats["rtp_errors_total"] += int(rtp_totals.get("errors") or 0)
         stats["rtcp_packets_total"] += int(rtcp_totals.get("packets") or 0)
@@ -1996,15 +1999,21 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
 
     pending_query = False
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if "RTPENGINE QUERY" not in line:
-            if pending_query:
-                parse_query_detail(line)
-                pending_query = False
+        if pending_query:
+            if parse_query_detail(line):
+                stats["query_count"] += 1
+            pending_query = False
             continue
-        stats["query_count"] += 1
+        if "RTPENGINE QUERY FAILED" in line:
+            stats["query_failures"] += 1
+            continue
+        if "B2BUA RTPENGINE QUERY" not in line:
+            continue
 
         _prefix, separator, payload = line.rpartition(" | ")
-        if not separator or not parse_query_detail(payload):
+        if separator and parse_query_detail(payload):
+            stats["query_count"] += 1
+        else:
             pending_query = True
     return stats
 
@@ -2036,9 +2045,14 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
                     f"media_codec={args.media_codec}",
                     f"media_pcap={args.media_pcap_resolved}",
                     f"hold_ms={args.hold_ms}",
-                    f"media_teardown_guard_ms={getattr(args, 'media_teardown_guard_ms', 0)}",
+                    f"media_delivery_threshold_percent={getattr(args, 'media_delivery_threshold_percent', 100.0)}",
+                    f"media_per_call_threshold_percent={getattr(args, 'media_per_call_threshold_percent', 100.0)}",
                     f"rtpengine_query_count={query_stats['query_count']}",
+                    f"rtpengine_query_failures={query_stats['query_failures']}",
+                    f"rtpengine_query_retries={query_stats['query_retries']}",
                     f"rtpengine_rtp_packets_total={query_stats['rtp_packets_total']}",
+                    f"rtpengine_rtp_packets_min={query_stats['rtp_packets_min']}",
+                    f"rtpengine_rtp_packets_max={query_stats['rtp_packets_max']}",
                     f"rtpengine_rtp_bytes_total={query_stats['rtp_bytes_total']}",
                     f"rtpengine_rtp_errors_total={query_stats['rtp_errors_total']}",
                     f"rtpengine_rtcp_packets_total={query_stats['rtcp_packets_total']}",
@@ -2065,7 +2079,8 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
                 f"media_codec={args.media_codec}",
                 f"media_pcap={args.media_pcap_resolved}",
                 f"hold_ms={args.hold_ms}",
-                f"media_teardown_guard_ms={getattr(args, 'media_teardown_guard_ms', 0)}",
+                f"media_delivery_threshold_percent={getattr(args, 'media_delivery_threshold_percent', 100.0)}",
+                f"media_per_call_threshold_percent={getattr(args, 'media_per_call_threshold_percent', 100.0)}",
                 f"server_rtp_received_packets_total={packets}",
                 f"server_rtcp_received_packets_total={summary['rtcp_packets_received_total']}",
                 f"server_rtcp_sent_packets_total={summary['rtcp_packets_sent_total']}",
@@ -2108,12 +2123,46 @@ def expected_rtpengine_load_packets(args: argparse.Namespace) -> int:
     return int(args.calls) * 2 * packets_per_leg
 
 
+def rtpengine_query_result_count(log_dir: Path) -> int:
+    path = log_dir / "log.media"
+    if not path.exists():
+        return 0
+    return sum(
+        1
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if "B2BUA RTPENGINE QUERY |" in line or "B2BUA RTPENGINE QUERY FAILED |" in line
+    )
+
+
+def wait_for_rtpengine_load_queries(log_dir: Path, expected: int, timeout: float = 6.0) -> Tuple[int, float]:
+    started = time.monotonic()
+    observed = rtpengine_query_result_count(log_dir)
+    deadline = started + timeout
+    while observed < expected and time.monotonic() < deadline:
+        time.sleep(0.050)
+        observed = rtpengine_query_result_count(log_dir)
+    return observed, time.monotonic() - started
+
+
 def rtpengine_load_media_complete(log_dir: Path, args: argparse.Namespace) -> bool:
     if str(getattr(args, "profile", "")) != "load-5cps-60s-rtpengine-transcoding":
         return True
     stats = rtpengine_query_stats(log_dir)
     expected = expected_rtpengine_load_packets(args)
-    complete = stats["query_count"] == int(args.calls) and stats["rtp_packets_total"] >= expected
+    threshold = min(max(float(getattr(args, "media_delivery_threshold_percent", 99.5)), 0.0), 100.0)
+    per_call_threshold = min(max(float(getattr(args, "media_per_call_threshold_percent", 99.0)), 0.0), 100.0)
+    required = math.ceil(expected * threshold / 100.0)
+    expected_per_call = max(int(args.hold_ms) // 20, 0) * 2
+    required_per_call = math.ceil(expected_per_call * per_call_threshold / 100.0)
+    delivery = (stats["rtp_packets_total"] / expected * 100.0) if expected else 100.0
+    loss = max(100.0 - delivery, 0.0)
+    complete = (
+        stats["query_count"] == int(args.calls)
+        and stats["query_failures"] == 0
+        and stats["rtp_errors_total"] == 0
+        and stats["rtp_packets_total"] >= required
+        and stats["rtp_packets_min"] >= required_per_call
+    )
     append_log_section(
         log_dir,
         "log.media",
@@ -2122,7 +2171,13 @@ def rtpengine_load_media_complete(log_dir: Path, args: argparse.Namespace) -> bo
             [
                 f"status={'complete' if complete else 'incomplete'}",
                 f"expected_queries={args.calls} observed_queries={stats['query_count']}",
+                f"query_failures={stats['query_failures']} query_retries={stats['query_retries']}",
                 f"expected_rtp_packets={expected} observed_rtp_packets={stats['rtp_packets_total']}",
+                f"required_rtp_packets={required} media_delivery_threshold_percent={threshold:.3f}",
+                f"required_rtp_packets_per_call={required_per_call} media_per_call_threshold_percent={per_call_threshold:.3f}",
+                f"media_delivery_percent={delivery:.3f} media_loss_percent={loss:.3f}",
+                f"per_call_rtp_packets_min={stats['rtp_packets_min']} per_call_rtp_packets_max={stats['rtp_packets_max']}",
+                f"rtp_errors_total={stats['rtp_errors_total']}",
             ]
         ),
     )
@@ -2218,7 +2273,8 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"calls={args.calls}",
         f"rate={args.rate}",
         f"hold_ms={args.hold_ms}",
-        f"media_teardown_guard_ms={getattr(args, 'media_teardown_guard_ms', 0)}",
+        f"media_delivery_threshold_percent={getattr(args, 'media_delivery_threshold_percent', 100.0)}",
+        f"media_per_call_threshold_percent={getattr(args, 'media_per_call_threshold_percent', 100.0)}",
         f"server_codec={args.server_codec}",
         f"media_enabled={args.media_enabled}",
         f"media_codec={args.media_codec or ''}",
@@ -2399,10 +2455,16 @@ def main() -> int:
     )
     parser.add_argument("--media-start-delay", type=float, default=BASE_DEFAULTS["media_start_delay"], help="Seconds to wait after starting SIPp A before Python media replay starts")
     parser.add_argument(
-        "--media-teardown-guard-ms",
-        type=int,
-        default=BASE_DEFAULTS["media_teardown_guard_ms"],
-        help="Keep the SIP dialog up briefly after the media fixture ends so replay workers can drain",
+        "--media-delivery-threshold-percent",
+        type=float,
+        default=BASE_DEFAULTS["media_delivery_threshold_percent"],
+        help="Minimum aggregate RTP delivery percentage required by media load profiles",
+    )
+    parser.add_argument(
+        "--media-per-call-threshold-percent",
+        type=float,
+        default=BASE_DEFAULTS["media_per_call_threshold_percent"],
+        help="Minimum RTP delivery percentage required for every observed media call",
     )
     parser.add_argument("--server-codec", choices=sorted(MEDIA_PCAPS), default=BASE_DEFAULTS["server_codec"], help="Server preferred G.711 codec; set different from media codec to exercise transcoding")
     parser.add_argument("--media-backend", choices=("internal", "rtpengine"), default=BASE_DEFAULTS["media_backend"])
@@ -2595,7 +2657,7 @@ def main() -> int:
 
             for name, command, process, media_started in media_processes:
                 try:
-                    media_rc = process.wait(timeout=max(5, int(signaling_hold_ms(args) / 1000) + 10))
+                    media_rc = process.wait(timeout=max(5, int(args.hold_ms / 1000) + 10))
                 except subprocess.TimeoutExpired:
                     stop_process(process)
                     media_rc = process.returncode if process.returncode is not None else 1
@@ -2603,10 +2665,21 @@ def main() -> int:
             media_processes = []
 
             if uas_process is not None:
-                uas_rc = uas_process.wait(timeout=max(30, int(signaling_hold_ms(args) / 1000) + 30))
+                uas_rc = uas_process.wait(timeout=max(30, int(args.hold_ms / 1000) + 30))
                 uas_duration = time.monotonic() - uas_started if uas_started is not None else 0.0
                 results.append(SmokeResult("sipp-b-uas", uas_command, uas_rc, "passed" if uas_rc == 0 else "failed", uas_duration))
                 uas_process = None
+            if args.profile == "load-5cps-60s-rtpengine-transcoding":
+                observed_queries, drain_duration = wait_for_rtpengine_load_queries(log_dir, args.calls)
+                append_log_section(
+                    log_dir,
+                    "log.platform",
+                    "RTPENGINE LOAD QUERY DRAIN",
+                    (
+                        f"expected_queries={args.calls} observed_query_results={observed_queries} "
+                        f"duration_seconds={drain_duration:.3f}"
+                    ),
+                )
         finally:
             for _name, _command, process, _started in media_processes:
                 stop_process(process)

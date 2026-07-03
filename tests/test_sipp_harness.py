@@ -362,7 +362,8 @@ class SippScenarioTests(unittest.TestCase):
         self.assertGreaterEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s"]["server_rtp_max"], 26500)
         rtpengine_load = run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s-rtpengine-transcoding"]
         self.assertEqual(rtpengine_load["rtpengine_timeout"], 8.0)
-        self.assertEqual(rtpengine_load["media_teardown_guard_ms"], 1000)
+        self.assertEqual(rtpengine_load["media_delivery_threshold_percent"], 99.5)
+        self.assertEqual(rtpengine_load["media_per_call_threshold_percent"], 99.0)
 
     def test_b2bua_load_runs_use_stats_only_sipp_tracing(self):
         values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
@@ -537,28 +538,6 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("a=rtpmap:8 PCMA/8000", uas_xml)
             self.assertNotIn("a=rtpmap:0 PCMU/8000", uas_xml)
             self.assertNotIn("RTP/AVP 0 8 101", uas_xml)
-
-    def test_rtpengine_load_media_scenario_keeps_dialog_up_for_replay_drain(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp) / "load-run"
-            (run_dir / "sipp-a-uac").mkdir(parents=True)
-            (run_dir / "sipp-b-uas").mkdir(parents=True)
-            args = argparse_namespace(
-                hold_ms=60000,
-                media_teardown_guard_ms=1000,
-                media_enabled=True,
-                media_pcap="pcap/g711u_60s.pcap",
-                media_driver="sipp-pcap",
-                media_codec="PCMU",
-                server_codec="PCMA",
-                sip_transport="udp",
-            )
-
-            run_b2bua_sipp_smoke.prepare_media_scenarios(args, run_dir)
-
-            uac_xml = args.uac_scenario.read_text(encoding="ISO-8859-1")
-            self.assertIn('<pause milliseconds="61000" />', uac_xml)
-            self.assertEqual(run_b2bua_sipp_smoke.signaling_hold_ms(args), 61000)
 
     def test_python_media_driver_uses_plain_sipp_scenarios_and_player_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2026,7 +2005,7 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("status=delegated_and_media_confirmed", transcoding)
             self.assertIn("rtpengine_rtp_packets_total=6000", transcoding)
 
-    def test_rtpengine_load_completeness_requires_all_expected_packets(self):
+    def test_rtpengine_load_completeness_accepts_full_delivery(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
             run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
@@ -2034,6 +2013,7 @@ class SippScenarioTests(unittest.TestCase):
                 profile="load-5cps-60s-rtpengine-transcoding",
                 calls=300,
                 hold_ms=60000,
+                media_delivery_threshold_percent=99.5,
             )
             (log_dir / "log.media").write_text(
                 "\n".join(
@@ -2049,6 +2029,131 @@ class SippScenarioTests(unittest.TestCase):
 
             text = (log_dir / "log.media").read_text(encoding="utf-8")
             self.assertIn("expected_rtp_packets=1800000 observed_rtp_packets=1800000", text)
+            self.assertIn("media_delivery_percent=100.000 media_loss_percent=0.000", text)
+
+    def test_rtpengine_load_query_drain_counts_success_and_failure_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            (log_dir / "log.media").write_text(
+                "\n".join(
+                    [
+                        "2026-07-03 20:00:00 | B2BUA RTPENGINE QUERY | call_id=1 | result=ok",
+                        "2026-07-03 20:00:01 | B2BUA RTPENGINE QUERY FAILED | call_id=2 | error_type=TimeoutError",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            observed, duration = run_b2bua_sipp_smoke.wait_for_rtpengine_load_queries(log_dir, 2, timeout=0)
+
+            self.assertEqual(observed, 2)
+            self.assertGreaterEqual(duration, 0)
+
+    def test_rtpengine_load_completeness_uses_strict_delivery_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            args = argparse_namespace(
+                profile="load-5cps-60s-rtpengine-transcoding",
+                calls=2,
+                hold_ms=60000,
+                media_delivery_threshold_percent=99.5,
+            )
+            (log_dir / "log.media").write_text(
+                "\n".join(
+                    [
+                        "2026-07-03 20:00:00 | B2BUA RTPENGINE QUERY | call_id=1 | "
+                        "result=ok rtp_packets_total=5970 rtp_bytes_total=1 rtp_errors_total=0 query_retry_count=1",
+                        "2026-07-03 20:00:01 | B2BUA RTPENGINE QUERY | call_id=2 | "
+                        "result=ok rtp_packets_total=5970 rtp_bytes_total=1 rtp_errors_total=0 query_retry_count=0",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(run_b2bua_sipp_smoke.rtpengine_load_media_complete(log_dir, args))
+
+            text = (log_dir / "log.media").read_text(encoding="utf-8")
+            self.assertIn("required_rtp_packets=11940", text)
+            self.assertIn("required_rtp_packets_per_call=5940", text)
+            self.assertIn("query_failures=0 query_retries=1", text)
+            self.assertIn("per_call_rtp_packets_min=5970 per_call_rtp_packets_max=5970", text)
+
+    def test_rtpengine_load_completeness_rejects_failed_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            args = argparse_namespace(
+                profile="load-5cps-60s-rtpengine-transcoding",
+                calls=2,
+                hold_ms=60000,
+                media_delivery_threshold_percent=99.5,
+            )
+            (log_dir / "log.media").write_text(
+                "\n".join(
+                    [
+                        "2026-07-03 20:00:00 | B2BUA RTPENGINE QUERY | call_id=1 | "
+                        "result=ok rtp_packets_total=6000 rtp_bytes_total=1 rtp_errors_total=0",
+                        "2026-07-03 20:00:01 | B2BUA RTPENGINE QUERY FAILED | call_id=2 | "
+                        "error_type=TimeoutError error=no additional detail",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(run_b2bua_sipp_smoke.rtpengine_load_media_complete(log_dir, args))
+
+            stats = run_b2bua_sipp_smoke.rtpengine_query_stats(log_dir)
+            self.assertEqual(stats["query_count"], 1)
+            self.assertEqual(stats["query_failures"], 1)
+
+    def test_rtpengine_load_completeness_rejects_delivery_below_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            args = argparse_namespace(
+                profile="load-5cps-60s-rtpengine-transcoding",
+                calls=2,
+                hold_ms=60000,
+                media_delivery_threshold_percent=99.5,
+            )
+            (log_dir / "log.media").write_text(
+                "\n".join(
+                    f"2026-07-03 20:00:0{index} | B2BUA RTPENGINE QUERY | call_id={index} | "
+                    f"result=ok rtp_packets_total={packets} rtp_bytes_total=1 rtp_errors_total=0"
+                    for index, packets in ((1, 5969), (2, 5970))
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(run_b2bua_sipp_smoke.rtpengine_load_media_complete(log_dir, args))
+
+    def test_rtpengine_load_completeness_rejects_bad_individual_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            run_b2bua_sipp_smoke.initialize_log_dir(log_dir)
+            args = argparse_namespace(
+                profile="load-5cps-60s-rtpengine-transcoding",
+                calls=2,
+                hold_ms=60000,
+                media_delivery_threshold_percent=90.0,
+                media_per_call_threshold_percent=99.0,
+            )
+            (log_dir / "log.media").write_text(
+                "\n".join(
+                    f"2026-07-03 20:00:0{index} | B2BUA RTPENGINE QUERY | call_id={index} | "
+                    f"result=ok rtp_packets_total={packets} rtp_bytes_total=1 rtp_errors_total=0"
+                    for index, packets in ((1, 5900), (2, 6000))
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(run_b2bua_sipp_smoke.rtpengine_load_media_complete(log_dir, args))
 
 
 class RealTopologyTests(unittest.TestCase):
