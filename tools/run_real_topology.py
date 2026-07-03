@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import shutil
 import socket
@@ -165,6 +166,59 @@ def rtp_payload_types(path: Path) -> dict[tuple[str, str], set[int]]:
     return flows
 
 
+def sipp_stat_summary(stats_path: Path) -> str:
+    with stats_path.open(encoding="utf-8", errors="replace", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter=";"))
+    if not rows:
+        return "statistics=empty"
+    final = rows[-1]
+
+    def value(name: str) -> str:
+        return str(final.get(name, "") or "0").strip()
+
+    return " ".join(
+        [
+            f"calls_created={value('TotalCallCreated')}",
+            f"successful={value('SuccessfulCall(C)')}",
+            f"failed={value('FailedCall(C)')}",
+            f"retransmissions={value('Retransmissions(C)')}",
+            f"warnings={value('Warnings(C)')}",
+            f"fatal_errors={value('FatalErrors(C)')}",
+            f"call_length={value('CallLength(C)')}",
+        ]
+    )
+
+
+def consolidate_sipp_evidence(bundle: Path) -> None:
+    log_path = bundle / "log.sipp"
+    if not log_path.exists():
+        log_path.write_text(
+            f"{time.strftime('%Y-%m-%d %H:%M:%S')} | LOG START | file=log.sipp\n",
+            encoding="utf-8",
+        )
+    roles = (
+        ("sipp-a", "CORE LEG SIPP RESULT", "role=uac endpoint=172.28.0.10 codec=PCMU"),
+        ("sipp-b", "PEER LEG SIPP RESULT", "role=uas endpoint=192.168.28.30 codec=PCMA"),
+    )
+    with log_path.open("a", encoding="utf-8") as log_file:
+        for folder_name, title, identity in roles:
+            folder = bundle / folder_name
+            stats_files = sorted(folder.glob("*.csv")) if folder.exists() else []
+            errors = []
+            if folder.exists():
+                for error_path in sorted(folder.glob("*errors.log")):
+                    error_text = error_path.read_text(encoding="utf-8", errors="replace").strip()
+                    if error_text:
+                        errors.append(error_text)
+            summary = sipp_stat_summary(stats_files[-1]) if stats_files else "statistics=not_started"
+            log_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {title}\n")
+            log_file.write(f"{identity} {summary} error_entries={len(errors)}\n")
+            for error in errors:
+                log_file.write(error.rstrip() + "\n")
+            if folder.exists():
+                shutil.rmtree(folder)
+
+
 def wait_for_rtpengine(env: dict[str, str], timeout: float = 20.0) -> None:
     deadline = time.monotonic() + timeout
     command = compose_command(
@@ -292,6 +346,7 @@ def main() -> int:
         topology_logs = run(compose_command("logs", "--no-color", "rtpengine", "playsbc"), env=env, check=False)
         (bundle / "topology.log").write_text(topology_logs.stdout + topology_logs.stderr, encoding="utf-8")
         run(compose_command("down", "--remove-orphans"), env=env, check=False)
+        consolidate_sipp_evidence(bundle)
 
     partials = [bundle / "signalling.pcap", bundle / "media.pcap"]
     packet_count = merge_pcaps(partials, bundle / "capture.pcap")

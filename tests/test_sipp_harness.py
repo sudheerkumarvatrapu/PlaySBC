@@ -1966,6 +1966,26 @@ class RealTopologyTests(unittest.TestCase):
 
             self.assertEqual(payloads[("192.168.28.40", "192.168.28.30")], {8})
 
+    def test_topology_combines_sipp_summaries_and_removes_leg_folders(self):
+        header = "TotalCallCreated;SuccessfulCall(C);FailedCall(C);Retransmissions(C);Warnings(C);FatalErrors(C);CallLength(C);\n"
+        row = "1;1;0;0;0;0;00:01:00;\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            for folder_name in ("sipp-a", "sipp-b"):
+                folder = bundle / folder_name
+                folder.mkdir()
+                (folder / "stats.csv").write_text(header + row, encoding="utf-8")
+                (folder / "messages.log").write_text("raw per-leg trace", encoding="utf-8")
+
+            run_real_topology.consolidate_sipp_evidence(bundle)
+
+            combined = (bundle / "log.sipp").read_text(encoding="utf-8")
+            self.assertIn("CORE LEG SIPP RESULT", combined)
+            self.assertIn("PEER LEG SIPP RESULT", combined)
+            self.assertEqual(combined.count("calls_created=1 successful=1 failed=0"), 2)
+            self.assertFalse((bundle / "sipp-a").exists())
+            self.assertFalse((bundle / "sipp-b").exists())
+
 
 def argparse_namespace(**values):
     class Namespace:
