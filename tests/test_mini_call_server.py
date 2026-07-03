@@ -290,6 +290,9 @@ class ConfigTests(unittest.TestCase):
                     '"b2bua_ladder_logs": false, '
                     '"media_backend": "rtpengine", '
                     '"rtpengine_url": "udp://127.0.0.1:2223", '
+                    '"rtpengine_directions": ["core", "peer"], '
+                    '"sip_advertised_ip": "172.28.0.20", '
+                    '"b2bua_advertised_ip": "192.168.28.20", '
                     '"rtpengine_timeout": 1.5}'
                 ),
                 encoding="utf-8",
@@ -315,6 +318,32 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.media_backend, "rtpengine")
             self.assertEqual(config.rtpengine_url, "udp://127.0.0.1:2223")
             self.assertEqual(config.rtpengine_timeout, 1.5)
+            self.assertEqual(config.rtpengine_directions, ("core", "peer"))
+            self.assertEqual(config.sip_advertised_ip, "172.28.0.20")
+            self.assertEqual(config.b2bua_advertised_ip, "192.168.28.20")
+
+    def test_dual_realm_protocol_advertises_core_and_peer_addresses(self):
+        protocol = server.SipServerProtocol(
+            "0.0.0.0",
+            5060,
+            media=None,
+            logger=server.SbcLogger(None),
+            default_payload=server.PCMU,
+            auth_realm="playsbc",
+            users={},
+            bridge_rooms=(),
+            b2bua_routes={},
+            route_policies=(),
+            b2bua_ladder_logs=False,
+            sip_advertised_ip="172.28.0.20",
+            b2bua_advertised_ip="192.168.28.20",
+            rtpengine_directions=("core", "peer"),
+        )
+
+        self.assertIn("192.168.28.20:5060", protocol.make_via_header())
+        self.assertEqual(protocol.local_contact_uri(), "sip:b2bua@192.168.28.20:5060")
+        self.assertEqual(protocol.sip_advertised_ip, "172.28.0.20")
+        self.assertEqual(protocol.rtpengine_directions, ("core", "peer"))
 
     def test_load_yaml_config_file(self):
         config = server.load_config_file(str(Path(__file__).resolve().parents[1] / "configs" / "config.b2bua.example.yaml"))
@@ -370,6 +399,14 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
             config_path.write_text('{"media_backend": "rtpengine", "rtpengine_url": "tcp://127.0.0.1:2223"}', encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                server.load_config_file(str(config_path))
+
+    def test_invalid_rtpengine_direction_count_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text('{"rtpengine_directions": ["core"]}', encoding="utf-8")
 
             with self.assertRaises(ValueError):
                 server.load_config_file(str(config_path))

@@ -1,0 +1,150 @@
+name: playsbc-real-topology
+
+x-sipp-common: &sipp-common
+  build:
+    context: .
+    dockerfile: docker/sipp.Dockerfile
+  cap_add:
+    - NET_RAW
+  volumes:
+    - ./sipp/scenarios:/scenarios:ro
+    - ${PLAYSBC_TOPOLOGY_OUTPUT:?Set PLAYSBC_TOPOLOGY_OUTPUT}:/output
+
+services:
+  rtpengine:
+    build:
+      context: .
+      dockerfile: docker/rtpengine.Dockerfile
+    command:
+      - >-
+        exec rtpengine --foreground --log-stderr
+        --interface=core/172.28.0.40
+        --interface=peer/192.168.28.40
+        --listen-ng=0.0.0.0:2223
+        --port-min=30000 --port-max=32000 --table=-1
+    networks:
+      core:
+        ipv4_address: 172.28.0.40
+      peer:
+        ipv4_address: 192.168.28.40
+
+  playsbc:
+    build:
+      context: .
+      dockerfile: docker/playsbc.Dockerfile
+    command: ["python3", "/app/mini_call_server.py", "--config", "/etc/playsbc/server.yaml"]
+    depends_on:
+      - rtpengine
+    volumes:
+      - ${PLAYSBC_TOPOLOGY_CONFIG:?Set PLAYSBC_TOPOLOGY_CONFIG}:/etc/playsbc/server.yaml:ro
+      - ${PLAYSBC_TOPOLOGY_OUTPUT:?Set PLAYSBC_TOPOLOGY_OUTPUT}:/var/log/playsbc
+    networks:
+      core:
+        ipv4_address: 172.28.0.20
+      peer:
+        ipv4_address: 192.168.28.20
+
+  sipp-b:
+    <<: *sipp-common
+    depends_on:
+      - playsbc
+    working_dir: /output/sipp-b
+    command:
+      - -sf
+      - /scenarios/topology/uas_peer_pcma.xml
+      - -s
+      - peer-b
+      - -i
+      - 192.168.28.30
+      - -mi
+      - 192.168.28.30
+      - -p
+      - "5060"
+      - -m
+      - "1"
+      - -d
+      - ${SIPP_HOLD_MS:-60000}
+      - -trace_msg
+      - -trace_err
+      - -trace_stat
+      - -nostdin
+      - -timeout
+      - "180"
+      - -timeout_error
+    networks:
+      peer:
+        ipv4_address: 192.168.28.30
+
+  sipp-a:
+    <<: *sipp-common
+    depends_on:
+      - playsbc
+      - sipp-b
+    working_dir: /output/sipp-a
+    command:
+      - 172.28.0.20:5060
+      - -sf
+      - /scenarios/topology/uac_core_pcmu.xml
+      - -s
+      - peer-b
+      - -key
+      - caller
+      - core-a
+      - -i
+      - 172.28.0.10
+      - -mi
+      - 172.28.0.10
+      - -p
+      - "5060"
+      - -m
+      - "1"
+      - -r
+      - "1"
+      - -d
+      - ${SIPP_HOLD_MS:-60000}
+      - -trace_msg
+      - -trace_err
+      - -trace_stat
+      - -nostdin
+      - -timeout
+      - "180"
+      - -timeout_error
+    networks:
+      core:
+        ipv4_address: 172.28.0.10
+
+  capture-signalling:
+    <<: *sipp-common
+    entrypoint: ["tcpdump"]
+    command: ["-U", "-i", "any", "-s", "0", "-w", "/output/signalling.pcap", "port", "5060", "or", "port", "2223"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - playsbc
+    network_mode: service:playsbc
+
+  capture-media:
+    <<: *sipp-common
+    entrypoint: ["tcpdump"]
+    command: ["-U", "-i", "any", "-s", "0", "-w", "/output/media.pcap", "udp", "portrange", "30000-32000"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - rtpengine
+    network_mode: service:rtpengine
+
+networks:
+  core:
+    name: playsbc-core
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+  peer:
+    name: playsbc-peer
+    internal: true
+    ipam:
+      config:
+        - subnet: 192.168.28.0/24

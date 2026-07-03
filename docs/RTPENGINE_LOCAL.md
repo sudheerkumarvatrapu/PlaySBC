@@ -9,6 +9,31 @@ SIP:  SIPp A <-> PlaySBC <-> SIPp B
 RTP:  SIPp A <-> RTPengine <-> SIPp B
 ```
 
+## Real Dual-Realm Lab
+
+The standard local regression below keeps its processes on loopback. To run actual network separation instead, start Docker Desktop and run:
+
+```bash
+python3 tools/run_real_topology.py
+```
+
+The topology uses two isolated Docker bridges:
+
+| Realm | SIPp | PlaySBC | RTPengine |
+| --- | --- | --- | --- |
+| Core | `172.28.0.10` | `172.28.0.20` | `172.28.0.40` |
+| Peer | `192.168.28.30` | `192.168.28.20` | `192.168.28.40` |
+
+PlaySBC and RTPengine are dual-homed. The initial RTPengine offer carries `direction=[core, peer]`, so its rewritten offer advertises the peer media address and its rewritten answer advertises the core media address. SIPp A and SIPp B never share a Docker network.
+
+Runtime config is rendered by Helm from `configs/topology/helm-values.yaml`. The run produces SBC logs, SIPp traces, `topology.log`, `result.txt`, and one merged `capture.pcap` under `logs/real-topology/<timestamp>/`.
+
+Use `--skip-build` after the images already exist:
+
+```bash
+python3 tools/run_real_topology.py --skip-build
+```
+
 ## macOS Docker Quick Start
 
 Run these commands from the PlaySBC repo root.

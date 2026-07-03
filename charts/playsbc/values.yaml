@@ -16,6 +16,8 @@ resources: {}
 playsbc:
   config:
     sip_ip: 0.0.0.0
+    sip_advertised_ip: ""
+    b2bua_advertised_ip: ""
     sip_port: 5062
     sip_transport: udp
     rtp_min: 30000
@@ -35,5 +37,6 @@ playsbc:
     media_backend: internal
     rtpengine_url: udp://rtpengine:2223
     rtpengine_timeout: 3.0
+    rtpengine_directions: []
     reject_unknown_routes: false
     debug: false

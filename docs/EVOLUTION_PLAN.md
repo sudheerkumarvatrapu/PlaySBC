@@ -15,6 +15,8 @@ Implemented and covered by unit tests plus SIPp regression:
 - G.711u/G.711a RTP media replay
 - Internal PCMU/PCMA transcoding
 - RTPengine media backend for anchoring and transcoding experiments
+- Real dual-realm Docker topology with core `172.28.0.0/24` and peer `192.168.28.0/24` networks
+- Dual-homed PlaySBC/RTPengine path with RTPengine core-to-peer interface selection
 - YAML/JSON example config files under `configs/`
 - Helm chart config via `charts/playsbc/values.yaml`
 - SIPp regression server config rendered through Helm
@@ -86,12 +88,11 @@ RTPengine owns RTP anchoring, SDP rewrite, media relay, and transcoding experime
 
 Next RTPengine improvements:
 
-- Docker Compose startup
-- Real multi-IP local topology
 - RTPengine port-pool health checks
 - Stronger SDP validation
 - RTPengine failure scenarios
 - RTCP and media quality reporting
+- Add the real dual-realm profile to the full sequential regression suite after it is stable
 
 ## Kubernetes Direction
 
