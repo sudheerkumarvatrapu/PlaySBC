@@ -58,7 +58,7 @@ env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regressio
   --timeout 420
 ```
 
-This runs all B2BUA/SIPp profiles, including ESBC cases, with Helm-rendered YAML config. Local regression uses `helm template`; Kubernetes install is not required.
+This runs all B2BUA/SIPp profiles, including ESBC cases and the Docker-based real dual-realm profile, with Helm-rendered YAML config. Local regression uses `helm template`; Kubernetes install is not required.
 
 ## Real Core/Peer Topology
 

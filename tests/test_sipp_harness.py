@@ -1734,7 +1734,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("password is required", detail)
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
-        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 22)
+        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 23)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -1751,6 +1751,16 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("soak-1cps-30s", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
+
+    def test_real_topology_profile_uses_one_regression_bundle(self):
+        command = run_regression_suite.real_topology_command(
+            "regression-test-real-topology-rtpengine-transcoding",
+            Path("/tmp/playsbc-regression"),
+        )
+
+        self.assertIn("run_real_topology.py", " ".join(command))
+        self.assertEqual(command[-4:], ["--run-id", "regression-test-real-topology-rtpengine-transcoding", "--output-root", "/tmp/playsbc-regression"])
 
     def test_direct_rtpengine_profile_blocks_before_sipp_when_down(self):
         with tempfile.TemporaryDirectory() as tmp:

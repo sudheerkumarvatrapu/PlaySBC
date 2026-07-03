@@ -21,6 +21,7 @@ Implemented and covered by unit tests plus SIPp regression:
 - Helm chart config via `charts/playsbc/values.yaml`
 - SIPp regression server config rendered through Helm
 - SIPp B2BUA profiles for signalling, media, transcoding, registration, negative flows, small load, soak, RTPengine, TCP RTPengine transcoding, and 5 cps / 60 second CHT load
+- Real dual-realm RTPengine transcoding profile included in the sequential regression report
 - One log bundle per B2BUA testcase
 - Latest HTML regression report
 
@@ -50,6 +51,8 @@ Next ESBC lab features:
 - Per-trunk route metrics and failure counters
 
 ## Current Regression Focus
+
+Regression is a delivery requirement: every new implementation must include focused unit tests and, when SIP, media, routing, transport, or deployment behavior changes, a named profile in the sequential regression suite. Each profile must produce one report row and one evidence bundle.
 
 Keep these profiles green:
 
@@ -92,7 +95,7 @@ Next RTPengine improvements:
 - Stronger SDP validation
 - RTPengine failure scenarios
 - RTCP and media quality reporting
-- Add the real dual-realm profile to the full sequential regression suite after it is stable
+- Extend dual-realm coverage beyond the initial RTPengine transcoding profile
 
 ## Kubernetes Direction
 

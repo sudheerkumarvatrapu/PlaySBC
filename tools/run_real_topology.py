@@ -214,6 +214,8 @@ def validate(bundle: Path, uac_rc: int, uas_rc: int, packet_count: int) -> list[
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-id", default="", help="Evidence bundle name; defaults to a timestamp")
+    parser.add_argument("--output-root", default=str(ROOT / "logs" / "real-topology"), help="Parent directory for the evidence bundle")
     parser.add_argument("--hold-ms", type=int, default=60000, help="Call hold time; the bundled RTP PCAP is 60 seconds")
     parser.add_argument("--skip-build", action="store_true", help="Reuse existing local Docker images")
     args = parser.parse_args()
@@ -224,8 +226,10 @@ def main() -> int:
     if args.hold_ms < 1000:
         parser.error("--hold-ms must be at least 1000")
 
-    run_id = time.strftime("real-topology-%Y%m%d-%H%M%S")
-    bundle = ROOT / "logs" / "real-topology" / run_id
+    run_id = args.run_id or time.strftime("real-topology-%Y%m%d-%H%M%S")
+    bundle = Path(args.output_root) / run_id
+    if bundle.exists():
+        parser.error(f"Evidence bundle already exists: {bundle}")
     (bundle / "sipp-a").mkdir(parents=True)
     (bundle / "sipp-b").mkdir(parents=True)
     env = os.environ.copy()
