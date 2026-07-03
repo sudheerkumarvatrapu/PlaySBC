@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import mini_call_server as server
+from rtp.rtcp import RTCP_SDES, RTCP_SR, build_compound_sender_report, parse_compound_rtcp
 
 
 class SipParsingTests(unittest.TestCase):
@@ -36,6 +37,7 @@ class SipParsingTests(unittest.TestCase):
         self.assertEqual(server.parse_sdp_payloads(sdp), (0, 8, 101))
         self.assertEqual(server.parse_dtmf_payload_type(sdp), 101)
         self.assertEqual(server.parse_sdp_remote_addr(sdp), ("127.0.0.1", 26000))
+        self.assertEqual(server.parse_sdp_remote_rtcp_addr(sdp, ("127.0.0.1", 26000)), ("127.0.0.1", 26001))
 
     def test_parse_sip_uri_with_default_and_explicit_ports(self):
         explicit = server.parse_sip_uri("<sip:1002@127.0.0.1:25082>")
@@ -105,6 +107,23 @@ class SipParsingTests(unittest.TestCase):
         self.assertIn("a=rtpmap:0 PCMU/8000", sdp)
         self.assertIn("a=rtpmap:8 PCMA/8000", sdp)
         self.assertIn("a=rtpmap:101 telephone-event/8000", sdp)
+        self.assertIn("a=rtcp:30001", sdp)
+
+    def test_parse_explicit_rtcp_address(self):
+        sdp = "c=IN IP4 192.0.2.10\r\nm=audio 30000 RTP/AVP 0\r\na=rtcp:31000 IN IP4 192.0.2.20\r\n"
+        self.assertEqual(server.parse_sdp_remote_rtcp_addr(sdp, ("192.0.2.10", 30000)), ("192.0.2.20", 31000))
+
+    def test_compound_rtcp_sender_report_is_valid(self):
+        data = build_compound_sender_report(
+            ssrc=0x10203040,
+            cname="sipp-a@playsbc",
+            rtp_timestamp=8000,
+            packet_count=50,
+            octet_count=8000,
+            now=1_700_000_000.25,
+        )
+        packets = parse_compound_rtcp(data)
+        self.assertEqual([packet.packet_type for packet in packets], [RTCP_SR, RTCP_SDES])
 
     def test_make_sdp_moves_preferred_codec_first(self):
         sdp = server.make_sdp("127.0.0.1", 30000, server.PCMA, dtmf_payload_type=101, payloads=(0, 8, 101))
@@ -131,6 +150,43 @@ class CodecTests(unittest.TestCase):
         payloads = server.b2bua_outbound_offer_payloads((server.PCMU, server.PCMA, 101), server.PCMU, server.PCMU)
 
         self.assertEqual(payloads, (server.PCMU, server.PCMA, 101))
+
+
+class RtcpTests(unittest.TestCase):
+    def test_internal_b2bua_rewrites_rtcp_sender_identity_for_output_leg(self):
+        class DummyTransport:
+            def __init__(self):
+                self.sent = []
+
+            def sendto(self, packet, destination):
+                self.sent.append((packet, destination))
+
+        inbound = server.RtpSession("inbound", "127.0.0.1", 25100, media_mode="b2bua")
+        outbound = server.RtpSession("outbound", "127.0.0.1", 25102, media_mode="b2bua")
+        inbound.set_peer(outbound)
+        outbound.set_peer(inbound)
+        outbound.rtcp_transport = DummyTransport()
+        outbound.remote_rtcp_addr = ("127.0.0.1", 27001)
+        outbound.packets_sent = 50
+        outbound.bytes_sent = 8000
+        outbound.timestamp = 16000
+        report = build_compound_sender_report(
+            ssrc=0xC0DEC0DE,
+            cname="sipp-a@playsbc",
+            rtp_timestamp=8000,
+            packet_count=50,
+            octet_count=8000,
+        )
+
+        server.RtcpProtocol(inbound).datagram_received(report, ("127.0.0.1", 36001))
+
+        self.assertEqual(inbound.rtcp_packets_received, 1)
+        self.assertEqual(inbound.rtcp_packets_relayed, 1)
+        self.assertEqual(outbound.rtcp_packets_sent, 1)
+        relayed, destination = outbound.rtcp_transport.sent[0]
+        self.assertEqual(destination, ("127.0.0.1", 27001))
+        packets = parse_compound_rtcp(relayed)
+        self.assertEqual(int.from_bytes(packets[0].payload[:4], "big"), outbound.ssrc)
 
 
 class ResponseTests(unittest.TestCase):
@@ -199,6 +255,10 @@ class ResponseTests(unittest.TestCase):
 
         self.assertTrue(protocol.make_via_header("tcp").startswith("SIP/2.0/TCP 127.0.0.1:25062;branch="))
         self.assertEqual(protocol.local_contact_uri("tcp"), "sip:b2bua@127.0.0.1:25062;transport=tcp")
+        self.assertEqual(
+            protocol.inbound_contact_uri("callee", "tcp"),
+            "sip:callee@127.0.0.1:25062;transport=tcp",
+        )
 
 
 class RtpengineRetryTests(unittest.TestCase):
@@ -243,9 +303,24 @@ class RtpengineRetryTests(unittest.TestCase):
                     base_delay=0,
                 )
             )
-
         self.assertEqual(attempts["count"], 3)
 
+    def test_rtpengine_query_waits_for_stable_packet_total(self):
+        responses = iter(
+            [
+                {"totals": {"RTP": {"packets": 5999}}},
+                {"totals": {"RTP": {"packets": 6000}}},
+                {"totals": {"RTP": {"packets": 6000}}},
+            ]
+        )
+
+        async def request():
+            return next(responses)
+
+        response, samples = asyncio.run(server.query_rtpengine_until_stable(request, delay=0))
+
+        self.assertEqual(server.rtpengine_packet_total(response), 6000)
+        self.assertEqual(samples, (5999, 6000, 6000))
 
 class DigestAuthTests(unittest.TestCase):
     def test_parse_digest_header_and_response(self):

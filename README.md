@@ -72,7 +72,7 @@ This runs a 60-second PCMU-to-PCMA call across two isolated networks:
 
 ```text
 SIPp A 172.28.0.10 -> PlaySBC 172.28.0.20 | 192.168.28.20 -> SIPp B 192.168.28.30
-RTP     172.28.0.10 <-> RTPengine 172.28.0.40 | 192.168.28.40 <-> 192.168.28.30
+RTP/RTCP 172.28.0.10 <-> RTPengine 172.28.0.40 | 192.168.28.40 <-> 192.168.28.30
 ```
 
 PlaySBC configuration is rendered from `configs/topology/helm-values.yaml`. Evidence is saved under `logs/real-topology/` with one unified `capture.pcap`.

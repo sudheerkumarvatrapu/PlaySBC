@@ -13,6 +13,7 @@ Implemented and covered by unit tests plus SIPp regression:
 - Registrar-backed B2BUA routing
 - Route policies and static route fallback
 - G.711u/G.711a RTP media replay
+- RTCP sender-report/SDES relay and regression validation for 60-second calls
 - Internal PCMU/PCMA transcoding
 - RTPengine media backend for anchoring and transcoding experiments
 - Real dual-realm Docker topology with core `172.28.0.0/24` and peer `192.168.28.0/24` networks
@@ -94,7 +95,7 @@ Next RTPengine improvements:
 - RTPengine port-pool health checks
 - Stronger SDP validation
 - RTPengine failure scenarios
-- RTCP and media quality reporting
+- Deeper RTCP receiver-report and media quality analytics
 - Extend dual-realm coverage beyond the initial RTPengine transcoding profile
 
 ## Kubernetes Direction

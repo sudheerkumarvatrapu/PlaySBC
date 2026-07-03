@@ -20,8 +20,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from rtp.rtcp import build_compound_sender_report
 SCENARIO_DIR = ROOT / "sipp" / "scenarios"
 MEDIA_PCAPS = {
     "PCMU": "pcap/g711u_60s.pcap",
@@ -317,6 +319,15 @@ class PcapPacket:
     dst_port: int
     payload: bytes
     protocol: str = "udp"
+
+
+@dataclass(frozen=True)
+class PcapFrameSpec:
+    timestamp: float
+    packet: PcapPacket
+    tcp_sequence: int = 0
+    tcp_acknowledgment: int = 0
+    tcp_flags: int = 0
 
 
 def make_run_id(prefix: str = "b2bua") -> str:
@@ -798,12 +809,40 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
             uac_payloads, uac_rtpmaps = uac_sdp_payloads(args)
             text = text.replace("[uac_sdp_payloads]", uac_payloads)
             text = text.replace("[uac_sdp_rtpmaps]", uac_rtpmaps)
+            if str(getattr(args, "sip_transport", "udp")).lower() == "tcp":
+                text = re.sub(
+                    r"(?m)^(\s+(?:ACK|BYE) sip:\[service\]@\[remote_ip\]:\[remote_port\]) SIP/2\.0$",
+                    r"\1;transport=[transport] SIP/2.0",
+                    text,
+                )
         if attr_name == "uas_scenario":
             uas_payloads, uas_rtpmaps = uas_sdp_payloads(args)
             text = text.replace("[uas_sdp_payloads]", uas_payloads)
             text = text.replace("[uas_sdp_rtpmaps]", uas_rtpmaps)
         destination.write_text(text, encoding="ISO-8859-1")
         setattr(args, attr_name, destination.resolve())
+
+
+def prepare_transport_scenario(args: argparse.Namespace, run_dir: Path) -> None:
+    if str(getattr(args, "sip_transport", "udp")).lower() != "tcp":
+        return
+    source = Path(args.uac_scenario)
+    text = source.read_text(encoding="ISO-8859-1")
+
+    def add_transport(match: re.Match[str]) -> str:
+        request_uri = match.group(1)
+        if ";transport=" in request_uri.lower():
+            return match.group(0)
+        return f"{request_uri};transport=[transport] SIP/2.0"
+
+    resolved = re.sub(
+        r"(?m)^(\s+(?:ACK|BYE)\s+sip:\S+)\s+SIP/2\.0$",
+        add_transport,
+        text,
+    )
+    destination = run_dir / "sipp-a-uac" / f"{source.stem}_transport_resolved.xml"
+    destination.write_text(resolved, encoding="ISO-8859-1")
+    args.uac_scenario = destination.resolve()
 
 
 def build_media_player_commands(args: argparse.Namespace) -> List[Tuple[str, List[str]]]:
@@ -824,6 +863,58 @@ def build_media_player_commands(args: argparse.Namespace) -> List[Tuple[str, Lis
     return [
         ("media-a-to-b2bua", base + ["--port", str(args.server_rtp_min)]),
         ("media-b-to-b2bua", base + ["--port", str(args.server_rtp_min + 2)]),
+    ]
+
+
+def should_run_rtcp(args: argparse.Namespace) -> bool:
+    return bool(args.media_enabled and args.calls == 1 and args.rate == 1 and args.hold_ms >= 5000)
+
+
+def wait_for_rtcp_anchor_ports(work_dir: Path, args: argparse.Namespace, timeout: float = 8.0) -> Tuple[int, int]:
+    if args.media_backend != "rtpengine":
+        return int(args.server_rtp_min) + 1, int(args.server_rtp_min) + 3
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        a_rtp, b_rtp = rtpengine_anchor_ports(work_dir)
+        if a_rtp and b_rtp:
+            return a_rtp + 1, b_rtp + 1
+        time.sleep(0.050)
+    raise RuntimeError("Could not discover both RTPengine RTCP anchor ports from SIPp traces")
+
+
+def build_rtcp_sender_commands(args: argparse.Namespace, work_dir: Path) -> List[Tuple[str, List[str]]]:
+    if not should_run_rtcp(args):
+        return []
+    a_target_port, b_target_port = wait_for_rtcp_anchor_ports(work_dir, args)
+    duration = max(1.0, (args.hold_ms / 1000.0) - args.media_start_delay)
+    sender = str(ROOT / "tools" / "send_rtcp_reports.py")
+
+    def command(source_port: int, target_port: int, ssrc: str, cname: str) -> List[str]:
+        return [
+            sys.executable,
+            sender,
+            "--local-ip",
+            args.host,
+            "--source-port",
+            str(source_port),
+            "--target-ip",
+            args.host,
+            "--target-port",
+            str(target_port),
+            "--ssrc",
+            ssrc,
+            "--cname",
+            cname,
+            "--duration-seconds",
+            f"{duration:.3f}",
+            "--interval-seconds",
+            "5",
+            "--expect-reply",
+        ]
+
+    return [
+        ("rtcp-a", command(args.uac_rtp_min + 1, a_target_port, "0xC0DEC0DE", "sipp-a@playsbc")),
+        ("rtcp-b", command(args.uas_rtp_min + 1, b_target_port, "0xC0DEC0DE", "sipp-b@playsbc")),
     ]
 
 
@@ -952,12 +1043,11 @@ def tcp_checksum(src_ip: bytes, dst_ip: bytes, tcp_segment: bytes) -> int:
     return checksum(pseudo_header + tcp_segment)
 
 
-def ethernet_ipv4_tcp_packet(packet: PcapPacket, packet_id: int, seq: int, ack: int) -> bytes:
+def ethernet_ipv4_tcp_packet(packet: PcapPacket, packet_id: int, seq: int, ack: int, flags: int = 0x18) -> bytes:
     payload = packet.payload
     src_ip = socket.inet_aton(packet.src_ip)
     dst_ip = socket.inet_aton(packet.dst_ip)
     tcp_offset_words = 5
-    tcp_flags = 0x18  # PSH + ACK; synthetic captures preserve payload timing, not handshake setup.
     tcp_header = struct.pack(
         "!HHIIBBHHH",
         packet.src_port & 0xFFFF,
@@ -965,7 +1055,7 @@ def ethernet_ipv4_tcp_packet(packet: PcapPacket, packet_id: int, seq: int, ack: 
         seq & 0xFFFFFFFF,
         ack & 0xFFFFFFFF,
         tcp_offset_words << 4,
-        tcp_flags,
+        flags,
         65535,
         0,
         0,
@@ -978,25 +1068,103 @@ def ethernet_ipv4_tcp_packet(packet: PcapPacket, packet_id: int, seq: int, ack: 
     return ethernet_header + ip_header + tcp_header + payload
 
 
-def write_udp_pcap(path: Path, packets: List[PcapPacket]) -> None:
+def tcp_connection_frame_specs(packets: List[PcapPacket]) -> List[PcapFrameSpec]:
+    groups: dict[Tuple[Tuple[str, int], Tuple[str, int]], List[PcapPacket]] = {}
+    for packet in packets:
+        source = (packet.src_ip, packet.src_port)
+        destination = (packet.dst_ip, packet.dst_port)
+        key = tuple(sorted((source, destination)))
+        groups.setdefault(key, []).append(packet)
+
+    frames: List[PcapFrameSpec] = []
+    for flow_index, flow_packets in enumerate(
+        sorted(groups.values(), key=lambda values: min(packet.timestamp for packet in values)),
+        start=1,
+    ):
+        ordered = sorted(flow_packets, key=lambda packet: packet.timestamp)
+        first = ordered[0]
+        first_source = (first.src_ip, first.src_port)
+        first_destination = (first.dst_ip, first.dst_port)
+        if first.payload.startswith(b"SIP/2.0 "):
+            initiator, responder = first_destination, first_source
+        else:
+            initiator, responder = first_source, first_destination
+        initiator_isn = 1_000_000 + (flow_index * 1_000_000)
+        responder_isn = initiator_isn + 500_000
+        next_sequence = {initiator: initiator_isn + 1, responder: responder_isn + 1}
+
+        def control(timestamp: float, source: Tuple[str, int], destination: Tuple[str, int], seq: int, ack: int, flags: int) -> None:
+            frames.append(
+                PcapFrameSpec(
+                    timestamp,
+                    PcapPacket(timestamp, source[0], source[1], destination[0], destination[1], b"", protocol="tcp"),
+                    seq,
+                    ack,
+                    flags,
+                )
+            )
+
+        start = first.timestamp
+        control(start - 0.003, initiator, responder, initiator_isn, 0, 0x02)
+        control(start - 0.002, responder, initiator, responder_isn, initiator_isn + 1, 0x12)
+        control(start - 0.001, initiator, responder, initiator_isn + 1, responder_isn + 1, 0x10)
+
+        last_timestamp = start
+        for packet in ordered:
+            source = (packet.src_ip, packet.src_port)
+            destination = (packet.dst_ip, packet.dst_port)
+            sequence = next_sequence[source]
+            acknowledgment = next_sequence[destination]
+            frames.append(PcapFrameSpec(packet.timestamp, packet, sequence, acknowledgment, 0x18))
+            next_sequence[source] += len(packet.payload)
+            control(
+                packet.timestamp + 0.000001,
+                destination,
+                source,
+                next_sequence[destination],
+                next_sequence[source],
+                0x10,
+            )
+            last_timestamp = max(last_timestamp, packet.timestamp)
+
+        control(last_timestamp + 0.001, initiator, responder, next_sequence[initiator], next_sequence[responder], 0x11)
+        next_sequence[initiator] += 1
+        control(last_timestamp + 0.002, responder, initiator, next_sequence[responder], next_sequence[initiator], 0x10)
+        control(last_timestamp + 0.003, responder, initiator, next_sequence[responder], next_sequence[initiator], 0x11)
+        next_sequence[responder] += 1
+        control(last_timestamp + 0.004, initiator, responder, next_sequence[initiator], next_sequence[responder], 0x10)
+    return frames
+
+
+def write_udp_pcap(path: Path, packets: List[PcapPacket]) -> dict[str, int]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tcp_sequence_by_flow: dict[Tuple[str, int, str, int], int] = {}
+    udp_packets = [packet for packet in packets if packet.protocol.lower() != "tcp"]
+    tcp_packets = [packet for packet in packets if packet.protocol.lower() == "tcp"]
+    frames = [PcapFrameSpec(packet.timestamp, packet) for packet in udp_packets]
+    frames.extend(tcp_connection_frame_specs(tcp_packets))
     with path.open("wb") as fh:
         fh.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
-        for index, packet in enumerate(sorted(packets, key=lambda item: item.timestamp), start=1):
+        for index, spec in enumerate(sorted(frames, key=lambda item: item.timestamp), start=1):
+            packet = spec.packet
             if packet.protocol.lower() == "tcp":
-                flow = (packet.src_ip, packet.src_port, packet.dst_ip, packet.dst_port)
-                reverse_flow = (packet.dst_ip, packet.dst_port, packet.src_ip, packet.src_port)
-                seq = tcp_sequence_by_flow.setdefault(flow, 1_000_000 + (len(tcp_sequence_by_flow) * 100_000))
-                ack = tcp_sequence_by_flow.get(reverse_flow, 1)
-                frame = ethernet_ipv4_tcp_packet(packet, index, seq, ack)
-                tcp_sequence_by_flow[flow] = seq + max(len(packet.payload), 1)
+                frame = ethernet_ipv4_tcp_packet(
+                    packet,
+                    index,
+                    spec.tcp_sequence,
+                    spec.tcp_acknowledgment,
+                    spec.tcp_flags,
+                )
             else:
                 frame = ethernet_ipv4_udp_packet(packet, index)
-            timestamp_seconds = int(packet.timestamp)
-            timestamp_microseconds = int((packet.timestamp - timestamp_seconds) * 1_000_000)
+            timestamp_seconds = int(spec.timestamp)
+            timestamp_microseconds = int((spec.timestamp - timestamp_seconds) * 1_000_000)
             fh.write(struct.pack("<IIII", timestamp_seconds, timestamp_microseconds, len(frame), len(frame)))
             fh.write(frame)
+    return {
+        "udp_packets": len(udp_packets),
+        "tcp_packets": len(frames) - len(udp_packets),
+        "packet_count": len(frames),
+    }
 
 
 def extract_rtp_payload(frame: bytes) -> bytes:
@@ -1209,6 +1377,45 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
             payload = with_rtp_stream_identity(rtp, stream_codec, sequence_base + index, timestamp_base + (index * payload_step), ssrc)
             packets.append(PcapPacket(base_time + relative_timestamp, src_ip, src_port, dst_ip, dst_port, payload))
     return packets
+
+
+def rtcp_media_packets(rtp_packets: List[PcapPacket], interval_seconds: float = 5.0) -> List[PcapPacket]:
+    flows: dict[Tuple[str, int, str, int, int], List[PcapPacket]] = {}
+    for packet in rtp_packets:
+        if len(packet.payload) < 12 or packet.payload[0] >> 6 != 2:
+            continue
+        ssrc = struct.unpack("!I", packet.payload[8:12])[0]
+        key = (packet.src_ip, packet.src_port, packet.dst_ip, packet.dst_port, ssrc)
+        flows.setdefault(key, []).append(packet)
+
+    reports = []
+    for (src_ip, src_port, dst_ip, dst_port, ssrc), packets in flows.items():
+        ordered = sorted(packets, key=lambda packet: packet.timestamp)
+        started = ordered[0].timestamp
+        ended = ordered[-1].timestamp
+        report_time = started + interval_seconds
+        while report_time <= ended:
+            media_packets = min(int((report_time - started) * 50), len(ordered))
+            report = build_compound_sender_report(
+                ssrc=ssrc,
+                cname=f"{src_ip}:{src_port}",
+                rtp_timestamp=media_packets * 160,
+                packet_count=media_packets,
+                octet_count=media_packets * 160,
+                now=report_time,
+            )
+            reports.append(
+                PcapPacket(
+                    report_time,
+                    src_ip,
+                    src_port + 1,
+                    dst_ip,
+                    dst_port + 1,
+                    report,
+                )
+            )
+            report_time += interval_seconds
+    return reports
 
 
 def parse_iso_timestamp(value: str) -> float:
@@ -1491,6 +1698,32 @@ def sipp_trace_packets(work_dir: Path, args: argparse.Namespace) -> List[PcapPac
     return packets
 
 
+def normalized_sip_uri(value: bytes) -> str:
+    text = value.decode("utf-8", errors="replace").strip().strip("<>")
+    return text.lower()
+
+
+def dialog_remote_target_errors(work_dir: Path) -> List[str]:
+    errors = []
+    for trace in sorted((work_dir / "sipp-a-uac").glob("*_messages.log")):
+        remote_target = ""
+        for _timestamp, _protocol, direction, payload in sipp_trace_protocol_messages(trace):
+            start_line = payload.split(b"\r\n", 1)[0]
+            if direction == "received" and payload.startswith(b"SIP/2.0 200"):
+                if re.search(rb"(?im)^CSeq\s*:\s*\d+\s+INVITE\s*$", payload):
+                    match = re.search(rb"(?im)^Contact\s*:\s*<?([^>\r\n]+)>?\s*$", payload)
+                    if match:
+                        remote_target = normalized_sip_uri(match.group(1))
+                continue
+            if direction != "sent" or not start_line.startswith((b"ACK ", b"BYE ")) or not remote_target:
+                continue
+            parts = start_line.split()
+            request_uri = normalized_sip_uri(parts[1]) if len(parts) >= 2 else ""
+            if request_uri != remote_target:
+                errors.append(f"{start_line.decode('utf-8', errors='replace')} does not use Contact {remote_target}")
+    return errors
+
+
 def parse_endpoint(text: str, key: str) -> Optional[Tuple[str, int]]:
     match = re.search(rf"{key}=([0-9.]+):(\d+)", text)
     if not match:
@@ -1501,11 +1734,11 @@ def parse_endpoint(text: str, key: str) -> Optional[Tuple[str, int]]:
 def protocol_event_packets(log_dir: Path, args: argparse.Namespace) -> List[PcapPacket]:
     packets = []
     _uac_ip, server_ip, _uas_ip = pcap_topology_ips(args)
-    for filename in ("log.udp", "log.networking", "log.tcp", "log.tls"):
+    for filename in ("log.udp", "log.networking"):
         path = log_dir / filename
         if not path.exists():
             continue
-        protocol = "tcp" if filename in {"log.tcp", "log.tls"} else "udp"
+        protocol = "udp"
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             if "LOG START" in line or not line.strip():
                 continue
@@ -1543,14 +1776,15 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
     sip_packets = sipp_trace_packets(work_dir, args)
     diagnostic_packets = protocol_event_packets(log_dir, args)
     rtp_packets = rtp_media_packets(log_dir, work_dir, args)
-    packets = sip_packets + diagnostic_packets + rtp_packets
+    rtcp_packets = rtcp_media_packets(rtp_packets)
+    packets = sip_packets + diagnostic_packets + rtp_packets + rtcp_packets
     if not packets:
         return []
 
     uac_ip, server_ip, uas_ip = pcap_topology_ips(args)
     rtpengine_ip = pcap_rtpengine_ip(args)
     pcap_path = log_dir / "capture.pcap"
-    write_udp_pcap(pcap_path, packets)
+    pcap_counts = write_udp_pcap(pcap_path, packets)
     append_log_section(
         log_dir,
         "log.platform",
@@ -1560,12 +1794,13 @@ def generate_pcap_artifacts(log_dir: Path, work_dir: Path, args: argparse.Namesp
                 "source=diagnostic_logs",
                 "scope=non_load_b2bua_profile",
                 "file=capture.pcap",
-                f"packet_count={len(packets)}",
+                f"packet_count={pcap_counts['packet_count']}",
                 f"sip_packets={len(sip_packets)}",
                 f"rtp_packets={len(rtp_packets)}",
+                f"rtcp_packets={len(rtcp_packets)}",
                 f"diagnostic_packets={len(diagnostic_packets)}",
-                f"udp_packets={sum(1 for packet in packets if packet.protocol.lower() == 'udp')}",
-                f"tcp_packets={sum(1 for packet in packets if packet.protocol.lower() == 'tcp')}",
+                f"udp_packets={pcap_counts['udp_packets']}",
+                f"tcp_packets={pcap_counts['tcp_packets']}",
                 f"topology={getattr(args, 'pcap_topology', BASE_DEFAULTS['pcap_topology'])}",
                 f"topology_uac_ip={uac_ip}",
                 f"topology_server_ip={server_ip}",
@@ -1658,6 +1893,9 @@ def media_summary_stats(log_dir: Path) -> dict:
         "rtp_packets_received_total": 0,
         "rtp_packets_sent_total": 0,
         "rtp_packets_relayed_total": 0,
+        "rtcp_packets_received_total": 0,
+        "rtcp_packets_sent_total": 0,
+        "rtcp_packets_relayed_total": 0,
     }
     if not path.exists():
         return stats
@@ -1673,7 +1911,10 @@ def media_summary_stats(log_dir: Path) -> dict:
         received = re.search(r"rtp_packets_received=(\d+)", line)
         sent = re.search(r"rtp_packets_sent=(\d+)", line)
         relayed = re.search(r"rtp_packets_relayed=(\d+)", line)
-        if not any((duration, received, sent, relayed)):
+        rtcp_received = re.search(r"rtcp_packets_received=(\d+)", line)
+        rtcp_sent = re.search(r"rtcp_packets_sent=(\d+)", line)
+        rtcp_relayed = re.search(r"rtcp_packets_relayed=(\d+)", line)
+        if not any((duration, received, sent, relayed, rtcp_received, rtcp_sent, rtcp_relayed)):
             stats["summary_count"] -= 1
             continue
         pending_summary = False
@@ -1685,6 +1926,12 @@ def media_summary_stats(log_dir: Path) -> dict:
             stats["rtp_packets_sent_total"] += int(sent.group(1))
         if relayed:
             stats["rtp_packets_relayed_total"] += int(relayed.group(1))
+        if rtcp_received:
+            stats["rtcp_packets_received_total"] += int(rtcp_received.group(1))
+        if rtcp_sent:
+            stats["rtcp_packets_sent_total"] += int(rtcp_sent.group(1))
+        if rtcp_relayed:
+            stats["rtcp_packets_relayed_total"] += int(rtcp_relayed.group(1))
     return stats
 
 
@@ -1695,6 +1942,9 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
         "rtp_packets_total": 0,
         "rtp_bytes_total": 0,
         "rtp_errors_total": 0,
+        "rtcp_packets_total": 0,
+        "rtcp_bytes_total": 0,
+        "rtcp_errors_total": 0,
     }
     if not path.exists():
         return stats
@@ -1703,10 +1953,16 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
         compact_packets = re.search(r"\brtp_packets_total=(\d+)", detail)
         compact_bytes = re.search(r"\brtp_bytes_total=(\d+)", detail)
         compact_errors = re.search(r"\brtp_errors_total=(\d+)", detail)
+        compact_rtcp_packets = re.search(r"\brtcp_packets_total=(\d+)", detail)
+        compact_rtcp_bytes = re.search(r"\brtcp_bytes_total=(\d+)", detail)
+        compact_rtcp_errors = re.search(r"\brtcp_errors_total=(\d+)", detail)
         if compact_packets:
             stats["rtp_packets_total"] += int(compact_packets.group(1))
             stats["rtp_bytes_total"] += int(compact_bytes.group(1)) if compact_bytes else 0
             stats["rtp_errors_total"] += int(compact_errors.group(1)) if compact_errors else 0
+            stats["rtcp_packets_total"] += int(compact_rtcp_packets.group(1)) if compact_rtcp_packets else 0
+            stats["rtcp_bytes_total"] += int(compact_rtcp_bytes.group(1)) if compact_rtcp_bytes else 0
+            stats["rtcp_errors_total"] += int(compact_rtcp_errors.group(1)) if compact_rtcp_errors else 0
             return True
 
         if not detail.startswith("{"):
@@ -1716,9 +1972,13 @@ def rtpengine_query_stats(log_dir: Path) -> dict:
         except json.JSONDecodeError:
             return False
         rtp_totals = decoded.get("totals", {}).get("RTP", {}) if isinstance(decoded, dict) else {}
+        rtcp_totals = decoded.get("totals", {}).get("RTCP", {}) if isinstance(decoded, dict) else {}
         stats["rtp_packets_total"] += int(rtp_totals.get("packets") or 0)
         stats["rtp_bytes_total"] += int(rtp_totals.get("bytes") or 0)
         stats["rtp_errors_total"] += int(rtp_totals.get("errors") or 0)
+        stats["rtcp_packets_total"] += int(rtcp_totals.get("packets") or 0)
+        stats["rtcp_bytes_total"] += int(rtcp_totals.get("bytes") or 0)
+        stats["rtcp_errors_total"] += int(rtcp_totals.get("errors") or 0)
         return True
 
     pending_query = False
@@ -1767,6 +2027,9 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
                     f"rtpengine_rtp_packets_total={query_stats['rtp_packets_total']}",
                     f"rtpengine_rtp_bytes_total={query_stats['rtp_bytes_total']}",
                     f"rtpengine_rtp_errors_total={query_stats['rtp_errors_total']}",
+                    f"rtpengine_rtcp_packets_total={query_stats['rtcp_packets_total']}",
+                    f"rtpengine_rtcp_bytes_total={query_stats['rtcp_bytes_total']}",
+                    f"rtpengine_rtcp_errors_total={query_stats['rtcp_errors_total']}",
                     "server_rtp_received_packets_total=0",
                     "note=RTPengine anchors RTP externally, so PlaySBC internal RTP counters remain zero",
                 ]
@@ -1775,6 +2038,7 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
         return
 
     packets = total_logged_rtp_packets(log_dir)
+    summary = media_summary_stats(log_dir)
     status = "rtp_observed" if packets > 0 else "no_rtp_observed"
     append_log_section(
         log_dir,
@@ -1788,9 +2052,66 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
                 f"media_pcap={args.media_pcap_resolved}",
                 f"hold_ms={args.hold_ms}",
                 f"server_rtp_received_packets_total={packets}",
+                f"server_rtcp_received_packets_total={summary['rtcp_packets_received_total']}",
+                f"server_rtcp_sent_packets_total={summary['rtcp_packets_sent_total']}",
+                f"server_rtcp_relayed_packets_total={summary['rtcp_packets_relayed_total']}",
             ]
         ),
     )
+
+
+def append_rtcp_observation(log_dir: Path, work_dir: Path, args: argparse.Namespace, results: List[SmokeResult]) -> bool:
+    if not should_run_rtcp(args):
+        return True
+    result_by_name = {result.name: result for result in results}
+    sender_lines = []
+    for name in ("rtcp-a", "rtcp-b"):
+        path = work_dir / f"{name}.log"
+        sender_lines.append(path.read_text(encoding="utf-8", errors="replace").strip() if path.exists() else f"{name}=missing")
+    sender_ok = all(result_by_name.get(name) and result_by_name[name].status == "passed" for name in ("rtcp-a", "rtcp-b"))
+    summary = media_summary_stats(log_dir)
+    query = rtpengine_query_stats(log_dir)
+    observed = query["rtcp_packets_total"] if args.media_backend == "rtpengine" else summary["rtcp_packets_received_total"]
+    append_log_section(
+        log_dir,
+        "log.media",
+        "RTCP OBSERVATION",
+        "\n".join(
+            [
+                f"expected=True status={'observed' if sender_ok and observed > 0 else 'not_observed'}",
+                f"media_backend={args.media_backend}",
+                f"rtcp_packets_observed={observed}",
+                *sender_lines,
+            ]
+        ),
+    )
+    return sender_ok and observed > 0
+
+
+def expected_rtpengine_load_packets(args: argparse.Namespace) -> int:
+    packets_per_leg = max(int(args.hold_ms) // 20, 0)
+    return int(args.calls) * 2 * packets_per_leg
+
+
+def rtpengine_load_media_complete(log_dir: Path, args: argparse.Namespace) -> bool:
+    if str(getattr(args, "profile", "")) != "load-5cps-60s-rtpengine-transcoding":
+        return True
+    stats = rtpengine_query_stats(log_dir)
+    expected = expected_rtpengine_load_packets(args)
+    complete = stats["query_count"] == int(args.calls) and stats["rtp_packets_total"] >= expected
+    append_log_section(
+        log_dir,
+        "log.media",
+        "RTPENGINE LOAD COMPLETENESS",
+        "\n".join(
+            [
+                f"status={'complete' if complete else 'incomplete'}",
+                f"expected_queries={args.calls} observed_queries={stats['query_count']}",
+                f"expected_rtp_packets={expected} observed_rtp_packets={stats['rtp_packets_total']}",
+            ]
+        ),
+    )
+    return complete
 
 
 def append_transcoding_observation(log_dir: Path, args: argparse.Namespace) -> None:
@@ -2145,6 +2466,7 @@ def main() -> int:
         for name in ("server", "sipp-a-uac", "sipp-b-uas"):
             (work_dir / name).mkdir()
         prepare_media_scenarios(args, work_dir)
+        prepare_transport_scenario(args, work_dir)
 
         sipp_binary = resolve_binary(args.sipp_bin)
         if not sipp_binary and not args.dry_run:
@@ -2236,6 +2558,13 @@ def main() -> int:
                         media_started = time.monotonic()
                         process = start_process(command, ROOT, work_dir / f"{name}.log")
                         media_processes.append((name, command, process, media_started))
+                if should_run_rtcp(args):
+                    rtcp_commands = build_rtcp_sender_commands(args, work_dir)
+                    all_commands.extend(rtcp_commands)
+                    for name, command in rtcp_commands:
+                        media_started = time.monotonic()
+                        process = start_process(command, ROOT, work_dir / f"{name}.log")
+                        media_processes.append((name, command, process, media_started))
                 uac_rc = uac_process.wait()
             finally:
                 uac_stdout.close()
@@ -2263,9 +2592,17 @@ def main() -> int:
             stop_process(server_process)
             append_commands(log_dir, all_commands)
             collect_work_logs(log_dir, work_dir)
+            remote_target_errors = dialog_remote_target_errors(work_dir)
+            if remote_target_errors:
+                append_log_section(log_dir, "log.sip", "DIALOG REMOTE TARGET FAILED", "\n".join(remote_target_errors))
+                results.append(SmokeResult("sip-dialog-remote-target", [], 1, "failed", 0.0))
             append_registration_ladders(log_dir, args, results)
             append_media_observation(log_dir, args)
+            if not append_rtcp_observation(log_dir, work_dir, args, results):
+                results.append(SmokeResult("rtcp-validation", [], 1, "failed", 0.0))
             append_transcoding_observation(log_dir, args)
+            if not rtpengine_load_media_complete(log_dir, args):
+                results.append(SmokeResult("rtpengine-load-completeness", [], 1, "failed", 0.0))
             generate_pcap_artifacts(log_dir, work_dir, args)
             append_results(log_dir, args, results)
 

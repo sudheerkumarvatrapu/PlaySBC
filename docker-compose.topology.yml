@@ -32,6 +32,7 @@ services:
     build:
       context: .
       dockerfile: docker/playsbc.Dockerfile
+    image: playsbc-real-topology-playsbc:latest
     command: ["python3", "/app/mini_call_server.py", "--config", "/etc/playsbc/server.yaml"]
     depends_on:
       - rtpengine
@@ -112,6 +113,56 @@ services:
     networks:
       core:
         ipv4_address: 172.28.0.10
+
+  rtcp-a:
+    image: playsbc-real-topology-playsbc:latest
+    entrypoint: ["python3", "/app/tools/send_rtcp_reports.py"]
+    command:
+      - --local-ip
+      - 172.28.0.10
+      - --source-port
+      - "6001"
+      - --target-ip
+      - 172.28.0.40
+      - --target-port
+      - "30001"
+      - --ssrc
+      - "0xc0dec0de"
+      - --cname
+      - core-a@playsbc
+      - --duration-seconds
+      - "58"
+      - --interval-seconds
+      - "5"
+      - --expect-reply
+    depends_on:
+      - sipp-a
+    network_mode: service:sipp-a
+
+  rtcp-b:
+    image: playsbc-real-topology-playsbc:latest
+    entrypoint: ["python3", "/app/tools/send_rtcp_reports.py"]
+    command:
+      - --local-ip
+      - 192.168.28.30
+      - --source-port
+      - "6001"
+      - --target-ip
+      - 192.168.28.40
+      - --target-port
+      - "30001"
+      - --ssrc
+      - "0xc0dec0de"
+      - --cname
+      - peer-b@playsbc
+      - --duration-seconds
+      - "58"
+      - --interval-seconds
+      - "5"
+      - --expect-reply
+    depends_on:
+      - sipp-b
+    network_mode: service:sipp-b
 
   capture-signalling:
     <<: *sipp-common
