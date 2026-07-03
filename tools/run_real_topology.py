@@ -26,6 +26,10 @@ COMPOSE_FILE = ROOT / "docker-compose.topology.yml"
 HELM_VALUES = ROOT / "configs" / "topology" / "helm-values.yaml"
 CHART = ROOT / "charts" / "playsbc"
 TOPOLOGY_IPS = ("172.28.0.10", "172.28.0.20", "172.28.0.40", "192.168.28.20", "192.168.28.30", "192.168.28.40")
+TOPOLOGY_IMAGES = tuple(
+    f"playsbc-real-topology-{service}:latest"
+    for service in ("rtpengine", "playsbc", "sipp-a", "sipp-b", "capture-signalling", "capture-media")
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,17 @@ def run(command: list[str], *, env: dict[str, str], check: bool = True) -> subpr
 
 def compose_command(*args: str) -> list[str]:
     return ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
+
+
+def topology_images_available(env: dict[str, str]) -> bool:
+    completed = subprocess.run(
+        ["docker", "image", "inspect", *TOPOLOGY_IMAGES],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    return completed.returncode == 0
 
 
 def render_helm_config(bundle: Path, env: dict[str, str]) -> Path:
@@ -217,7 +232,9 @@ def main() -> int:
     parser.add_argument("--run-id", default="", help="Evidence bundle name; defaults to a timestamp")
     parser.add_argument("--output-root", default=str(ROOT / "logs" / "real-topology"), help="Parent directory for the evidence bundle")
     parser.add_argument("--hold-ms", type=int, default=60000, help="Call hold time; the bundled RTP PCAP is 60 seconds")
-    parser.add_argument("--skip-build", action="store_true", help="Reuse existing local Docker images")
+    build_group = parser.add_mutually_exclusive_group()
+    build_group.add_argument("--skip-build", action="store_true", help="Require and reuse existing local Docker images")
+    build_group.add_argument("--rebuild", action="store_true", help="Force rebuilding every topology image")
     args = parser.parse_args()
 
     for binary in ("docker", "helm"):
@@ -244,8 +261,13 @@ def main() -> int:
     uas_rc = 1
     packet_count = 0
     try:
-        if not args.skip_build:
+        images_available = topology_images_available(env)
+        if args.skip_build and not images_available:
+            raise RuntimeError("Topology images are missing; rerun without --skip-build to build them")
+        if args.rebuild or not images_available:
             run(compose_command("build"), env=env)
+        else:
+            print("Using existing real-topology Docker images.")
         run(
             compose_command(
                 "up",

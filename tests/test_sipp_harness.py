@@ -1927,6 +1927,11 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("- core", values)
         self.assertIn("- peer", values)
 
+    def test_topology_runner_tracks_every_compose_image(self):
+        self.assertEqual(len(run_real_topology.TOPOLOGY_IMAGES), 6)
+        self.assertIn("playsbc-real-topology-playsbc:latest", run_real_topology.TOPOLOGY_IMAGES)
+        self.assertIn("playsbc-real-topology-rtpengine:latest", run_real_topology.TOPOLOGY_IMAGES)
+
     def test_topology_pcaps_merge_in_timestamp_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

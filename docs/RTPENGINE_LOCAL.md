@@ -28,10 +28,10 @@ PlaySBC and RTPengine are dual-homed. The initial RTPengine offer carries `direc
 
 Runtime config is rendered by Helm from `configs/topology/helm-values.yaml`. The run produces SBC logs, SIPp traces, `topology.log`, `result.txt`, and one merged `capture.pcap` under `logs/real-topology/<timestamp>/`.
 
-Use `--skip-build` after the images already exist:
+The runner reuses a complete local image set and builds automatically when images are missing. Force a refresh after changing containerized PlaySBC code or Dockerfiles with:
 
 ```bash
-python3 tools/run_real_topology.py --skip-build
+python3 tools/run_real_topology.py --rebuild
 ```
 
 ## macOS Docker Quick Start
