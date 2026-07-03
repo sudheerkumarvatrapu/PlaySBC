@@ -100,6 +100,7 @@ BASE_DEFAULTS = {
     "media_driver": "python",
     "sipp_pcap_sudo": False,
     "media_start_delay": 1.0,
+    "media_teardown_guard_ms": 0,
     "server_codec": None,
     "media_backend": "internal",
     "rtpengine_url": "udp://127.0.0.1:2223",
@@ -239,6 +240,7 @@ B2BUA_PROFILES = {
         "server_codec": "PCMA",
         "media_backend": "rtpengine",
         "rtpengine_timeout": 8.0,
+        "media_teardown_guard_ms": 1000,
         "ladder": False,
     },
     "esbc-options-keepalive": {
@@ -350,6 +352,10 @@ def sipp_timeout_seconds(calls: int, rate: int, hold_ms: int) -> int:
     traffic_seconds = (max(calls, 1) + safe_rate - 1) // safe_rate
     hold_seconds = max(hold_ms, 0) // 1000
     return max(30, traffic_seconds + hold_seconds + 60)
+
+
+def signaling_hold_ms(args: argparse.Namespace) -> int:
+    return int(args.hold_ms) + max(int(getattr(args, "media_teardown_guard_ms", 0)), 0)
 
 
 def resolve_scenario_path(value: str, fallback: Path) -> Path:
@@ -540,9 +546,9 @@ def build_uas_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-m",
         str(args.calls),
         "-l",
-        str(call_limit(args.calls, args.rate, args.hold_ms)),
+        str(call_limit(args.calls, args.rate, signaling_hold_ms(args))),
         "-timeout",
-        str(sipp_timeout_seconds(args.calls, args.rate, args.hold_ms)),
+        str(sipp_timeout_seconds(args.calls, args.rate, signaling_hold_ms(args))),
         "-timeout_error",
         "-nostdin",
         "-min_rtp_port",
@@ -580,9 +586,9 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-d",
         str(args.hold_ms),
         "-l",
-        str(call_limit(args.calls, args.rate, args.hold_ms)),
+        str(call_limit(args.calls, args.rate, signaling_hold_ms(args))),
         "-timeout",
-        str(sipp_timeout_seconds(args.calls, args.rate, args.hold_ms)),
+        str(sipp_timeout_seconds(args.calls, args.rate, signaling_hold_ms(args))),
         "-timeout_error",
         "-nostdin",
         "-min_rtp_port",
@@ -809,6 +815,13 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
             uac_payloads, uac_rtpmaps = uac_sdp_payloads(args)
             text = text.replace("[uac_sdp_payloads]", uac_payloads)
             text = text.replace("[uac_sdp_rtpmaps]", uac_rtpmaps)
+            teardown_guard = max(int(getattr(args, "media_teardown_guard_ms", 0)), 0)
+            if teardown_guard:
+                text = text.replace(
+                    "<pause />",
+                    f'<pause milliseconds="{signaling_hold_ms(args)}" />',
+                    1,
+                )
             if str(getattr(args, "sip_transport", "udp")).lower() == "tcp":
                 text = re.sub(
                     r"(?m)^(\s+(?:ACK|BYE) sip:\[service\]@\[remote_ip\]:\[remote_port\]) SIP/2\.0$",
@@ -2023,6 +2036,7 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
                     f"media_codec={args.media_codec}",
                     f"media_pcap={args.media_pcap_resolved}",
                     f"hold_ms={args.hold_ms}",
+                    f"media_teardown_guard_ms={getattr(args, 'media_teardown_guard_ms', 0)}",
                     f"rtpengine_query_count={query_stats['query_count']}",
                     f"rtpengine_rtp_packets_total={query_stats['rtp_packets_total']}",
                     f"rtpengine_rtp_bytes_total={query_stats['rtp_bytes_total']}",
@@ -2051,6 +2065,7 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
                 f"media_codec={args.media_codec}",
                 f"media_pcap={args.media_pcap_resolved}",
                 f"hold_ms={args.hold_ms}",
+                f"media_teardown_guard_ms={getattr(args, 'media_teardown_guard_ms', 0)}",
                 f"server_rtp_received_packets_total={packets}",
                 f"server_rtcp_received_packets_total={summary['rtcp_packets_received_total']}",
                 f"server_rtcp_sent_packets_total={summary['rtcp_packets_sent_total']}",
@@ -2203,6 +2218,7 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
         f"calls={args.calls}",
         f"rate={args.rate}",
         f"hold_ms={args.hold_ms}",
+        f"media_teardown_guard_ms={getattr(args, 'media_teardown_guard_ms', 0)}",
         f"server_codec={args.server_codec}",
         f"media_enabled={args.media_enabled}",
         f"media_codec={args.media_codec or ''}",
@@ -2382,6 +2398,12 @@ def main() -> int:
         help="Temporary macOS workaround: run SIPp play_pcap_audio processes with sudo -n",
     )
     parser.add_argument("--media-start-delay", type=float, default=BASE_DEFAULTS["media_start_delay"], help="Seconds to wait after starting SIPp A before Python media replay starts")
+    parser.add_argument(
+        "--media-teardown-guard-ms",
+        type=int,
+        default=BASE_DEFAULTS["media_teardown_guard_ms"],
+        help="Keep the SIP dialog up briefly after the media fixture ends so replay workers can drain",
+    )
     parser.add_argument("--server-codec", choices=sorted(MEDIA_PCAPS), default=BASE_DEFAULTS["server_codec"], help="Server preferred G.711 codec; set different from media codec to exercise transcoding")
     parser.add_argument("--media-backend", choices=("internal", "rtpengine"), default=BASE_DEFAULTS["media_backend"])
     parser.add_argument("--rtpengine-url", default=BASE_DEFAULTS["rtpengine_url"])
@@ -2573,7 +2595,7 @@ def main() -> int:
 
             for name, command, process, media_started in media_processes:
                 try:
-                    media_rc = process.wait(timeout=max(5, int(args.hold_ms / 1000) + 10))
+                    media_rc = process.wait(timeout=max(5, int(signaling_hold_ms(args) / 1000) + 10))
                 except subprocess.TimeoutExpired:
                     stop_process(process)
                     media_rc = process.returncode if process.returncode is not None else 1
@@ -2581,7 +2603,7 @@ def main() -> int:
             media_processes = []
 
             if uas_process is not None:
-                uas_rc = uas_process.wait(timeout=max(30, int(args.hold_ms / 1000) + 30))
+                uas_rc = uas_process.wait(timeout=max(30, int(signaling_hold_ms(args) / 1000) + 30))
                 uas_duration = time.monotonic() - uas_started if uas_started is not None else 0.0
                 results.append(SmokeResult("sipp-b-uas", uas_command, uas_rc, "passed" if uas_rc == 0 else "failed", uas_duration))
                 uas_process = None

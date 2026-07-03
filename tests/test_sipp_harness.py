@@ -362,6 +362,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertGreaterEqual(run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s"]["server_rtp_max"], 26500)
         rtpengine_load = run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s-rtpengine-transcoding"]
         self.assertEqual(rtpengine_load["rtpengine_timeout"], 8.0)
+        self.assertEqual(rtpengine_load["media_teardown_guard_ms"], 1000)
 
     def test_b2bua_load_runs_use_stats_only_sipp_tracing(self):
         values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
@@ -536,6 +537,28 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("a=rtpmap:8 PCMA/8000", uas_xml)
             self.assertNotIn("a=rtpmap:0 PCMU/8000", uas_xml)
             self.assertNotIn("RTP/AVP 0 8 101", uas_xml)
+
+    def test_rtpengine_load_media_scenario_keeps_dialog_up_for_replay_drain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "load-run"
+            (run_dir / "sipp-a-uac").mkdir(parents=True)
+            (run_dir / "sipp-b-uas").mkdir(parents=True)
+            args = argparse_namespace(
+                hold_ms=60000,
+                media_teardown_guard_ms=1000,
+                media_enabled=True,
+                media_pcap="pcap/g711u_60s.pcap",
+                media_driver="sipp-pcap",
+                media_codec="PCMU",
+                server_codec="PCMA",
+                sip_transport="udp",
+            )
+
+            run_b2bua_sipp_smoke.prepare_media_scenarios(args, run_dir)
+
+            uac_xml = args.uac_scenario.read_text(encoding="ISO-8859-1")
+            self.assertIn('<pause milliseconds="61000" />', uac_xml)
+            self.assertEqual(run_b2bua_sipp_smoke.signaling_hold_ms(args), 61000)
 
     def test_python_media_driver_uses_plain_sipp_scenarios_and_player_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
