@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -74,6 +74,23 @@ B2BUA_LOG_FILES = (
     "log.call",
     "log.sipp",
 )
+ROBOT_PHASE_PREFIX = "ROBOT_PHASE_JSON="
+ROBOT_PHASE_ORDER = (
+    "Setup Preparation",
+    "Configuration",
+    "Test Setup",
+    "Test Execution",
+    "Test Teardown",
+    "Evidence Validation",
+)
+
+
+@dataclass
+class ReportPhase:
+    name: str
+    status: str
+    duration_seconds: float
+    detail: str
 
 
 @dataclass
@@ -85,6 +102,7 @@ class ReportRow:
     duration_seconds: float
     log_path: str
     command: str
+    phases: List[ReportPhase] = field(default_factory=list)
 
 
 def make_run_id() -> str:
@@ -105,6 +123,19 @@ def real_topology_command(profile_run_id: str, log_root: Path) -> List[str]:
     return [
         sys.executable,
         str(ROOT / "tools" / "run_real_topology.py"),
+        "--run-id",
+        profile_run_id,
+        "--output-root",
+        str(log_root),
+    ]
+
+
+def dual_realm_command(profile: str, profile_run_id: str, log_root: Path) -> List[str]:
+    return [
+        sys.executable,
+        str(ROOT / "tools" / "run_dual_realm_profile.py"),
+        "--profile",
+        profile,
         "--run-id",
         profile_run_id,
         "--output-root",
@@ -178,6 +209,7 @@ def rtpengine_blocked_row(profile: str, url: str, detail: str, duration: float, 
         duration_seconds=duration,
         log_path=str(log_path),
         command=f"{command} # blocked: RTPengine not reachable at {url}: {detail}",
+        phases=[ReportPhase("Preflight", "blocked", duration, f"RTPengine readiness check failed: {detail}")],
     )
 
 
@@ -293,6 +325,42 @@ def cleanup_old_reports(report_dir: Path, current_run_id: str) -> List[Path]:
     return deleted
 
 
+def fallback_execution_phases(status: str, duration: float, detail: str) -> List[ReportPhase]:
+    return [
+        ReportPhase(
+            name="Test Execution",
+            status=status,
+            duration_seconds=duration,
+            detail=detail,
+        )
+    ]
+
+
+def read_execution_phases(log_path: Path) -> List[ReportPhase]:
+    platform_log = log_path / "log.platform"
+    if not platform_log.exists():
+        return []
+
+    phases = []
+    for line in platform_log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith(ROBOT_PHASE_PREFIX):
+            continue
+        try:
+            payload = json.loads(line[len(ROBOT_PHASE_PREFIX) :])
+            phases.append(
+                ReportPhase(
+                    name=str(payload["name"]),
+                    status=str(payload["status"]),
+                    duration_seconds=float(payload.get("duration_seconds") or 0),
+                    detail=str(payload.get("detail") or ""),
+                )
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    order = {name: index for index, name in enumerate(ROBOT_PHASE_ORDER)}
+    return sorted(phases, key=lambda phase: order.get(phase.name, len(order)))
+
+
 def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[ReportRow]:
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     rows = []
@@ -300,15 +368,22 @@ def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[
         command = result.get("command") or fallback_command
         if isinstance(command, list):
             command = " ".join(str(part) for part in command)
+        status = str(result.get("status", "failed"))
+        duration = float(result.get("duration_seconds") or 0)
         rows.append(
             ReportRow(
                 suite="SIPp Smoke",
                 name=str(result.get("scenario", "")),
-                status=str(result.get("status", "failed")),
+                status=status,
                 returncode=result.get("returncode"),
-                duration_seconds=float(result.get("duration_seconds") or 0),
+                duration_seconds=duration,
                 log_path=str(summary_path.parent),
                 command=str(command),
+                phases=fallback_execution_phases(
+                    status,
+                    duration,
+                    "Execute the SIPp smoke scenario and collect its scenario summary.",
+                ),
             )
         )
     return rows
@@ -339,6 +414,13 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
         aggregate_command = f"{command} # steps: {', '.join(f'{name}={status}' for name, status in zip(names, statuses))}"
 
     aggregate_returncode = 0 if aggregate_status in {"passed", "dry-run"} and returncode == 0 else returncode
+    phases = read_execution_phases(log_path)
+    if not phases:
+        phases = fallback_execution_phases(
+            aggregate_status,
+            duration,
+            "Execute the B2BUA profile. Detailed lifecycle timings were not emitted by this runner.",
+        )
     return [
         ReportRow(
             suite=f"B2BUA {profile}",
@@ -348,6 +430,7 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
             duration_seconds=duration,
             log_path=str(log_path),
             command=aggregate_command,
+            phases=phases,
         )
     ]
 
@@ -360,66 +443,111 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
     row_html = []
     for row in rows:
         status_class = "pass" if row.status == "passed" else "blocked" if row.status == "blocked" else "fail"
+        phase_html = []
+        for phase in row.phases or fallback_execution_phases(
+            row.status,
+            row.duration_seconds,
+            "Execute the reported test case.",
+        ):
+            phase_class = "pass" if phase.status == "passed" else "blocked" if phase.status in {"blocked", "skipped"} else "fail"
+            phase_html.append(
+                "<tr>"
+                f"<td><span class=\"keyword\">{html.escape(phase.name)}</span></td>"
+                f"<td><span class=\"badge {phase_class}\">{html.escape(phase.status.upper())}</span></td>"
+                f"<td class=\"elapsed\">{phase.duration_seconds:.3f} s</td>"
+                f"<td>{html.escape(phase.detail)}</td>"
+                "</tr>"
+            )
         row_html.append(
-            "<tr>"
-            f"<td>{html.escape(row.suite)}</td>"
-            f"<td>{html.escape(row.name)}</td>"
-            f"<td><span class=\"badge {status_class}\">{html.escape(row.status.upper())}</span></td>"
-            f"<td>{'' if row.returncode is None else row.returncode}</td>"
-            f"<td>{row.duration_seconds:.3f}</td>"
-            f"<td><code>{html.escape(row.log_path)}</code></td>"
-            f"<td><code>{html.escape(row.command)}</code></td>"
-            "</tr>"
+            f"<details class=\"test-case {status_class}\" open>"
+            "<summary>"
+            f"<span class=\"test-name\">{html.escape(row.name)}</span>"
+            f"<span class=\"suite\">{html.escape(row.suite)}</span>"
+            f"<span class=\"total-time\">{row.duration_seconds:.3f} s</span>"
+            f"<span class=\"badge {status_class}\">{html.escape(row.status.upper())}</span>"
+            "</summary>"
+            "<div class=\"test-body\">"
+            "<div class=\"metadata\">"
+            f"<div><span>Return code</span><strong>{'-' if row.returncode is None else row.returncode}</strong></div>"
+            f"<div><span>Evidence bundle</span><code>{html.escape(row.log_path)}</code></div>"
+            f"<div><span>Runner command</span><code>{html.escape(row.command)}</code></div>"
+            "</div>"
+            "<table class=\"phases\"><thead><tr>"
+            "<th>Keyword / Phase</th><th>Status</th><th>Elapsed</th><th>Execution Detail</th>"
+            "</tr></thead><tbody>"
+            f"{''.join(phase_html)}"
+            "</tbody></table>"
+            "</div></details>"
         )
 
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>PlaySBC Regression Report</title>
+  <title>PlaySBC Robot-Style Regression Report</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #1f2937; }}
-    h1 {{ margin-bottom: 4px; }}
-    .meta {{ color: #4b5563; margin: 0 0 20px; }}
-    .summary {{ display: inline-flex; gap: 16px; padding: 12px 14px; border-radius: 8px; margin-bottom: 22px; }}
+    :root {{ color-scheme: light; }}
+    * {{ box-sizing: border-box; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f4f6f8; color: #1f2937; }}
+    main {{ width: min(1500px, calc(100% - 32px)); margin: 24px auto 48px; }}
+    .eyebrow {{ color: #2563eb; font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }}
+    h1 {{ margin: 4px 0; font-size: 28px; }}
+    .meta {{ color: #4b5563; margin: 0 0 18px; }}
+    .summary {{ display: flex; flex-wrap: wrap; gap: 18px; padding: 12px 14px; border-radius: 6px; margin-bottom: 18px; }}
     .summary.pass {{ background: #ecfdf5; border: 1px solid #16a34a; }}
     .summary.blocked {{ background: #fffbeb; border: 1px solid #f59e0b; }}
     .summary.fail {{ background: #fef2f2; border: 1px solid #dc2626; }}
+    .test-case {{ background: #fff; border: 1px solid #d1d5db; border-left: 5px solid #16a34a; border-radius: 6px; margin: 10px 0; overflow: hidden; }}
+    .test-case.blocked {{ border-left-color: #f59e0b; }}
+    .test-case.fail {{ border-left-color: #dc2626; }}
+    summary {{ display: grid; grid-template-columns: minmax(220px, 1.3fr) minmax(220px, 1fr) 100px 92px; align-items: center; gap: 14px; padding: 13px 15px; cursor: pointer; list-style-position: inside; }}
+    summary:hover {{ background: #f9fafb; }}
+    .test-name {{ font-weight: 750; }}
+    .suite {{ color: #4b5563; font-size: 13px; }}
+    .total-time {{ color: #374151; font-variant-numeric: tabular-nums; text-align: right; }}
+    .test-body {{ border-top: 1px solid #e5e7eb; padding: 14px; }}
+    .metadata {{ display: grid; grid-template-columns: 140px 1fr; gap: 8px 14px; margin-bottom: 14px; font-size: 12px; }}
+    .metadata div {{ display: contents; }}
+    .metadata span {{ color: #6b7280; font-weight: 700; text-transform: uppercase; }}
     table {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
-    th, td {{ border-bottom: 1px solid #e5e7eb; padding: 10px; text-align: left; vertical-align: top; word-wrap: break-word; }}
+    th, td {{ border-bottom: 1px solid #e5e7eb; padding: 10px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }}
     th {{ background: #f9fafb; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #374151; }}
-    code {{ font-size: 12px; white-space: pre-wrap; }}
+    .phases th:nth-child(1) {{ width: 19%; }}
+    .phases th:nth-child(2) {{ width: 10%; }}
+    .phases th:nth-child(3) {{ width: 10%; }}
+    code {{ font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }}
+    .keyword {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; color: #1d4ed8; }}
+    .elapsed {{ font-variant-numeric: tabular-nums; white-space: nowrap; }}
     .badge {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 4px 8px; font-weight: 700; font-size: 12px; }}
     .badge.pass {{ color: #166534; background: #dcfce7; border: 1px solid #16a34a; }}
     .badge.blocked {{ color: #92400e; background: #fef3c7; border: 1px solid #f59e0b; }}
     .badge.fail {{ color: #991b1b; background: #fee2e2; border: 1px solid #dc2626; }}
+    @media (max-width: 760px) {{
+      main {{ width: min(100% - 18px, 1500px); margin-top: 12px; }}
+      summary {{ grid-template-columns: 1fr auto; }}
+      .suite {{ grid-column: 1; }}
+      .total-time {{ grid-column: 2; grid-row: 1; }}
+      .metadata {{ grid-template-columns: 1fr; }}
+      .metadata span {{ margin-top: 6px; }}
+      .phases {{ table-layout: auto; }}
+      .phases th:nth-child(3), .phases td:nth-child(3) {{ display: none; }}
+    }}
   </style>
 </head>
 <body>
-  <h1>PlaySBC Regression Report</h1>
-  <p class="meta">Run ID: <code>{html.escape(run_id)}</code> | Generated: {html.escape(generated_at)}</p>
-  <div class="summary {summary_class}">
-    <strong>Total: {len(rows)}</strong>
-    <strong>Passed: {passed}</strong>
-    <strong>Blocked: {blocked}</strong>
-    <strong>Failed: {failed}</strong>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th>Suite</th>
-        <th>Scenario</th>
-        <th>Status</th>
-        <th>Return</th>
-        <th>Seconds</th>
-        <th>Logs</th>
-        <th>Command</th>
-      </tr>
-    </thead>
-    <tbody>
-      {''.join(row_html)}
-    </tbody>
-  </table>
+  <main>
+    <div class="eyebrow">Robot-style execution log</div>
+    <h1>PlaySBC Regression Report</h1>
+    <p class="meta">Run ID: <code>{html.escape(run_id)}</code> | Generated: {html.escape(generated_at)}</p>
+    <div class="summary {summary_class}">
+      <strong>Total: {len(rows)}</strong>
+      <strong>Passed: {passed}</strong>
+      <strong>Blocked: {blocked}</strong>
+      <strong>Failed: {failed}</strong>
+      <strong>Total time: {sum(row.duration_seconds for row in rows):.3f} s</strong>
+    </div>
+    <section aria-label="Regression test cases">{''.join(row_html)}</section>
+  </main>
 </body>
 </html>
 """
@@ -472,15 +600,7 @@ def main() -> int:
         print(f"Deleted {len(deleted_reports)} old regression report file(s) before this run.")
 
     if args.b2bua_sipp_pcap_sudo and not args.skip_b2bua:
-        sudo_keepalive = SudoKeepalive()
-        sudo_ready, sudo_detail = sudo_keepalive.start()
-        if not sudo_ready:
-            raise SystemExit(
-                "SIPp PCAP sudo mode requires cached sudo credentials before the suite starts. "
-                "Run `sudo -v` in your terminal, then rerun the regression. "
-                f"sudo_check={sudo_detail}"
-            )
-        print("SIPp PCAP sudo keepalive started.")
+        print("SIPp PCAP sudo is not required by dual-realm Docker regression; option ignored.")
 
     try:
         if not args.skip_sipp_smoke:
@@ -516,60 +636,8 @@ def main() -> int:
             for profile in profiles:
                 profile_run_id = f"{run_id}-{profile}"
                 profile_log_path = b2bua_log_root / profile_run_id
-                if profile == REAL_TOPOLOGY_PROFILE:
-                    command = real_topology_command(profile_run_id, b2bua_log_root)
-                    command_text = " ".join(command)
-                    returncode, duration, stdout, stderr = run_command(command, args.timeout)
-                    if returncode != 0:
-                        append_bundle_log(
-                            profile_log_path,
-                            "log.platform",
-                            "REAL TOPOLOGY RUNNER FAILURE",
-                            "\n".join(part for part in (stdout.strip(), stderr.strip()) if part),
-                        )
-                    rows.append(
-                        ReportRow(
-                            suite=f"B2BUA {profile}",
-                            name=profile,
-                            status=status_from_returncode(returncode),
-                            returncode=returncode,
-                            duration_seconds=duration,
-                            log_path=str(profile_log_path),
-                            command=command_text,
-                        )
-                    )
-                    continue
-                command = [
-                    sys.executable,
-                    str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
-                    "--profile",
-                    profile,
-                    "--run-id",
-                    profile_run_id,
-                    "--log-folder",
-                    args.b2bua_log_folder,
-                ]
-                if args.b2bua_media_driver:
-                    command.extend(["--media-driver", args.b2bua_media_driver])
-                if args.b2bua_sipp_pcap_sudo:
-                    command.append("--sipp-pcap-sudo")
-                if profile in RTPENGINE_B2BUA_PROFILES:
-                    command.extend(["--rtpengine-url", args.b2bua_rtpengine_url])
+                command = dual_realm_command(profile, profile_run_id, b2bua_log_root)
                 command_text = " ".join(command)
-                if profile in RTPENGINE_B2BUA_PROFILES and not args.skip_rtpengine_preflight:
-                    started = time.monotonic()
-                    ready, detail = probe_rtpengine(args.b2bua_rtpengine_url, args.rtpengine_preflight_timeout)
-                    duration = time.monotonic() - started
-                    if not ready:
-                        initialize_b2bua_log_bundle(profile_log_path)
-                        append_bundle_log(
-                            profile_log_path,
-                            "log.platform",
-                            "RTPENGINE PREFLIGHT BLOCKED",
-                            f"rtpengine_url={args.b2bua_rtpengine_url}\nreason={detail}",
-                        )
-                        rows.append(rtpengine_blocked_row(profile, args.b2bua_rtpengine_url, detail, duration, profile_log_path, command_text))
-                        continue
                 returncode, duration, stdout, stderr = run_command(command, args.timeout)
                 actual_log_path = extract_b2bua_log_path(stdout, profile_log_path)
                 if stderr.strip():

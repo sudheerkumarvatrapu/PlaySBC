@@ -4,6 +4,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -14,6 +15,7 @@ from tools import run_sipp_regression
 from tools import run_b2bua_sipp_smoke
 from tools import run_regression_suite
 from tools import run_real_topology
+from tools import run_dual_realm_profile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +127,29 @@ def sip_body(payload: bytes) -> bytes:
 
 
 class SippScenarioTests(unittest.TestCase):
+    def test_sipp_trace_parser_accepts_debian_and_macos_byte_formats(self):
+        trace = """----------------------------------------------- 2026-07-04 04:36:46.320000
+UDP message sent (100 bytes):
+
+REGISTER sip:192.168.28.20:5060 SIP/2.0
+Content-Length: 0
+
+----------------------------------------------- 2026-07-04T04:36:46.324000
+UDP message received [80] bytes :
+
+SIP/2.0 401 Unauthorized
+Content-Length: 0
+
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "messages.log"
+            path.write_text(trace, encoding="utf-8")
+            messages = run_b2bua_sipp_smoke.sipp_trace_messages(path)
+
+        self.assertEqual([message[1] for message in messages], ["sent", "received"])
+        self.assertTrue(messages[0][2].startswith(b"REGISTER "))
+        self.assertTrue(messages[1][2].startswith(b"SIP/2.0 401"))
+
     def test_all_xml_scenarios_are_well_formed(self):
         scenarios = ROOT / "sipp" / "scenarios"
         for scenario in sorted(scenarios.glob("*.xml")):
@@ -1709,6 +1734,71 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("badge pass", report)
         self.assertIn("badge fail", report)
         self.assertIn("badge blocked", report)
+        self.assertIn("Robot-style execution log", report)
+        self.assertIn("Keyword / Phase", report)
+
+    def test_regression_report_reads_measured_robot_phases_from_platform_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            records = [
+                {
+                    "name": "Setup Preparation",
+                    "status": "passed",
+                    "duration_seconds": 0.125,
+                    "detail": "Prepare SIPp scenarios.",
+                },
+                {
+                    "name": "Test Execution",
+                    "status": "passed",
+                    "duration_seconds": 60.25,
+                    "detail": "Execute one 60-second B2BUA call.",
+                },
+            ]
+            (bundle / "log.platform").write_text(
+                "\n".join(run_regression_suite.ROBOT_PHASE_PREFIX + json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            phases = run_regression_suite.read_execution_phases(bundle)
+            row = run_regression_suite.ReportRow(
+                "B2BUA basic-media",
+                "basic-media",
+                "passed",
+                0,
+                61.0,
+                str(bundle),
+                "cmd",
+                phases,
+            )
+            report = run_regression_suite.render_html([row], "2026-07-04 10:00:00 IST", "robot-report")
+
+            self.assertEqual([phase.name for phase in phases], ["Setup Preparation", "Test Execution"])
+            self.assertIn("Prepare SIPp scenarios.", report)
+            self.assertIn("Execute one 60-second B2BUA call.", report)
+            self.assertIn("0.125 s", report)
+            self.assertIn("60.250 s", report)
+
+    def test_dual_realm_robot_phase_is_recorded_in_platform_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            run_b2bua_sipp_smoke.initialize_log_dir(bundle)
+            records = []
+
+            run_dual_realm_profile.append_robot_phase(
+                bundle,
+                records,
+                "Configuration",
+                "passed",
+                time.monotonic(),
+                "Render Helm configuration.",
+            )
+            run_dual_realm_profile.flush_robot_phases(bundle, records)
+
+            phases = run_regression_suite.read_execution_phases(bundle)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(phases[0].name, "Configuration")
+            self.assertEqual(phases[0].status, "passed")
+            self.assertEqual(phases[0].detail, "Render Helm configuration.")
 
     def test_rtpengine_blocked_row_has_actionable_detail(self):
         row = run_regression_suite.rtpengine_blocked_row(
@@ -1928,6 +2018,10 @@ class SippScenarioTests(unittest.TestCase):
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
         self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 26)
+        self.assertEqual(
+            set(run_regression_suite.ALL_B2BUA_PROFILES),
+            set(run_b2bua_sipp_smoke.B2BUA_PROFILES) | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
+        )
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -1957,6 +2051,16 @@ class SippScenarioTests(unittest.TestCase):
 
         self.assertIn("run_real_topology.py", " ".join(command))
         self.assertEqual(command[-4:], ["--run-id", "regression-test-real-topology-rtpengine-transcoding", "--output-root", "/tmp/playsbc-regression"])
+
+    def test_every_regression_profile_uses_dual_realm_runner(self):
+        for profile in run_regression_suite.ALL_B2BUA_PROFILES:
+            command = run_regression_suite.dual_realm_command(
+                profile,
+                f"regression-test-{profile}",
+                Path("/tmp/playsbc-regression"),
+            )
+            self.assertIn("run_dual_realm_profile.py", " ".join(command))
+            self.assertEqual(command[command.index("--profile") + 1], profile)
 
     def test_direct_rtpengine_profile_blocks_before_sipp_when_down(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2271,6 +2375,10 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("--interface=core/172.28.0.40", compose)
         self.assertIn("--interface=peer/192.168.28.40", compose)
         self.assertIn("network_mode: service:rtpengine", compose)
+        self.assertIn("core-agent:", compose)
+        self.assertIn("peer-agent:", compose)
+        self.assertIn("network_mode: service:core-agent", compose)
+        self.assertIn("network_mode: service:peer-agent", compose)
 
     def test_topology_helm_values_select_dual_rtpengine_directions(self):
         values = (ROOT / "configs" / "topology" / "helm-values.yaml").read_text(encoding="utf-8")
@@ -2283,9 +2391,42 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("- peer", values)
 
     def test_topology_runner_tracks_every_compose_image(self):
-        self.assertEqual(len(run_real_topology.TOPOLOGY_IMAGES), 6)
+        self.assertEqual(len(run_real_topology.TOPOLOGY_IMAGES), 3)
         self.assertIn("playsbc-real-topology-playsbc:latest", run_real_topology.TOPOLOGY_IMAGES)
         self.assertIn("playsbc-real-topology-rtpengine:latest", run_real_topology.TOPOLOGY_IMAGES)
+        self.assertIn("playsbc-real-topology-sipp:latest", run_real_topology.TOPOLOGY_IMAGES)
+
+    def test_dual_realm_profile_places_uac_and_uas_on_opposite_realms(self):
+        args = run_dual_realm_profile.profile_args("basic-media", "regression-test", "b2bua-Regression")
+        uac = run_dual_realm_profile.uac_command(args, "/scenarios/b2bua_uac_a_media.xml")
+        uas = run_dual_realm_profile.uas_command(args, "/scenarios/b2bua_uas_b_media.xml")
+
+        self.assertEqual(uac[1], "172.28.0.20:5060")
+        self.assertEqual(uac[uac.index("-i") + 1], "172.28.0.10")
+        self.assertEqual(uas[uas.index("-i") + 1], "192.168.28.30")
+        self.assertEqual(args.rtpengine_url, "udp://172.28.0.40:2223")
+
+    def test_dual_realm_load_profiles_use_bounded_media_capture(self):
+        internal = run_dual_realm_profile.profile_args("load-5cps-60s", "internal-load", "b2bua-Regression")
+        internal.media_codec = "PCMU"
+        internal.media_enabled = True
+        rtpengine = run_dual_realm_profile.profile_args(
+            "load-5cps-60s-rtpengine-transcoding",
+            "rtpengine-load",
+            "b2bua-Regression",
+        )
+
+        self.assertIn("capture-internal-media-ring", run_dual_realm_profile.capture_services(internal))
+        self.assertIn("capture-media-ring", run_dual_realm_profile.capture_services(rtpengine))
+
+    def test_dual_realm_evidence_cleanup_removes_temporary_work_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "work"
+            (work / "sipp-a-uac").mkdir(parents=True)
+            (work / "sipp-a-uac" / "trace.log").write_text("temporary", encoding="utf-8")
+
+            self.assertTrue(run_dual_realm_profile.cleanup_work_dir(work))
+            self.assertFalse(work.exists())
 
     def test_topology_pcaps_merge_in_timestamp_order(self):
         with tempfile.TemporaryDirectory() as tmp:

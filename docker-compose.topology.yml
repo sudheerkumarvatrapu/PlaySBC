@@ -1,6 +1,7 @@
 name: playsbc-real-topology
 
 x-sipp-common: &sipp-common
+  image: playsbc-real-topology-sipp:latest
   build:
     context: .
     dockerfile: docker/sipp.Dockerfile
@@ -114,6 +115,50 @@ services:
       core:
         ipv4_address: 172.28.0.10
 
+  core-agent:
+    image: playsbc-real-topology-sipp:latest
+    entrypoint: ["sleep", "infinity"]
+    cap_add:
+      - NET_RAW
+    volumes:
+      - ./sipp/scenarios:/scenarios:ro
+      - ${PLAYSBC_TOPOLOGY_OUTPUT:?Set PLAYSBC_TOPOLOGY_OUTPUT}:/output
+    working_dir: /output/work/sipp-a-uac
+    networks:
+      core:
+        ipv4_address: 172.28.0.10
+
+  peer-agent:
+    image: playsbc-real-topology-sipp:latest
+    entrypoint: ["sleep", "infinity"]
+    cap_add:
+      - NET_RAW
+    volumes:
+      - ./sipp/scenarios:/scenarios:ro
+      - ${PLAYSBC_TOPOLOGY_OUTPUT:?Set PLAYSBC_TOPOLOGY_OUTPUT}:/output
+    working_dir: /output/work/sipp-b-uas
+    networks:
+      peer:
+        ipv4_address: 192.168.28.30
+
+  core-tools:
+    image: playsbc-real-topology-playsbc:latest
+    entrypoint: ["sleep", "infinity"]
+    depends_on:
+      - core-agent
+    volumes:
+      - ${PLAYSBC_TOPOLOGY_OUTPUT:?Set PLAYSBC_TOPOLOGY_OUTPUT}:/output
+    network_mode: service:core-agent
+
+  peer-tools:
+    image: playsbc-real-topology-playsbc:latest
+    entrypoint: ["sleep", "infinity"]
+    depends_on:
+      - peer-agent
+    volumes:
+      - ${PLAYSBC_TOPOLOGY_OUTPUT:?Set PLAYSBC_TOPOLOGY_OUTPUT}:/output
+    network_mode: service:peer-agent
+
   rtcp-a:
     image: playsbc-real-topology-playsbc:latest
     entrypoint: ["python3", "/app/tools/send_rtcp_reports.py"]
@@ -167,7 +212,7 @@ services:
   capture-signalling:
     <<: *sipp-common
     entrypoint: ["tcpdump"]
-    command: ["-U", "-i", "any", "-s", "0", "-w", "/output/signalling.pcap", "port", "5060", "or", "port", "2223"]
+    command: ["-U", "--immediate-mode", "-i", "any", "-s", "0", "-w", "/output/signalling.pcap", "port", "5060", "or", "port", "2223"]
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -178,13 +223,46 @@ services:
   capture-media:
     <<: *sipp-common
     entrypoint: ["tcpdump"]
-    command: ["-U", "-i", "any", "-s", "0", "-w", "/output/media.pcap", "udp", "portrange", "30000-32000"]
+    command: ["-U", "--immediate-mode", "-i", "any", "-s", "0", "-w", "/output/media.pcap", "udp", "portrange", "30000-32000"]
     cap_add:
       - NET_ADMIN
       - NET_RAW
     depends_on:
       - rtpengine
     network_mode: service:rtpengine
+
+  capture-media-ring:
+    <<: *sipp-common
+    entrypoint: ["tcpdump"]
+    command: ["-U", "--immediate-mode", "-i", "any", "-s", "0", "-C", "8", "-W", "4", "-w", "/output/media-ring.pcap", "udp", "portrange", "30000-32000"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - rtpengine
+    network_mode: service:rtpengine
+
+  capture-internal-media:
+    <<: *sipp-common
+    entrypoint: ["tcpdump"]
+    command: ["-U", "--immediate-mode", "-i", "any", "-s", "0", "-w", "/output/internal-media.pcap", "udp", "portrange", "30000-32000"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - playsbc
+    network_mode: service:playsbc
+
+  capture-internal-media-ring:
+    <<: *sipp-common
+    entrypoint: ["tcpdump"]
+    command: ["-U", "--immediate-mode", "-i", "any", "-s", "0", "-C", "8", "-W", "4", "-w", "/output/internal-media-ring.pcap", "udp", "portrange", "30000-32000"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - playsbc
+    network_mode: service:playsbc
 
 networks:
   core:

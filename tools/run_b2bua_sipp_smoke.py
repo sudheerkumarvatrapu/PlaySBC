@@ -1639,10 +1639,12 @@ def rtcp_media_packets(rtp_packets: List[PcapPacket], interval_seconds: float = 
 
 
 def parse_iso_timestamp(value: str) -> float:
-    try:
-        return datetime.strptime(value.strip(), "%Y-%m-%dT%H:%M:%S.%f").timestamp()
-    except ValueError:
-        return time.time()
+    for timestamp_format in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(value.strip(), timestamp_format).timestamp()
+        except ValueError:
+            continue
+    return time.time()
 
 
 def parse_log_timestamp(line: str) -> float:
@@ -1655,7 +1657,9 @@ def parse_log_timestamp(line: str) -> float:
 def sipp_trace_protocol_messages(path: Path) -> List[Tuple[float, str, str, bytes]]:
     text = path.read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(
-        r"^-{10,}\s+([0-9T:.\-]+)\n(UDP|TCP) message (sent|received) \[(\d+)\] bytes:\n\n",
+        r"^-{10,}\s+([0-9T :.\-]+)\n"
+        r"(UDP|TCP) message (sent|received) "
+        r"(?:\[\d+\]\s*bytes|\(\d+\s*bytes\))\s*:\n\n",
         re.MULTILINE,
     )
     matches = list(pattern.finditer(text))

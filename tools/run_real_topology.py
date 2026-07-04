@@ -27,9 +27,10 @@ COMPOSE_FILE = ROOT / "docker-compose.topology.yml"
 HELM_VALUES = ROOT / "configs" / "topology" / "helm-values.yaml"
 CHART = ROOT / "charts" / "playsbc"
 TOPOLOGY_IPS = ("172.28.0.10", "172.28.0.20", "172.28.0.40", "192.168.28.20", "192.168.28.30", "192.168.28.40")
-TOPOLOGY_IMAGES = tuple(
-    f"playsbc-real-topology-{service}:latest"
-    for service in ("rtpengine", "playsbc", "sipp-a", "sipp-b", "capture-signalling", "capture-media")
+TOPOLOGY_IMAGES = (
+    "playsbc-real-topology-rtpengine:latest",
+    "playsbc-real-topology-playsbc:latest",
+    "playsbc-real-topology-sipp:latest",
 )
 
 

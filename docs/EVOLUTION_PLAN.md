@@ -17,13 +17,14 @@ Implemented and covered by unit tests plus SIPp regression:
 - RFC 4733 DTMF generation, detection, and B2BUA relay validation
 - Internal PCMU/PCMA transcoding
 - RTPengine media backend for anchoring and transcoding experiments
-- Real dual-realm Docker topology with core `172.28.0.0/24` and peer `192.168.28.0/24` networks
-- Dual-homed PlaySBC/RTPengine path with RTPengine core-to-peer interface selection
+- All SIPp regression profiles run on real Docker core `172.28.0.0/24` and peer `192.168.28.0/24` realms
+- SIPp A is fixed to core, SIPp B/registrar contacts to peer, and PlaySBC is dual-homed
+- Dual-homed RTPengine path with named core-to-peer interface selection
 - YAML/JSON example config files under `configs/`
 - Helm chart config via `charts/playsbc/values.yaml`
 - SIPp regression server config rendered through Helm
 - SIPp B2BUA profiles for signalling, media, DTMF, authenticated registration, transcoding, negative flows, small load, soak, RTPengine, TCP RTPengine transcoding, and 5 cps / 60 second CHT load
-- Real dual-realm RTPengine transcoding profile included in the sequential regression report
+- Helm renders a profile-specific dual-realm server config before every regression case
 - One log bundle per B2BUA testcase
 - Latest HTML regression report
 
@@ -54,29 +55,9 @@ Next ESBC lab features:
 
 ## Current Regression Focus
 
-Regression is a delivery requirement: every new implementation must include focused unit tests and, when SIP, media, routing, transport, or deployment behavior changes, a named profile in the sequential regression suite. Each profile must produce one report row and one evidence bundle.
+Regression is a delivery requirement. Every SIP, media, routing, transport, or deployment enhancement needs focused tests and a named profile. Each profile must run core-to-peer, produce one report row, one log bundle, and one combined PCAP.
 
-Keep these profiles green:
-
-- `basic-signalling`
-- `basic-media`
-- `transcoding`
-- `registered-inbound`
-- `registered-outbound`
-- `register-auth-success`
-- `register-auth-failure`
-- `dtmf-rfc4733`
-- `rtpengine`
-- `rtpengine-media`
-- `rtpengine-transcoding`
-- `tcp-rtpengine-transcoding`
-- `esbc-options-keepalive`
-- `esbc-static-trunk-route`
-- `esbc-e164-route-policy`
-- `esbc-trunk-failure`
-- `load-5cps-60s`
-- `load-5cps-60s-rtpengine-transcoding`
-- negative profiles: invalid BYE, unknown route, failed outbound leg, CANCEL, retransmission
+Coverage includes signalling, media, transcoding, registration/auth, DTMF, UDP/TCP, routing/ESBC, negative flows, soak/load, and RTPengine profiles.
 
 ## Logging Rule
 
@@ -86,8 +67,8 @@ Keep logging simple:
 - Main files: `log.sip`, `log.media`, `log.transcoding`, `log.platform`, `log.sipp`
 - Single-call profiles include SIP ladders and `capture.pcap` when applicable
 - Load profiles omit ladders but retain one bounded live `capture.pcap`
-- TCP regression uses live loopback packets; synthetic TCP is fallback evidence only
-- Regression report should show one row per testcase/profile
+- Captures contain live core/peer Docker traffic; synthetic topology packets are not regression evidence
+- Regression report shows one Robot-style testcase per profile with measured lifecycle phases and timings
 
 ## RTPengine Direction
 
@@ -101,7 +82,7 @@ Next RTPengine improvements:
 - Stronger SDP validation
 - RTPengine failure scenarios
 - Deeper RTCP receiver-report and media quality analytics
-- Extend dual-realm coverage beyond the initial RTPengine transcoding profile
+- Add RTPengine port-pool exhaustion and interface-failure profiles
 
 ## Kubernetes Direction
 
@@ -113,6 +94,7 @@ Already in place:
 - ConfigMap-rendered `server.yaml`
 - Deployment and Service templates for SIP UDP/TCP
 - Local SIPp regression config rendered through `helm template`
+- Real core/peer Docker regression uses the same Helm-rendered `server.yaml`
 
 Next Kubernetes improvements:
 
