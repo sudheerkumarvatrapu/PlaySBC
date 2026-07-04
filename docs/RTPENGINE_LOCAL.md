@@ -1,6 +1,6 @@
 # Local RTPengine For PlaySBC
 
-PlaySBC uses the open-source Sipwise RTPengine NG control protocol at `udp://127.0.0.1:2223`.
+PlaySBC uses the open-source Sipwise RTPengine NG control protocol. Full regression starts its own dual-realm RTPengine in Docker; `udp://127.0.0.1:2223` is retained for standalone/manual development.
 
 RTPengine runs as the media plane. PlaySBC remains the SIP/B2BUA control plane.
 
@@ -11,10 +11,10 @@ RTP:  SIPp A <-> RTPengine <-> SIPp B
 
 ## Real Dual-Realm Lab
 
-The standard local regression below keeps its processes on loopback. To run actual network separation instead, start Docker Desktop and run:
+The standard regression uses actual Docker network separation for every profile:
 
 ```bash
-python3 tools/run_real_topology.py
+python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --timeout 420
 ```
 
 The topology uses two isolated Docker bridges:
@@ -26,17 +26,19 @@ The topology uses two isolated Docker bridges:
 
 PlaySBC and RTPengine are dual-homed. The initial RTPengine offer carries `direction=[core, peer]`, so its rewritten offer advertises the peer media address and its rewritten answer advertises the core media address. SIPp A and SIPp B never share a Docker network.
 
-Runtime config is rendered by Helm from `configs/topology/helm-values.yaml`. The run produces SBC logs, SIPp traces, `topology.log`, `result.txt`, and one merged `capture.pcap` under `logs/real-topology/<timestamp>/`.
+Runtime config is rendered by Helm for each profile. Each profile produces one SBC log bundle and one merged `capture.pcap` under `logs/b2bua-Regression/`.
 
-The runner reuses a complete local image set and builds automatically when images are missing. Force a refresh after changing containerized PlaySBC code or Dockerfiles with:
+The focused standalone topology call remains available with:
 
 ```bash
-python3 tools/run_real_topology.py --rebuild
+python3 tools/run_real_topology.py
 ```
 
 ## macOS Docker Quick Start
 
 Run these commands from the PlaySBC repo root.
+
+Steps 2-4 create an optional host-published RTPengine for manual development. Skip them when running the standard dual-realm regression suite.
 
 ### 1. Start Docker Desktop
 
@@ -97,21 +99,17 @@ Expected:
 RTPengine OK: udp://127.0.0.1:2223 replied with result=pong
 ```
 
-If this fails, RTPengine-backed SIPp profiles should report `BLOCKED` instead of a false regression failure.
+If this fails, the standalone host-loopback harness reports RTPengine as `BLOCKED`. The dual-realm suite uses its own container readiness gate.
 
 ### 5. Run Local SIPp Regression
-
-For media PCAP replay on macOS, cache sudo first:
-
-```bash
-sudo -v
-```
 
 Run the full local B2BUA SIPp regression:
 
 ```bash
-env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --b2bua-media-driver sipp-pcap --b2bua-sipp-pcap-sudo --timeout 360
+env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regression_suite.py --skip-sipp-smoke --all-b2bua-profiles --timeout 420
 ```
+
+The suite starts its own RTPengine, SIPp agents, and packet captures. Host `sudo` and host SIPp are not required.
 
 This includes:
 
@@ -129,11 +127,7 @@ The `load-5cps-60s` profiles generate `300` total calls at `5 cps`, with `60` se
 ### 6. Run Only RTPengine Profiles
 
 ```bash
-python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine
-sudo -v
-python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-media --sipp-pcap-sudo
-python3 tools/run_b2bua_sipp_smoke.py --profile rtpengine-transcoding --sipp-pcap-sudo
-python3 tools/run_b2bua_sipp_smoke.py --profile load-5cps-60s-rtpengine-transcoding --sipp-pcap-sudo
+python3 tools/run_regression_suite.py --skip-sipp-smoke --b2bua-profile rtpengine-media --b2bua-profile rtpengine-transcoding --timeout 420
 ```
 
 ### 7. Check Logs

@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
+from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp
 from rtp.rtpengine import RtpengineClient, RtpengineError, parse_rtpengine_url
 from sip.dialog import DialogError, DialogManager
 from sip.transaction import TransactionManager
@@ -576,7 +577,9 @@ class RtpSession:
     logger: Optional[SbcLogger] = None
     leg_label: str = ""
     remote_addr: Optional[Tuple[str, int]] = None
+    remote_rtcp_addr: Optional[Tuple[str, int]] = None
     transport: Optional[asyncio.DatagramTransport] = None
+    rtcp_transport: Optional[asyncio.DatagramTransport] = None
     sequence: int = field(default_factory=lambda: random.randint(0, 65535))
     timestamp: int = field(default_factory=lambda: random.randint(0, 2**32 - 1))
     ssrc: int = field(default_factory=lambda: random.randint(1, 2**32 - 1))
@@ -591,12 +594,16 @@ class RtpSession:
     dtmf_events: list = field(default_factory=list)
     dtmf_events_started: set = field(default_factory=set)
     dtmf_events_completed: set = field(default_factory=set)
+    dtmf_relay_timestamps: Dict[Tuple[int, int], int] = field(default_factory=dict)
     analyzer: RtpAnalyzer = field(default_factory=RtpAnalyzer)
     media_mode: str = "echo"
     bridge_id: str = ""
     peer_session: Optional["RtpSession"] = None
     relayed_packets: int = 0
     relayed_bytes: int = 0
+    rtcp_packets_received: int = 0
+    rtcp_packets_sent: int = 0
+    rtcp_packets_relayed: int = 0
     relay_wait_logged: bool = False
     closed: bool = False
 
@@ -686,6 +693,8 @@ class RtpSession:
         self.closed = True
         if self.transport:
             self.transport.close()
+        if self.rtcp_transport:
+            self.rtcp_transport.close()
         duration = time.time() - self.created_at
         payloads = ",".join(
             f"{CODEC_NAMES.get(payload_type, str(payload_type))}:{count}"
@@ -703,6 +712,9 @@ class RtpSession:
                 f"rtp_bytes_received={self.bytes_received} "
                 f"rtp_bytes_sent={self.bytes_sent} "
                 f"rtp_bytes_relayed={self.relayed_bytes} "
+                f"rtcp_packets_received={self.rtcp_packets_received} "
+                f"rtcp_packets_sent={self.rtcp_packets_sent} "
+                f"rtcp_packets_relayed={self.rtcp_packets_relayed} "
                 f"payloads_received={payloads} "
                 f"dtmf={dtmf} "
                 f"{self.analyzer.summary_text()}"
@@ -841,14 +853,25 @@ class RtpProtocol(asyncio.DatagramProtocol):
                 self.session.relay_wait_logged = True
             return
 
-        out_payload_type = peer.preferred_payload
-        out_payload = self.transcoder.convert(packet.payload, packet.payload_type, out_payload_type)
+        is_dtmf = self.session.dtmf_payload_type == packet.payload_type
+        out_payload_type = (peer.dtmf_payload_type or packet.payload_type) if is_dtmf else peer.preferred_payload
+        out_payload = packet.payload if is_dtmf else self.transcoder.convert(packet.payload, packet.payload_type, out_payload_type)
         peer.sequence = (peer.sequence + 1) & 0xFFFF
-        peer.timestamp = (peer.timestamp + len(out_payload)) & 0xFFFFFFFF
+        event = parse_dtmf_event(packet.payload) if is_dtmf else None
+        if event:
+            event_id, _digit, is_end, duration = event
+            relay_key = (packet.ssrc, event_id)
+            if relay_key not in self.session.dtmf_relay_timestamps:
+                self.session.dtmf_relay_timestamps[relay_key] = (peer.timestamp + 160) & 0xFFFFFFFF
+            out_timestamp = self.session.dtmf_relay_timestamps[relay_key]
+            peer.timestamp = (out_timestamp + duration) & 0xFFFFFFFF if is_end else out_timestamp
+        else:
+            peer.timestamp = (peer.timestamp + len(out_payload)) & 0xFFFFFFFF
+            out_timestamp = peer.timestamp
         response = RtpPacket.build(
             payload_type=out_payload_type,
             sequence=peer.sequence,
-            timestamp=peer.timestamp,
+            timestamp=out_timestamp,
             ssrc=peer.ssrc,
             payload=out_payload,
             marker=packet.marker,
@@ -856,6 +879,73 @@ class RtpProtocol(asyncio.DatagramProtocol):
         peer.transport.sendto(response, peer.remote_addr)
         peer.record_rtp_sent(out_payload)
         self.session.record_relay(out_payload)
+        if is_dtmf:
+            digit = event[1] if event else "unknown"
+            self.session.log(
+                "DTMF RELAY",
+                f"digit={digit} src_payload={packet.payload_type} dst_payload={out_payload_type}",
+            )
+
+
+class RtcpProtocol(asyncio.DatagramProtocol):
+    def __init__(self, session: RtpSession):
+        self.session = session
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.session.rtcp_transport = transport  # type: ignore[assignment]
+        local_port = self.session.local_port + 1
+        if self.session.logger:
+            self.session.logger.udp(
+                "UDP LISTENING",
+                f"protocol=rtcp local={self.session.local_ip}:{local_port}",
+                call_id=self.session.call_id,
+                leg=self.session.leg_label or self.session.media_mode,
+            )
+        self.session.log("RTCP LISTENING", f"local={self.session.local_ip}:{local_port}")
+
+    def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
+        try:
+            packets = parse_compound_rtcp(data)
+        except ValueError as exc:
+            if self.session.logger:
+                self.session.logger.networking(
+                    "RTCP PARSE FAILED",
+                    f"source={addr[0]}:{addr[1]} bytes={len(data)} reason={exc}",
+                    call_id=self.session.call_id,
+                    leg=self.session.leg_label or self.session.media_mode,
+                )
+            return
+
+        self.session.remote_rtcp_addr = addr
+        self.session.rtcp_packets_received += 1
+        count = self.session.rtcp_packets_received
+        if count <= 3 or count % 10 == 0:
+            packet_types = ",".join(str(packet.packet_type) for packet in packets)
+            self.session.log("RTCP PACKET RX", f"count={count} source={addr[0]}:{addr[1]} types={packet_types}")
+
+        peer = self.session.peer_session
+        if peer and peer.rtcp_transport and peer.remote_rtcp_addr:
+            report = build_compound_sender_report(
+                ssrc=peer.ssrc,
+                cname=f"playsbc-{safe_filename(peer.call_id)}",
+                rtp_timestamp=peer.timestamp,
+                packet_count=peer.packets_sent,
+                octet_count=peer.bytes_sent,
+            )
+            peer.rtcp_transport.sendto(report, peer.remote_rtcp_addr)
+            peer.rtcp_packets_sent += 1
+            self.session.rtcp_packets_relayed += 1
+            return
+        if self.session.media_mode == "echo" and self.session.rtcp_transport:
+            report = build_compound_sender_report(
+                ssrc=self.session.ssrc,
+                cname=f"playsbc-{safe_filename(self.session.call_id)}",
+                rtp_timestamp=self.session.timestamp,
+                packet_count=self.session.packets_sent,
+                octet_count=self.session.bytes_sent,
+            )
+            self.session.rtcp_transport.sendto(report, addr)
+            self.session.rtcp_packets_sent += 1
 
 
 class MediaServer:
@@ -900,6 +990,10 @@ class MediaServer:
         await loop.create_datagram_endpoint(
             lambda: RtpProtocol(session, self.transcoder),
             local_addr=(self.local_ip, local_port),
+        )
+        await loop.create_datagram_endpoint(
+            lambda: RtcpProtocol(session),
+            local_addr=(self.local_ip, local_port + 1),
         )
         self.sessions[call_id] = session
         if bridge_id:
@@ -1298,7 +1392,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 body=sdp,
                 to_header=to_header,
                 extra_headers={
-                    "Contact": f"<sip:python-call-server@{self.sip_advertised_ip}:{self.local_port}>",
+                    "Contact": f"<{self.inbound_contact_uri(target_user, message.transport)}>",
                     "Content-Type": "application/sdp",
                 },
             )
@@ -1424,6 +1518,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         inbound_remote = parse_sdp_remote_addr(message.body, message.source[0])
         if inbound_remote:
             inbound_rtp.remote_addr = inbound_remote
+            inbound_rtp.remote_rtcp_addr = parse_sdp_remote_rtcp_addr(message.body, inbound_remote)
             inbound_rtp.log("RTP REMOTE", f"remote={inbound_remote[0]}:{inbound_remote[1]} source=sdp")
 
         outbound_call_id = make_call_id()
@@ -1507,6 +1602,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         outbound_remote = parse_sdp_remote_addr(final_response.body, final_response.source[0])
         if outbound_remote:
             outbound_rtp.remote_addr = outbound_remote
+            outbound_rtp.remote_rtcp_addr = parse_sdp_remote_rtcp_addr(final_response.body, outbound_remote)
             outbound_rtp.log("RTP REMOTE", f"remote={outbound_remote[0]}:{outbound_remote[1]} source=sdp")
 
         inbound_rtp.set_peer(outbound_rtp)
@@ -1525,7 +1621,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             body=answer_sdp,
             to_header=to_header,
             extra_headers={
-                "Contact": f"<sip:python-call-server@{self.sip_advertised_ip}:{self.local_port}>",
+                "Contact": f"<{self.inbound_contact_uri(target_user, message.transport)}>",
                 "Content-Type": "application/sdp",
             },
         )
@@ -1713,7 +1809,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             body=answer_sdp,
             to_header=to_header,
             extra_headers={
-                "Contact": f"<sip:python-call-server@{self.sip_advertised_ip}:{self.local_port}>",
+                "Contact": f"<{self.inbound_contact_uri(target_user, message.transport)}>",
                 "Content-Type": "application/sdp",
             },
         )
@@ -1910,10 +2006,16 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     async def _delete_rtpengine_call(self, b2bua_call: B2BUACall) -> None:
         assert self.rtpengine_client is not None
         try:
-            query_response = await self.rtpengine_client.query(
-                call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
-                from_tag=b2bua_call.rtpengine_from_tag,
-                to_tag=b2bua_call.rtpengine_to_tag,
+            query_timeout = min(max(self.rtpengine_client.timeout, 0.050), 1.0)
+            query_response, packet_samples, retry_count = await query_rtpengine_until_stable(
+                lambda: asyncio.wait_for(
+                    self.rtpengine_client.query(
+                        call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
+                        from_tag=b2bua_call.rtpengine_from_tag,
+                        to_tag=b2bua_call.rtpengine_to_tag,
+                    ),
+                    timeout=query_timeout,
+                )
             )
             summary = {
                 key: query_response[key]
@@ -1923,15 +2025,22 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             detail = json.dumps(summary, sort_keys=True)
             if not b2bua_call.flow_log.enabled:
                 rtp_totals = query_response.get("totals", {}).get("RTP", {})
+                rtcp_totals = query_response.get("totals", {}).get("RTCP", {})
                 detail = (
                     f"result={query_response.get('result', 'unknown')} "
                     f"rtp_packets_total={rtp_totals.get('packets', 0)} "
                     f"rtp_bytes_total={rtp_totals.get('bytes', 0)} "
-                    f"rtp_errors_total={rtp_totals.get('errors', 0)}"
+                    f"rtp_errors_total={rtp_totals.get('errors', 0)} "
+                    f"rtcp_packets_total={rtcp_totals.get('packets', 0)} "
+                    f"rtcp_bytes_total={rtcp_totals.get('bytes', 0)} "
+                    f"rtcp_errors_total={rtcp_totals.get('errors', 0)} "
+                    f"query_packet_samples={','.join(str(value) for value in packet_samples)} "
+                    f"query_retry_count={retry_count}"
                 )
             b2bua_call.flow_log.write("RTPENGINE QUERY", detail)
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
-            b2bua_call.flow_log.write("RTPENGINE QUERY FAILED", str(exc))
+            error = str(exc) or "no additional detail"
+            b2bua_call.flow_log.write("RTPENGINE QUERY FAILED", f"error_type={type(exc).__name__} error={error}")
         try:
             await self.rtpengine_client.delete(
                 call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
@@ -1954,6 +2063,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     def local_contact_uri(self, transport_name: str = "udp") -> str:
         return SipUri("b2bua", self.b2bua_advertised_ip, self.local_port, normalize_sip_transport(transport_name)).uri
+
+    def inbound_contact_uri(self, target_user: str, transport_name: str = "udp") -> str:
+        return SipUri(target_user, self.sip_advertised_ip, self.local_port, normalize_sip_transport(transport_name)).uri
 
     def authenticate_register(self, message: SipMessage, user: str) -> str:
         if not self.users:
@@ -2242,6 +2354,15 @@ def parse_sdp_remote_addr(sdp: str, fallback_ip: str = "") -> Optional[Tuple[str
     return host, port
 
 
+def parse_sdp_remote_rtcp_addr(sdp: str, rtp_addr: Tuple[str, int]) -> Tuple[str, int]:
+    match = re.search(r"^a=rtcp:(\d+)(?:\s+IN\s+IP[46]\s+([^\s]+))?", sdp, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return rtp_addr[0], rtp_addr[1] + 1
+    port = int(match.group(1))
+    host = match.group(2) or rtp_addr[0]
+    return host, port
+
+
 def parse_dtmf_payload_type(sdp: str) -> Optional[int]:
     for match in re.finditer(r"^a=rtpmap:(\d+)\s+telephone-event/8000", sdp, re.IGNORECASE | re.MULTILINE):
         return int(match.group(1))
@@ -2404,6 +2525,7 @@ def make_sdp(
         f"c=IN IP4 {local_ip}",
         "t=0 0",
         f"m=audio {rtp_port} RTP/AVP {' '.join(str(payload) for payload in offered_payloads)}",
+        f"a=rtcp:{rtp_port + 1}",
     ]
     for payload in offered_payloads:
         if payload in codecs:
@@ -2413,6 +2535,37 @@ def make_sdp(
             lines.append(f"a=fmtp:{payload} 0-16")
     lines.extend(["a=sendrecv", ""])
     return CRLF.join(lines)
+
+
+def rtpengine_packet_total(response: Dict[str, Any]) -> int:
+    return int(response.get("totals", {}).get("RTP", {}).get("packets", 0) or 0)
+
+
+async def query_rtpengine_until_stable(
+    request: Callable[[], Awaitable[Dict[str, Any]]],
+    attempts: int = 4,
+    delay: float = 0.050,
+) -> Tuple[Dict[str, Any], Tuple[int, ...], int]:
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    samples: List[int] = []
+    response: Dict[str, Any] = {}
+    retry_count = 0
+    for attempt in range(attempts):
+        try:
+            response = await request()
+        except (asyncio.TimeoutError, OSError, RtpengineError):
+            retry_count += 1
+            if attempt + 1 >= attempts:
+                raise
+            await asyncio.sleep(delay * retry_count)
+            continue
+        samples.append(rtpengine_packet_total(response))
+        if len(samples) >= 2 and samples[-1] == samples[-2]:
+            break
+        if attempt + 1 < attempts:
+            await asyncio.sleep(delay)
+    return response, tuple(samples), retry_count
 
 
 def build_sip_request(method: str, request_uri: str, headers: Dict[str, str], body: str = "") -> bytes:

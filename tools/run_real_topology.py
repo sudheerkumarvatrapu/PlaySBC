@@ -27,9 +27,10 @@ COMPOSE_FILE = ROOT / "docker-compose.topology.yml"
 HELM_VALUES = ROOT / "configs" / "topology" / "helm-values.yaml"
 CHART = ROOT / "charts" / "playsbc"
 TOPOLOGY_IPS = ("172.28.0.10", "172.28.0.20", "172.28.0.40", "192.168.28.20", "192.168.28.30", "192.168.28.40")
-TOPOLOGY_IMAGES = tuple(
-    f"playsbc-real-topology-{service}:latest"
-    for service in ("rtpengine", "playsbc", "sipp-a", "sipp-b", "capture-signalling", "capture-media")
+TOPOLOGY_IMAGES = (
+    "playsbc-real-topology-rtpengine:latest",
+    "playsbc-real-topology-playsbc:latest",
+    "playsbc-real-topology-sipp:latest",
 )
 
 
@@ -166,6 +167,31 @@ def rtp_payload_types(path: Path) -> dict[tuple[str, str], set[int]]:
     return flows
 
 
+def rtcp_packet_counts(path: Path) -> dict[tuple[str, str], int]:
+    _major, _minor, linktype, records = pcap_records(path)
+    ip_offset_by_linktype = {1: 14, 276: 20}
+    if linktype not in ip_offset_by_linktype:
+        raise ValueError(f"Unsupported PCAP link type for RTCP validation: {linktype}")
+    ip_offset = ip_offset_by_linktype[linktype]
+    flows: dict[tuple[str, str], int] = {}
+    for record in records:
+        frame = record.data
+        if len(frame) < ip_offset + 32 or frame[ip_offset] >> 4 != 4 or frame[ip_offset + 9] != 17:
+            continue
+        header_length = (frame[ip_offset] & 0x0F) * 4
+        payload_offset = ip_offset + header_length + 8
+        if len(frame) < payload_offset + 4 or frame[payload_offset] >> 6 != 2:
+            continue
+        packet_type = frame[payload_offset + 1]
+        if packet_type not in {200, 201}:
+            continue
+        src_ip = socket.inet_ntoa(frame[ip_offset + 12 : ip_offset + 16])
+        dst_ip = socket.inet_ntoa(frame[ip_offset + 16 : ip_offset + 20])
+        flow = (src_ip, dst_ip)
+        flows[flow] = flows.get(flow, 0) + 1
+    return flows
+
+
 def sipp_stat_summary(stats_path: Path) -> str:
     with stats_path.open(encoding="utf-8", errors="replace", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter=";"))
@@ -240,12 +266,12 @@ def wait_for_rtpengine(env: dict[str, str], timeout: float = 20.0) -> None:
     raise RuntimeError("RTPengine did not become ready inside the core network")
 
 
-def wait_service_exit(service: str, env: dict[str, str]) -> int:
-    completed = run(compose_command("wait", service), env=env, check=False)
-    for line in reversed(completed.stdout.splitlines()):
-        if line.strip().isdigit():
-            return int(line.strip())
-    return completed.returncode
+def wait_services_exit(services: list[str], env: dict[str, str]) -> dict[str, int]:
+    completed = run(compose_command("wait", *services), env=env, check=False)
+    exit_codes = [int(line.strip()) for line in completed.stdout.splitlines() if line.strip().isdigit()]
+    if len(exit_codes) == len(services):
+        return dict(zip(services, exit_codes))
+    return {service: completed.returncode for service in services}
 
 
 def validate(bundle: Path, uac_rc: int, uas_rc: int, packet_count: int) -> list[str]:
@@ -266,6 +292,14 @@ def validate(bundle: Path, uac_rc: int, uas_rc: int, packet_count: int) -> list[
             failures.append(f"Capture does not contain topology address {ip}")
     if packet_count <= 0:
         failures.append("Unified capture contains no packets")
+    required_dialog_targets = (
+        b"Contact: <sip:peer-b@172.28.0.20:5060>",
+        b"ACK sip:peer-b@172.28.0.20:5060 SIP/2.0",
+        b"BYE sip:peer-b@172.28.0.20:5060 SIP/2.0",
+    )
+    for expected in required_dialog_targets:
+        if expected not in capture:
+            failures.append(f"Missing inbound dialog target evidence: {expected.decode('ascii')}")
     payloads = rtp_payload_types(bundle / "capture.pcap")
     expected_rtp = {
         ("172.28.0.10", "172.28.0.40"): 0,
@@ -278,6 +312,12 @@ def validate(bundle: Path, uac_rc: int, uas_rc: int, packet_count: int) -> list[
             failures.append(f"Missing RTP payload {payload_type} on {flow[0]} -> {flow[1]}")
     if ("172.28.0.10", "192.168.28.30") in payloads or ("192.168.28.30", "172.28.0.10") in payloads:
         failures.append("Capture contains direct SIPp A/SIPp B RTP, bypassing RTPengine")
+    rtcp_flows = rtcp_packet_counts(bundle / "capture.pcap")
+    for flow in expected_rtp:
+        if rtcp_flows.get(flow, 0) <= 0:
+            failures.append(f"Missing RTCP on {flow[0]} -> {flow[1]}")
+    if '"RTCP": {"bytes": 0' in media_log:
+        failures.append("RTPengine query reported zero RTCP packets")
     return failures
 
 
@@ -336,9 +376,16 @@ def main() -> int:
         )
         wait_for_rtpengine(env)
         time.sleep(1)
-        uac = run(compose_command("run", "--rm", "sipp-a"), env=env, check=False)
-        uac_rc = uac.returncode
-        uas_rc = wait_service_exit("sipp-b", env)
+        run(compose_command("up", "-d", "sipp-a", "rtcp-a", "rtcp-b"), env=env)
+        exit_codes = wait_services_exit(["sipp-a", "sipp-b", "rtcp-a", "rtcp-b"], env)
+        uac_rc = exit_codes["sipp-a"]
+        uas_rc = exit_codes["sipp-b"]
+        rtcp_a_rc = exit_codes["rtcp-a"]
+        rtcp_b_rc = exit_codes["rtcp-b"]
+        if rtcp_a_rc != 0:
+            raise RuntimeError(f"Core RTCP sender exited with {rtcp_a_rc}")
+        if rtcp_b_rc != 0:
+            raise RuntimeError(f"Peer RTCP sender exited with {rtcp_b_rc}")
         time.sleep(2)
     finally:
         run(compose_command("kill", "-s", "SIGINT", "capture-signalling", "capture-media"), env=env, check=False)

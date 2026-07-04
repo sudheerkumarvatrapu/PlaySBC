@@ -13,6 +13,8 @@ from pathlib import Path
 SAMPLE_RATE = 8000
 PACKET_MS = 20
 SAMPLES_PER_PACKET = SAMPLE_RATE * PACKET_MS // 1000
+DTMF_EVENTS = {str(index): index for index in range(10)}
+DTMF_EVENTS.update({"*": 10, "#": 11, "A": 12, "B": 13, "C": 14, "D": 15})
 
 
 def checksum(data: bytes) -> int:
@@ -75,8 +77,21 @@ def tone_payload(codec: str, packet_index: int, frequency: int, amplitude: int) 
     return bytes(payload)
 
 
-def rtp_packet(payload: bytes, payload_type: int, sequence: int, timestamp: int, ssrc: int) -> bytes:
-    return struct.pack("!BBHII", 0x80, payload_type & 0x7F, sequence & 0xFFFF, timestamp, ssrc) + payload
+def rtp_packet(
+    payload: bytes,
+    payload_type: int,
+    sequence: int,
+    timestamp: int,
+    ssrc: int,
+    marker: bool = False,
+) -> bytes:
+    marker_payload = (0x80 if marker else 0) | (payload_type & 0x7F)
+    return struct.pack("!BBHII", 0x80, marker_payload, sequence & 0xFFFF, timestamp, ssrc) + payload
+
+
+def dtmf_payload(event: int, duration: int, end: bool = False, volume: int = 10) -> bytes:
+    flags_volume = (0x80 if end else 0) | (volume & 0x3F)
+    return struct.pack("!BBH", event & 0xFF, flags_volume, duration & 0xFFFF)
 
 
 def ip_udp_packet(payload: bytes, packet_id: int) -> bytes:
@@ -91,16 +106,44 @@ def ip_udp_packet(payload: bytes, packet_id: int) -> bytes:
     return ethernet_header + ip_header + udp_header + payload
 
 
-def write_pcap(path: Path, codec: str, seconds: int, frequency: int, amplitude: int) -> None:
+def write_pcap(
+    path: Path,
+    codec: str,
+    seconds: int,
+    frequency: int,
+    amplitude: int,
+    dtmf_digit: str = "5",
+    dtmf_start_ms: int = 1000,
+    dtmf_duration_ms: int = 200,
+) -> None:
     payload_type = 0 if codec == "PCMU" else 8
     packet_count = seconds * 1000 // PACKET_MS
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with path.open("wb") as fh:
         fh.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+        event_id = DTMF_EVENTS[dtmf_digit.upper()]
+        event_start = max(dtmf_start_ms // PACKET_MS, 0)
+        event_packets = max(dtmf_duration_ms // PACKET_MS, 1)
+        event_end = event_start + event_packets
+        end_repeats = 3
+        event_timestamp = event_start * SAMPLES_PER_PACKET
         for index in range(packet_count):
-            payload = tone_payload(codec, index, frequency, amplitude)
-            rtp = rtp_packet(payload, payload_type, index, index * SAMPLES_PER_PACKET, 0xC0DEC0DE)
+            if event_start <= index < event_end + end_repeats:
+                event_index = min(index - event_start + 1, event_packets)
+                is_end = index >= event_end
+                payload = dtmf_payload(event_id, event_index * SAMPLES_PER_PACKET, end=is_end)
+                rtp = rtp_packet(
+                    payload,
+                    101,
+                    index,
+                    event_timestamp,
+                    0xC0DEC0DE,
+                    marker=index == event_start,
+                )
+            else:
+                payload = tone_payload(codec, index, frequency, amplitude)
+                rtp = rtp_packet(payload, payload_type, index, index * SAMPLES_PER_PACKET, 0xC0DEC0DE)
             packet = ip_udp_packet(rtp, index)
             timestamp_us = index * PACKET_MS * 1000
             fh.write(struct.pack("<IIII", timestamp_us // 1_000_000, timestamp_us % 1_000_000, len(packet), len(packet)))
@@ -113,11 +156,15 @@ def main() -> int:
     parser.add_argument("--seconds", type=int, default=60)
     parser.add_argument("--frequency", type=int, default=440)
     parser.add_argument("--amplitude", type=int, default=10000)
+    parser.add_argument("--dtmf-digit", choices=sorted(DTMF_EVENTS), default="5")
+    parser.add_argument("--dtmf-start-ms", type=int, default=1000)
+    parser.add_argument("--dtmf-duration-ms", type=int, default=200)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
-    write_pcap(output_dir / f"g711u_{args.seconds}s.pcap", "PCMU", args.seconds, args.frequency, args.amplitude)
-    write_pcap(output_dir / f"g711a_{args.seconds}s.pcap", "PCMA", args.seconds, args.frequency, args.amplitude)
+    common = (args.seconds, args.frequency, args.amplitude, args.dtmf_digit, args.dtmf_start_ms, args.dtmf_duration_ms)
+    write_pcap(output_dir / f"g711u_{args.seconds}s.pcap", "PCMU", *common)
+    write_pcap(output_dir / f"g711a_{args.seconds}s.pcap", "PCMA", *common)
     return 0
 
 

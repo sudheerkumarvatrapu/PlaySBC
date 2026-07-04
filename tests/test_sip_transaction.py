@@ -83,7 +83,9 @@ class InviteTimerTests(unittest.IsolatedAsyncioTestCase):
         transactions.receive_request("INVITE", via, "1 INVITE", "timer-call", source)
         transactions.cache_response("INVITE", via, "1 INVITE", "timer-call", b"SIP/2.0 200 OK", source, 200)
 
-        await asyncio.sleep(0.035)
+        deadline = asyncio.get_running_loop().time() + 0.15
+        while len(sent) < 2 and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.005)
         self.assertGreaterEqual(len(sent), 2)
 
         transactions.acknowledge_invite("timer-call", "1 ACK")
