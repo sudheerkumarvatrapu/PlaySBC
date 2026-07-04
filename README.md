@@ -58,7 +58,7 @@ env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regressio
   --timeout 420
 ```
 
-This runs all B2BUA/SIPp profiles, including ESBC cases and the Docker-based real dual-realm profile, with Helm-rendered YAML config. Local regression uses `helm template`; Kubernetes install is not required.
+This runs all B2BUA/SIPp profiles, including digest REGISTER success/failure, RFC 4733 DTMF, ESBC cases, bounded live load/TCP captures, and the Docker-based real dual-realm profile. Configuration is rendered with `helm template`; Kubernetes install is not required. Cached sudo is used by SIPp PCAP replay and live `tcpdump` evidence.
 
 ## Real Core/Peer Topology
 
@@ -86,6 +86,8 @@ logs/real-topology/<run>/
 ```
 
 Runtime config examples live in `configs/`. Helm values live in `charts/playsbc/values.yaml`.
+
+Each TCP/load testcase retains one bounded `capture.pcap`. The RTPengine media load also requires non-zero RTCP canary evidence.
 
 ## Contributor
 

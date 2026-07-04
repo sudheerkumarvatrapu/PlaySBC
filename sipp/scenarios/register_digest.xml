@@ -10,7 +10,7 @@
       To: <sip:[service]@[remote_ip]>
       Call-ID: [call_id]
       CSeq: 1 REGISTER
-      Contact: <sip:[service]@[local_ip]:[local_port]>
+      Contact: <sip:[service]@[local_ip]:[contact_port]>
       Max-Forwards: 70
       Expires: 300
       Content-Length: 0
@@ -28,10 +28,10 @@
       To: <sip:[service]@[remote_ip]>
       Call-ID: [call_id]
       CSeq: 2 REGISTER
-      Contact: <sip:[service]@[local_ip]:[local_port]>
+      Contact: <sip:[service]@[local_ip]:[contact_port]>
       Max-Forwards: 70
       Expires: 300
-      [authentication username=1001 password=secret-password]
+      [authentication username=__AUTH_USERNAME__ password=__AUTH_PASSWORD__]
       Content-Length: 0
 
     ]]>

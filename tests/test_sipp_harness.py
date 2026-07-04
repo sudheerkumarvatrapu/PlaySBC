@@ -216,6 +216,18 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("--expect-echo", sidecars[0][1])
         self.assertIn("telephone-event/8000", scenario_text)
 
+    def test_g711_media_fixture_contains_complete_rfc4733_event(self):
+        packets = run_b2bua_sipp_smoke.rtp_packets_from_pcap(
+            ROOT / "sipp" / "scenarios" / "pcap" / "g711u_60s.pcap",
+            2.0,
+        )
+        events = [payload for _timestamp, payload in packets if payload[1] & 0x7F == 101]
+
+        self.assertGreaterEqual(len(events), 4)
+        self.assertTrue(events[0][1] & 0x80)
+        self.assertEqual(events[0][12], 5)
+        self.assertTrue(any(payload[13] & 0x80 for payload in events))
+
     def test_basic_call_media_dry_run_writes_sidecar_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             completed = subprocess.run(
@@ -353,6 +365,39 @@ class SippScenarioTests(unittest.TestCase):
         self.assertNotIn("-t", command)
         self.assertNotIn("-max_socket", command)
 
+    def test_digest_register_profile_uses_helm_credentials_and_sipp_keys(self):
+        values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        values.update(run_b2bua_sipp_smoke.B2BUA_PROFILES["register-auth-success"])
+        values.update(ladder_enabled=True, media_enabled=False, server_codec="PCMU")
+        args = argparse_namespace(**values)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "registration-callee").mkdir()
+            run_b2bua_sipp_smoke.prepare_registration_scenario(args, tmp_path)
+            command = run_b2bua_sipp_smoke.build_register_command(
+                args,
+                "sipp",
+                args.callee,
+                contact_port=args.uas_port,
+                local_port=args.register_port,
+            )
+            rendered = Path(args.registration_scenario).read_text(encoding="ISO-8859-1")
+            config_path = run_b2bua_sipp_smoke.write_dynamic_config(args, tmp_path, tmp_path / "logs")
+            config = server.load_config_file(str(config_path))
+
+        self.assertIn("register_digest_resolved.xml", " ".join(command))
+        self.assertIn("[authentication username=1001 password=secret-password]", rendered)
+        self.assertNotIn("secret-password", " ".join(command))
+        self.assertEqual(config.users, {"1001": "secret-password"})
+
+    def test_digest_failure_profile_does_not_start_a_call(self):
+        profile = run_b2bua_sipp_smoke.B2BUA_PROFILES["register-auth-failure"]
+
+        self.assertEqual(profile["registration_auth_expected"], "failure")
+        self.assertFalse(profile["run_call"])
+        self.assertFalse(profile["start_uas"])
+
     def test_b2bua_load_profiles_run_5cps_for_60_seconds(self):
         for profile in ("load-5cps-60s", "load-5cps-60s-rtpengine-transcoding"):
             with self.subTest(profile=profile):
@@ -379,6 +424,50 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("-trace_counts", command)
             self.assertNotIn("-trace_msg", command)
             self.assertNotIn("-trace_logs", command)
+
+    def test_rtpengine_media_load_enables_temporary_trace_for_rtcp_anchor_discovery(self):
+        values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        values.update(run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s-rtpengine-transcoding"])
+        values.update(media_enabled=True, profile="load-5cps-60s-rtpengine-transcoding")
+        args = argparse_namespace(**values)
+
+        self.assertIn("-trace_msg", run_b2bua_sipp_smoke.sipp_trace_args(args))
+        self.assertTrue(run_b2bua_sipp_smoke.should_run_rtcp(args))
+
+    def test_load_and_tcp_profiles_build_live_tcpdump_commands(self):
+        load_values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        load_values.update(run_b2bua_sipp_smoke.B2BUA_PROFILES["load-5cps-60s-rtpengine-transcoding"])
+        load_values.update(media_enabled=True, sipp_pcap_sudo=True)
+        tcp_values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
+        tcp_values.update(run_b2bua_sipp_smoke.B2BUA_PROFILES["tcp-rtpengine-transcoding"])
+        tcp_values.update(media_enabled=True, sipp_pcap_sudo=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(run_b2bua_sipp_smoke, "resolve_binary", return_value="/usr/sbin/tcpdump"):
+                load_commands = run_b2bua_sipp_smoke.live_capture_commands(argparse_namespace(**load_values), Path(tmp))
+                tcp_commands = run_b2bua_sipp_smoke.live_capture_commands(argparse_namespace(**tcp_values), Path(tmp))
+
+        self.assertEqual([name for name, _command in load_commands], ["live-pcap-control", "live-pcap-media-ring"])
+        self.assertIn("-C", load_commands[1][1])
+        self.assertIn("-W", load_commands[1][1])
+        self.assertEqual([name for name, _command in tcp_commands], ["live-pcap"])
+        self.assertIn("tcp", tcp_commands[0][1])
+
+    def test_live_capture_segments_merge_in_timestamp_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            later = root / "live-media.pcap0"
+            earlier = root / "live-control.pcap"
+            destination = root / "capture.pcap"
+            write_test_pcap(later, 20.0, b"later", linktype=0)
+            write_test_pcap(earlier, 10.0, b"earlier", linktype=0)
+
+            count = run_b2bua_sipp_smoke.merge_live_capture_files([later, earlier], destination)
+            _header, linktype, records = run_b2bua_sipp_smoke.pcap_file_records(destination)
+
+        self.assertEqual(count, 2)
+        self.assertEqual(linktype, 0)
+        self.assertEqual([frame for _timestamp, frame in records], [b"earlier", b"later"])
 
     def test_b2bua_single_call_runs_keep_full_sipp_tracing(self):
         values = dict(run_b2bua_sipp_smoke.BASE_DEFAULTS)
@@ -1346,6 +1435,9 @@ class SippScenarioTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("transcoding", completed.stdout)
         self.assertIn("registered-outbound", completed.stdout)
+        self.assertIn("register-auth-success", completed.stdout)
+        self.assertIn("register-auth-failure", completed.stdout)
+        self.assertIn("dtmf-rfc4733", completed.stdout)
         self.assertIn("rtpengine-media", completed.stdout)
         self.assertIn("rtpengine-transcoding", completed.stdout)
         self.assertIn("tcp-rtpengine-transcoding", completed.stdout)
@@ -1835,11 +1927,14 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("password is required", detail)
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
-        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 23)
+        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 26)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("register-auth-success", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("register-auth-failure", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("dtmf-rfc4733", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("unknown-route", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("failed-outbound", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("cancel", run_regression_suite.ALL_B2BUA_PROFILES)

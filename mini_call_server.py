@@ -594,6 +594,7 @@ class RtpSession:
     dtmf_events: list = field(default_factory=list)
     dtmf_events_started: set = field(default_factory=set)
     dtmf_events_completed: set = field(default_factory=set)
+    dtmf_relay_timestamps: Dict[Tuple[int, int], int] = field(default_factory=dict)
     analyzer: RtpAnalyzer = field(default_factory=RtpAnalyzer)
     media_mode: str = "echo"
     bridge_id: str = ""
@@ -852,14 +853,25 @@ class RtpProtocol(asyncio.DatagramProtocol):
                 self.session.relay_wait_logged = True
             return
 
-        out_payload_type = peer.preferred_payload
-        out_payload = self.transcoder.convert(packet.payload, packet.payload_type, out_payload_type)
+        is_dtmf = self.session.dtmf_payload_type == packet.payload_type
+        out_payload_type = (peer.dtmf_payload_type or packet.payload_type) if is_dtmf else peer.preferred_payload
+        out_payload = packet.payload if is_dtmf else self.transcoder.convert(packet.payload, packet.payload_type, out_payload_type)
         peer.sequence = (peer.sequence + 1) & 0xFFFF
-        peer.timestamp = (peer.timestamp + len(out_payload)) & 0xFFFFFFFF
+        event = parse_dtmf_event(packet.payload) if is_dtmf else None
+        if event:
+            event_id, _digit, is_end, duration = event
+            relay_key = (packet.ssrc, event_id)
+            if relay_key not in self.session.dtmf_relay_timestamps:
+                self.session.dtmf_relay_timestamps[relay_key] = (peer.timestamp + 160) & 0xFFFFFFFF
+            out_timestamp = self.session.dtmf_relay_timestamps[relay_key]
+            peer.timestamp = (out_timestamp + duration) & 0xFFFFFFFF if is_end else out_timestamp
+        else:
+            peer.timestamp = (peer.timestamp + len(out_payload)) & 0xFFFFFFFF
+            out_timestamp = peer.timestamp
         response = RtpPacket.build(
             payload_type=out_payload_type,
             sequence=peer.sequence,
-            timestamp=peer.timestamp,
+            timestamp=out_timestamp,
             ssrc=peer.ssrc,
             payload=out_payload,
             marker=packet.marker,
@@ -867,6 +879,12 @@ class RtpProtocol(asyncio.DatagramProtocol):
         peer.transport.sendto(response, peer.remote_addr)
         peer.record_rtp_sent(out_payload)
         self.session.record_relay(out_payload)
+        if is_dtmf:
+            digit = event[1] if event else "unknown"
+            self.session.log(
+                "DTMF RELAY",
+                f"digit={digit} src_payload={packet.payload_type} dst_payload={out_payload_type}",
+            )
 
 
 class RtcpProtocol(asyncio.DatagramProtocol):
