@@ -56,6 +56,10 @@ class SipParsingTests(unittest.TestCase):
         self.assertIn("a=rtpmap:8 PCMA/8000", sdp)
         self.assertIn("a=rtpmap:101 telephone-event/8000", sdp)
 
+    def test_make_sdp_moves_preferred_codec_first(self):
+        sdp = server.make_sdp("127.0.0.1", 30000, server.PCMA, dtmf_payload_type=101, payloads=(0, 8, 101))
+        self.assertIn("m=audio 30000 RTP/AVP 8 0 101", sdp)
+
 
 class CodecTests(unittest.TestCase):
     def test_choose_payload_prefers_default_when_remote_supports_it(self):
@@ -63,6 +67,53 @@ class CodecTests(unittest.TestCase):
 
     def test_choose_payload_falls_back_to_remote_supported_codec(self):
         self.assertEqual(server.choose_payload((0,), server.PCMA), server.PCMU)
+
+
+class ResponseTests(unittest.TestCase):
+    def test_send_response_can_preserve_untagged_to_header_for_trying(self):
+        class DummyTransport:
+            def __init__(self):
+                self.sent = []
+
+            def sendto(self, packet, destination):
+                self.sent.append((packet, destination))
+
+        logger = server.SbcLogger(None)
+        media = server.MediaServer("127.0.0.1", 12000, 12010, None, logger)
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media,
+            logger,
+            server.PCMU,
+            "playsbc",
+            {},
+            (),
+            {},
+            (),
+            False,
+        )
+        transport = DummyTransport()
+        protocol.transport = transport
+        message = server.parse_sip_message(
+            (
+                "INVITE sip:bob@127.0.0.1:25062 SIP/2.0\r\n"
+                "Via: SIP/2.0/UDP 127.0.0.1:25081;branch=z9hG4bK-test\r\n"
+                "From: <sip:alice@127.0.0.1:25081>;tag=1\r\n"
+                "To: <sip:bob@127.0.0.1:25062>\r\n"
+                "Call-ID: response-test\r\n"
+                "CSeq: 1 INVITE\r\n"
+                "Content-Length: 0\r\n"
+                "\r\n"
+            ),
+            ("127.0.0.1", 25081),
+        )
+
+        protocol.send_response(message, 100, "Trying", to_header=message.header("to"))
+
+        packet = transport.sent[0][0].decode("utf-8")
+        self.assertIn("To: <sip:bob@127.0.0.1:25062>\r\n", packet)
+        self.assertNotIn("To: <sip:bob@127.0.0.1:25062>;tag=", packet)
 
 
 class DigestAuthTests(unittest.TestCase):
@@ -141,6 +192,16 @@ class ConfigTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 server.load_config_file(str(config_path))
+
+    def test_rtpengine_codec_policy_masks_source_and_transcodes_target(self):
+        policy = server.rtpengine_codec_policy((server.PCMU,), server.PCMA)
+
+        self.assertEqual(policy, {"mask": ["PCMU"], "transcode": ["PCMA"]})
+
+    def test_rtpengine_codec_policy_is_empty_when_target_is_already_offered(self):
+        policy = server.rtpengine_codec_policy((server.PCMU, server.PCMA), server.PCMA)
+
+        self.assertEqual(policy, {})
 
     def test_resolve_log_dir_uses_configured_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -254,6 +315,26 @@ class B2BUAFlowLogTests(unittest.TestCase):
             self.assertIn("B2BUA SIP FLOW", sip_log)
             self.assertIn("B2BUA SIP LADDER", sip_log)
             self.assertIn("SIP LADDER", sip_log)
+
+    def test_disabled_ladder_still_logs_rtpengine_media_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route = server.RouteResult(
+                target=server.SipUri("callee", "127.0.0.1", 25082),
+                policy_name="registered",
+                source="registrar",
+            )
+            logger = server.SbcLogger(Path(tmp))
+            flow = server.B2BUAFlowLog(Path(tmp), "call-rtpengine", "callee", route, enabled=False, logger=logger)
+
+            flow.sip("SIPp A", "B2BUA", "INVITE")
+            flow.write("RTPENGINE QUERY", "result=ok rtp_packets_total=6000")
+
+            self.assertIsNone(flow.path)
+            sip_log = (Path(tmp) / "log.sip").read_text(encoding="utf-8")
+            media_log = (Path(tmp) / "log.media").read_text(encoding="utf-8")
+            self.assertNotIn("B2BUA SIP FLOW", sip_log)
+            self.assertIn("B2BUA RTPENGINE QUERY", media_log)
+            self.assertIn("rtp_packets_total=6000", media_log)
 
 
 if __name__ == "__main__":
