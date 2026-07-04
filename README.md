@@ -16,7 +16,7 @@
 
 Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, and SIPp regression across real core and peer realms.
 
-[Architecture PDF](docs/PlaySBC_Service_Network_Diagrams.pdf) | [Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md)
+[Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md)
 
 ## Setup
 
