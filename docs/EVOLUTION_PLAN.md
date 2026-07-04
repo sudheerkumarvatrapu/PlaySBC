@@ -15,10 +15,13 @@ Implemented and covered by unit tests plus SIPp regression:
 - G.711u/G.711a RTP media replay
 - Internal PCMU/PCMA transcoding
 - RTPengine media backend for anchoring and transcoding experiments
+- Real dual-realm Docker topology with core `172.28.0.0/24` and peer `192.168.28.0/24` networks
+- Dual-homed PlaySBC/RTPengine path with RTPengine core-to-peer interface selection
 - YAML/JSON example config files under `configs/`
 - Helm chart config via `charts/playsbc/values.yaml`
 - SIPp regression server config rendered through Helm
 - SIPp B2BUA profiles for signalling, media, transcoding, registration, negative flows, small load, soak, RTPengine, TCP RTPengine transcoding, and 5 cps / 60 second CHT load
+- Real dual-realm RTPengine transcoding profile included in the sequential regression report
 - One log bundle per B2BUA testcase
 - Latest HTML regression report
 
@@ -48,6 +51,8 @@ Next ESBC lab features:
 - Per-trunk route metrics and failure counters
 
 ## Current Regression Focus
+
+Regression is a delivery requirement: every new implementation must include focused unit tests and, when SIP, media, routing, transport, or deployment behavior changes, a named profile in the sequential regression suite. Each profile must produce one report row and one evidence bundle.
 
 Keep these profiles green:
 
@@ -86,12 +91,11 @@ RTPengine owns RTP anchoring, SDP rewrite, media relay, and transcoding experime
 
 Next RTPengine improvements:
 
-- Docker Compose startup
-- Real multi-IP local topology
 - RTPengine port-pool health checks
 - Stronger SDP validation
 - RTPengine failure scenarios
 - RTCP and media quality reporting
+- Extend dual-realm coverage beyond the initial RTPengine transcoding profile
 
 ## Kubernetes Direction
 

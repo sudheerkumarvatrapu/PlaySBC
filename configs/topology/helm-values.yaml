@@ -1,0 +1,31 @@
+playsbc:
+  config:
+    sip_ip: 0.0.0.0
+    sip_advertised_ip: 172.28.0.20
+    b2bua_advertised_ip: 192.168.28.20
+    sip_port: 5060
+    sip_transport: udp
+    rtp_min: 30000
+    rtp_max: 30100
+    log_dir: /var/log/playsbc
+    default_codec: PCMA
+    auth_realm: playsbc
+    users: {}
+    bridge_rooms:
+      - bridge
+    b2bua_routes:
+      peer-b: sip:peer-b@192.168.28.30:5060
+    route_policies:
+      - name: peer-static-route
+        match: peer-b
+        target: sip:{user}@192.168.28.30:5060
+        priority: 20
+    b2bua_ladder_logs: true
+    media_backend: rtpengine
+    rtpengine_url: udp://172.28.0.40:2223
+    rtpengine_timeout: 5.0
+    rtpengine_directions:
+      - core
+      - peer
+    reject_unknown_routes: true
+    debug: true

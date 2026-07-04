@@ -13,9 +13,20 @@ import mini_call_server as server
 from tools import run_sipp_regression
 from tools import run_b2bua_sipp_smoke
 from tools import run_regression_suite
+from tools import run_real_topology
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def write_test_pcap(path: Path, timestamp: float, payload: bytes, linktype: int = 1):
+    seconds = int(timestamp)
+    microseconds = int((timestamp - seconds) * 1_000_000)
+    path.write_bytes(
+        struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, linktype)
+        + struct.pack("<IIII", seconds, microseconds, len(payload), len(payload))
+        + payload
+    )
 
 
 def read_udp_pcap_packets(path: Path):
@@ -1723,7 +1734,7 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("password is required", detail)
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
-        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 22)
+        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 23)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -1740,6 +1751,16 @@ class SippScenarioTests(unittest.TestCase):
         self.assertIn("soak-1cps-30s", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
+
+    def test_real_topology_profile_uses_one_regression_bundle(self):
+        command = run_regression_suite.real_topology_command(
+            "regression-test-real-topology-rtpengine-transcoding",
+            Path("/tmp/playsbc-regression"),
+        )
+
+        self.assertIn("run_real_topology.py", " ".join(command))
+        self.assertEqual(command[-4:], ["--run-id", "regression-test-real-topology-rtpengine-transcoding", "--output-root", "/tmp/playsbc-regression"])
 
     def test_direct_rtpengine_profile_blocks_before_sipp_when_down(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1882,6 +1903,88 @@ class SippScenarioTests(unittest.TestCase):
             self.assertIn("rtpengine_rtp_packets_total=6000", media)
             self.assertIn("status=delegated_and_media_confirmed", transcoding)
             self.assertIn("rtpengine_rtp_packets_total=6000", transcoding)
+
+
+class RealTopologyTests(unittest.TestCase):
+    def test_dual_realm_compose_has_isolated_core_and_peer_addresses(self):
+        compose = (ROOT / "docker-compose.topology.yml").read_text(encoding="utf-8")
+
+        self.assertIn("subnet: 172.28.0.0/24", compose)
+        self.assertIn("subnet: 192.168.28.0/24", compose)
+        self.assertIn("ipv4_address: 172.28.0.20", compose)
+        self.assertIn("ipv4_address: 192.168.28.20", compose)
+        self.assertIn("--interface=core/172.28.0.40", compose)
+        self.assertIn("--interface=peer/192.168.28.40", compose)
+        self.assertIn("network_mode: service:rtpengine", compose)
+
+    def test_topology_helm_values_select_dual_rtpengine_directions(self):
+        values = (ROOT / "configs" / "topology" / "helm-values.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("sip_advertised_ip: 172.28.0.20", values)
+        self.assertIn("b2bua_advertised_ip: 192.168.28.20", values)
+        self.assertIn("rtpengine_url: udp://172.28.0.40:2223", values)
+        self.assertIn("rtpengine_directions:", values)
+        self.assertIn("- core", values)
+        self.assertIn("- peer", values)
+
+    def test_topology_runner_tracks_every_compose_image(self):
+        self.assertEqual(len(run_real_topology.TOPOLOGY_IMAGES), 6)
+        self.assertIn("playsbc-real-topology-playsbc:latest", run_real_topology.TOPOLOGY_IMAGES)
+        self.assertIn("playsbc-real-topology-rtpengine:latest", run_real_topology.TOPOLOGY_IMAGES)
+
+    def test_topology_pcaps_merge_in_timestamp_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            later = root / "later.pcap"
+            earlier = root / "earlier.pcap"
+            merged = root / "capture.pcap"
+            write_test_pcap(later, 20.0, b"later")
+            write_test_pcap(earlier, 10.0, b"earlier")
+
+            count = run_real_topology.merge_pcaps([later, earlier], merged)
+            _major, _minor, _linktype, records = run_real_topology.pcap_records(merged)
+
+            self.assertEqual(count, 2)
+            self.assertEqual([record.data for record in records], [b"earlier", b"later"])
+
+    def test_topology_pcap_reads_rtp_payload_type_by_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rtp.pcap"
+            rtp = bytes([0x80, 0x08]) + bytes(10)
+            packet = run_b2bua_sipp_smoke.PcapPacket(
+                timestamp=10.0,
+                src_ip="192.168.28.40",
+                src_port=30000,
+                dst_ip="192.168.28.30",
+                dst_port=6000,
+                payload=rtp,
+            )
+            frame = run_b2bua_sipp_smoke.ethernet_ipv4_udp_packet(packet, 1)
+            write_test_pcap(path, 10.0, frame)
+
+            payloads = run_real_topology.rtp_payload_types(path)
+
+            self.assertEqual(payloads[("192.168.28.40", "192.168.28.30")], {8})
+
+    def test_topology_combines_sipp_summaries_and_removes_leg_folders(self):
+        header = "TotalCallCreated;SuccessfulCall(C);FailedCall(C);Retransmissions(C);Warnings(C);FatalErrors(C);CallLength(C);\n"
+        row = "1;1;0;0;0;0;00:01:00;\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            for folder_name in ("sipp-a", "sipp-b"):
+                folder = bundle / folder_name
+                folder.mkdir()
+                (folder / "stats.csv").write_text(header + row, encoding="utf-8")
+                (folder / "messages.log").write_text("raw per-leg trace", encoding="utf-8")
+
+            run_real_topology.consolidate_sipp_evidence(bundle)
+
+            combined = (bundle / "log.sipp").read_text(encoding="utf-8")
+            self.assertIn("CORE LEG SIPP RESULT", combined)
+            self.assertIn("PEER LEG SIPP RESULT", combined)
+            self.assertEqual(combined.count("calls_created=1 successful=1 failed=0"), 2)
+            self.assertFalse((bundle / "sipp-a").exists())
+            self.assertFalse((bundle / "sipp-b").exists())
 
 
 def argparse_namespace(**values):

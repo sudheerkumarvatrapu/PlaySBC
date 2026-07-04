@@ -62,6 +62,8 @@ CODEC_PAYLOADS = {
 @dataclass
 class ServerConfig:
     sip_ip: str = "0.0.0.0"
+    sip_advertised_ip: str = ""
+    b2bua_advertised_ip: str = ""
     sip_port: int = 5060
     sip_transport: str = "udp"
     rtp_min: int = 10000
@@ -77,6 +79,7 @@ class ServerConfig:
     media_backend: str = "internal"
     rtpengine_url: str = "udp://127.0.0.1:2223"
     rtpengine_timeout: float = 3.0
+    rtpengine_directions: Tuple[str, ...] = field(default_factory=tuple)
     reject_unknown_routes: bool = False
     debug: bool = False
 
@@ -87,6 +90,8 @@ class ServerConfig:
 
 SERVER_CONFIG_KEYS = {
     "sip_ip",
+    "sip_advertised_ip",
+    "b2bua_advertised_ip",
     "sip_port",
     "sip_transport",
     "rtp_min",
@@ -102,6 +107,7 @@ SERVER_CONFIG_KEYS = {
     "media_backend",
     "rtpengine_url",
     "rtpengine_timeout",
+    "rtpengine_directions",
     "reject_unknown_routes",
     "debug",
 }
@@ -1020,8 +1026,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         rtpengine_client: Optional[RtpengineClient] = None,
         reject_unknown_routes: bool = False,
         sip_transport: str = "udp",
+        sip_advertised_ip: str = "",
+        b2bua_advertised_ip: str = "",
+        rtpengine_directions: Tuple[str, ...] = (),
     ):
         self.local_ip = local_ip
+        self.sip_advertised_ip = sip_advertised_ip or local_ip
+        self.b2bua_advertised_ip = b2bua_advertised_ip or self.sip_advertised_ip
         self.local_port = local_port
         self.sip_transport = sip_transport
         self.media = media
@@ -1034,6 +1045,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.b2bua_ladder_logs = b2bua_ladder_logs
         self.media_backend = media_backend
         self.rtpengine_client = rtpengine_client
+        self.rtpengine_directions = rtpengine_directions
         self.reject_unknown_routes = reject_unknown_routes
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
@@ -1273,7 +1285,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             rtp.log("SIP RESPONSE", "100 Trying")
             rtp.log("SIP RESPONSE", "180 Ringing")
-            sdp = make_sdp(self.local_ip, rtp.local_port, preferred_payload)
+            sdp = make_sdp(self.sip_advertised_ip, rtp.local_port, preferred_payload)
             rtp.log(
                 "SDP ANSWER",
                 f"local_rtp={self.local_ip}:{rtp.local_port} payload={CODEC_NAMES.get(preferred_payload, preferred_payload)}",
@@ -1286,7 +1298,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 body=sdp,
                 to_header=to_header,
                 extra_headers={
-                    "Contact": f"<sip:python-call-server@{self.local_ip}:{self.local_port}>",
+                    "Contact": f"<sip:python-call-server@{self.sip_advertised_ip}:{self.local_port}>",
                     "Content-Type": "application/sdp",
                 },
             )
@@ -1424,7 +1436,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             leg_label="outbound",
         )
 
-        outbound_from = f"Mini B2BUA <sip:b2bua@{self.local_ip}:{self.local_port}>;tag={secrets.token_hex(6)}"
+        outbound_from = f"Mini B2BUA <sip:b2bua@{self.b2bua_advertised_ip}:{self.local_port}>;tag={secrets.token_hex(6)}"
         b2bua_call = B2BUACall(
             inbound_call_id=inbound_call_id,
             outbound_call_id=outbound_call_id,
@@ -1449,7 +1461,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         )
 
         outbound_body = make_sdp(
-            self.local_ip,
+            self.b2bua_advertised_ip,
             outbound_rtp.local_port,
             outbound_payload,
             dtmf_payload_type=dtmf_payload_type,
@@ -1501,7 +1513,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         outbound_rtp.set_peer(inbound_rtp)
 
         answer_sdp = make_sdp(
-            self.local_ip,
+            self.sip_advertised_ip,
             inbound_rtp.local_port,
             inbound_rtp.preferred_payload,
             dtmf_payload_type=dtmf_payload_type,
@@ -1513,7 +1525,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             body=answer_sdp,
             to_header=to_header,
             extra_headers={
-                "Contact": f"<sip:python-call-server@{self.local_ip}:{self.local_port}>",
+                "Contact": f"<sip:python-call-server@{self.sip_advertised_ip}:{self.local_port}>",
                 "Content-Type": "application/sdp",
             },
         )
@@ -1570,6 +1582,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 f"policy={format_rtpengine_codec_policy(codec_policy)}"
             ),
         )
+        if codec_policy:
+            self.logger.transcoding(
+                "RTPENGINE TRANSCODING POLICY",
+                (
+                    f"offered={format_payloads(remote_payloads)} "
+                    f"target={CODEC_NAMES.get(self.default_payload, self.default_payload)} "
+                    f"policy={format_rtpengine_codec_policy(codec_policy)} "
+                    f"direction={','.join(self.rtpengine_directions) or 'default'}"
+                ),
+                call_id=inbound_call_id,
+            )
         try:
             offer_response = await retry_rtpengine_control(
                 "OFFER",
@@ -1578,6 +1601,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     from_tag=from_tag,
                     sdp=message.body,
                     codec=codec_policy,
+                    direction=self.rtpengine_directions,
                 ),
                 flow_log,
             )
@@ -1597,7 +1621,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         outbound_call_id = make_call_id()
-        outbound_from = f"Mini B2BUA <sip:b2bua@{self.local_ip}:{self.local_port}>;tag={secrets.token_hex(6)}"
+        outbound_from = f"Mini B2BUA <sip:b2bua@{self.b2bua_advertised_ip}:{self.local_port}>;tag={secrets.token_hex(6)}"
         b2bua_call = B2BUACall(
             inbound_call_id=inbound_call_id,
             outbound_call_id=outbound_call_id,
@@ -1689,7 +1713,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             body=answer_sdp,
             to_header=to_header,
             extra_headers={
-                "Contact": f"<sip:python-call-server@{self.local_ip}:{self.local_port}>",
+                "Contact": f"<sip:python-call-server@{self.sip_advertised_ip}:{self.local_port}>",
                 "Content-Type": "application/sdp",
             },
         )
@@ -1926,10 +1950,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             logging.info("Expired registration for %s", user)
 
     def make_via_header(self, transport_name: str = "udp") -> str:
-        return f"SIP/2.0/{normalize_sip_transport(transport_name).upper()} {self.local_ip}:{self.local_port};branch=z9hG4bK-{secrets.token_hex(8)}"
+        return f"SIP/2.0/{normalize_sip_transport(transport_name).upper()} {self.b2bua_advertised_ip}:{self.local_port};branch=z9hG4bK-{secrets.token_hex(8)}"
 
     def local_contact_uri(self, transport_name: str = "udp") -> str:
-        return SipUri("b2bua", self.local_ip, self.local_port, normalize_sip_transport(transport_name)).uri
+        return SipUri("b2bua", self.b2bua_advertised_ip, self.local_port, normalize_sip_transport(transport_name)).uri
 
     def authenticate_register(self, message: SipMessage, user: str) -> str:
         if not self.users:
@@ -2674,6 +2698,12 @@ def coerce_config_value(key: str, value: Any) -> Any:
                 raise ValueError("each route policy must be a JSON object")
             policies.append(dict(item))
         return tuple(policies)
+    if key == "rtpengine_directions":
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        if isinstance(value, list):
+            return tuple(str(item) for item in value)
+        raise ValueError("rtpengine_directions must be a string or list of interface names")
     if key == "bridge_rooms":
         if isinstance(value, str):
             return (value,)
@@ -2684,6 +2714,8 @@ def coerce_config_value(key: str, value: Any) -> Any:
         return ",".join(parse_sip_transport_set(str(value)))
     if key in {
         "sip_ip",
+        "sip_advertised_ip",
+        "b2bua_advertised_ip",
         "log_dir",
         "default_codec",
         "auth_realm",
@@ -2733,6 +2765,10 @@ def validate_config(config: ServerConfig) -> None:
         raise ValueError("rtpengine_timeout must be greater than 0")
     if config.media_backend == "rtpengine":
         parse_rtpengine_url(config.rtpengine_url)
+    if len(config.rtpengine_directions) not in {0, 2}:
+        raise ValueError("rtpengine_directions must contain exactly two interface names")
+    if any(not direction.strip() for direction in config.rtpengine_directions):
+        raise ValueError("rtpengine_directions interface names must not be empty")
     for user, route_uri in config.b2bua_routes.items():
         if not user:
             raise ValueError("b2bua_routes keys must not be empty")
@@ -2785,7 +2821,13 @@ async def main() -> None:
     sbc_logger = SbcLogger(log_dir)
     sbc_logger.platform(
         "SERVER CONFIG",
-        f"sip={config.sip_ip}:{config.sip_port} sip_transport={config.sip_transport} rtp_range={config.rtp_min}-{config.rtp_max} media_backend={config.media_backend}",
+        (
+            f"sip_bind={config.sip_ip}:{config.sip_port} "
+            f"sip_advertised={config.sip_advertised_ip or config.sip_ip}:{config.sip_port} "
+            f"b2bua_advertised={config.b2bua_advertised_ip or config.sip_advertised_ip or config.sip_ip}:{config.sip_port} "
+            f"sip_transport={config.sip_transport} rtp_range={config.rtp_min}-{config.rtp_max} "
+            f"media_backend={config.media_backend}"
+        ),
     )
 
     media = MediaServer(
@@ -2816,6 +2858,9 @@ async def main() -> None:
         rtpengine_client,
         config.reject_unknown_routes,
         config.sip_transport,
+        config.sip_advertised_ip,
+        config.b2bua_advertised_ip,
+        config.rtpengine_directions,
     )
     loop = asyncio.get_running_loop()
     sip_transports = parse_sip_transport_set(config.sip_transport)

@@ -4,7 +4,7 @@ import asyncio
 import secrets
 import socket
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 
@@ -77,8 +77,19 @@ class RtpengineClient:
     async def ping(self) -> Dict[str, Any]:
         return await self.request("ping", {})
 
-    async def offer(self, *, call_id: str, from_tag: str, sdp: str, codec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return await self.request("offer", self._sdp_fields(call_id, from_tag, sdp, codec=codec))
+    async def offer(
+        self,
+        *,
+        call_id: str,
+        from_tag: str,
+        sdp: str,
+        codec: Optional[Dict[str, Any]] = None,
+        direction: Sequence[str] = (),
+    ) -> Dict[str, Any]:
+        return await self.request(
+            "offer",
+            self._sdp_fields(call_id, from_tag, sdp, codec=codec, direction=direction),
+        )
 
     async def answer(self, *, call_id: str, from_tag: str, to_tag: str, sdp: str, codec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         fields = self._sdp_fields(call_id, from_tag, sdp, codec=codec)
@@ -101,7 +112,14 @@ class RtpengineClient:
             fields["to-tag"] = to_tag
         return await self.request("delete", fields)
 
-    def _sdp_fields(self, call_id: str, from_tag: str, sdp: str, codec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _sdp_fields(
+        self,
+        call_id: str,
+        from_tag: str,
+        sdp: str,
+        codec: Optional[Dict[str, Any]] = None,
+        direction: Sequence[str] = (),
+    ) -> Dict[str, Any]:
         fields: Dict[str, Any] = {
             "call-id": call_id,
             "from-tag": from_tag,
@@ -111,6 +129,10 @@ class RtpengineClient:
         }
         if codec:
             fields["codec"] = codec
+        if direction:
+            if len(direction) != 2:
+                raise ValueError("RTPengine direction must contain from and to interface names")
+            fields["direction"] = list(direction)
         return fields
 
 

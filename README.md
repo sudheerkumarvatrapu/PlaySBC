@@ -58,13 +58,31 @@ env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regressio
   --timeout 420
 ```
 
-This runs all B2BUA/SIPp profiles, including ESBC cases, with Helm-rendered YAML config. Local regression uses `helm template`; Kubernetes install is not required.
+This runs all B2BUA/SIPp profiles, including ESBC cases and the Docker-based real dual-realm profile, with Helm-rendered YAML config. Local regression uses `helm template`; Kubernetes install is not required.
+
+## Real Core/Peer Topology
+
+With Docker Desktop running:
+
+```bash
+python3 tools/run_real_topology.py
+```
+
+This runs a 60-second PCMU-to-PCMA call across two isolated networks:
+
+```text
+SIPp A 172.28.0.10 -> PlaySBC 172.28.0.20 | 192.168.28.20 -> SIPp B 192.168.28.30
+RTP     172.28.0.10 <-> RTPengine 172.28.0.40 | 192.168.28.40 <-> 192.168.28.30
+```
+
+PlaySBC configuration is rendered from `configs/topology/helm-values.yaml`. Evidence is saved under `logs/real-topology/` with one unified `capture.pcap`.
 
 ## Outputs
 
 ```text
 logs/reports/latest.html
 logs/b2bua-Regression/<testcase>/
+logs/real-topology/<run>/
 ```
 
 Runtime config examples live in `configs/`. Helm values live in `charts/playsbc/values.yaml`.

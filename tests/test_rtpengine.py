@@ -50,6 +50,28 @@ class RtpengineEncodingTests(unittest.TestCase):
         self.assertIn(b"4:maskl4:PCMUe", packet)
         self.assertIn(b"9:transcodel4:PCMAe", packet)
 
+    def test_client_builds_dual_realm_direction_on_offer(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        packet = client.build_packet(
+            "offer",
+            client._sdp_fields(
+                "call-1",
+                "tag-a",
+                "v=0\r\n",
+                direction=("core", "peer"),
+            ),
+            cookie="cookie1",
+        )
+
+        self.assertIn(b"9:directionl4:core4:peere", packet)
+
+    def test_client_rejects_incomplete_direction(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        with self.assertRaises(ValueError):
+            client._sdp_fields("call-1", "tag-a", "v=0\r\n", direction=("core",))
+
     def test_client_decodes_cookie_response(self):
         client = RtpengineClient("udp://127.0.0.1:2223")
         response = b"cookie1 " + bencode({"result": "ok", "sdp": "v=0\r\n"})

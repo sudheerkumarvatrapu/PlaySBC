@@ -34,6 +34,7 @@ ALL_B2BUA_PROFILES = (
     "rtpengine-media",
     "rtpengine-transcoding",
     "tcp-rtpengine-transcoding",
+    "real-topology-rtpengine-transcoding",
     "registered-inbound",
     "registered-outbound",
     "invalid-bye",
@@ -57,6 +58,7 @@ RTPENGINE_B2BUA_PROFILES = (
     "tcp-rtpengine-transcoding",
     "load-5cps-60s-rtpengine-transcoding",
 )
+REAL_TOPOLOGY_PROFILE = "real-topology-rtpengine-transcoding"
 B2BUA_LOG_FILES = (
     "log.sip",
     "log.media",
@@ -94,6 +96,17 @@ def run_command(command: List[str], timeout: int) -> tuple[int, float, str, str]
 
 def status_from_returncode(returncode: int) -> str:
     return "passed" if returncode == 0 else "failed"
+
+
+def real_topology_command(profile_run_id: str, log_root: Path) -> List[str]:
+    return [
+        sys.executable,
+        str(ROOT / "tools" / "run_real_topology.py"),
+        "--run-id",
+        profile_run_id,
+        "--output-root",
+        str(log_root),
+    ]
 
 
 class SudoKeepalive:
@@ -500,6 +513,29 @@ def main() -> int:
             for profile in profiles:
                 profile_run_id = f"{run_id}-{profile}"
                 profile_log_path = b2bua_log_root / profile_run_id
+                if profile == REAL_TOPOLOGY_PROFILE:
+                    command = real_topology_command(profile_run_id, b2bua_log_root)
+                    command_text = " ".join(command)
+                    returncode, duration, stdout, stderr = run_command(command, args.timeout)
+                    if returncode != 0:
+                        append_bundle_log(
+                            profile_log_path,
+                            "log.platform",
+                            "REAL TOPOLOGY RUNNER FAILURE",
+                            "\n".join(part for part in (stdout.strip(), stderr.strip()) if part),
+                        )
+                    rows.append(
+                        ReportRow(
+                            suite=f"B2BUA {profile}",
+                            name=profile,
+                            status=status_from_returncode(returncode),
+                            returncode=returncode,
+                            duration_seconds=duration,
+                            log_path=str(profile_log_path),
+                            command=command_text,
+                        )
+                    )
+                    continue
                 command = [
                     sys.executable,
                     str(ROOT / "tools" / "run_b2bua_sipp_smoke.py"),
