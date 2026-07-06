@@ -68,6 +68,33 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse(second_duplicate)
         self.assertIsNot(first, second)
 
+    def test_same_branch_from_different_via_sent_by_is_a_distinct_transaction(self):
+        branch = "z9hG4bK-7-1-0"
+        peer_via = f"SIP/2.0/UDP 192.168.28.30:5070;branch={branch}"
+        core_via = f"SIP/2.0/UDP 172.28.0.10:5070;branch={branch}"
+
+        peer, peer_duplicate = self.transactions.receive_request(
+            "REGISTER", peer_via, "1 REGISTER", "peer-register", ("192.168.28.30", 5070)
+        )
+        self.transactions.cache_response(
+            "REGISTER",
+            peer_via,
+            "1 REGISTER",
+            "peer-register",
+            b"SIP/2.0 200 OK",
+            ("192.168.28.30", 5070),
+            200,
+        )
+
+        core, core_duplicate = self.transactions.receive_request(
+            "REGISTER", core_via, "1 REGISTER", "core-register", ("172.28.0.10", 5070)
+        )
+
+        self.assertFalse(peer_duplicate)
+        self.assertFalse(core_duplicate)
+        self.assertIsNot(peer, core)
+        self.assertEqual(self.sent, [])
+
 
 class InviteTimerTests(unittest.IsolatedAsyncioTestCase):
     async def test_final_invite_response_retransmits_until_ack(self):

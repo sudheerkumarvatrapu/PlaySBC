@@ -163,6 +163,23 @@ Content-Length: 0
             with self.subTest(scenario=scenario.name):
                 ET.parse(scenario)
 
+    def test_successful_dialog_scenarios_follow_contact_remote_target(self):
+        scenarios = ROOT / "sipp" / "scenarios"
+        names = (
+            "b2bua_uac_a.xml",
+            "b2bua_uac_a_media.xml",
+            "b2bua_uac_retransmit_invite.xml",
+            "uac-reg-inbound.xml",
+            "uac-reg-outbound.xml",
+        )
+        for name in names:
+            with self.subTest(scenario=name):
+                text = (scenarios / name).read_text(encoding="ISO-8859-1")
+                self.assertIn('response="200" rtd="invite" rrs="true"', text)
+                self.assertIn("ACK [next_url] SIP/2.0", text)
+                self.assertIn("BYE [next_url] SIP/2.0", text)
+                self.assertGreaterEqual(text.count("[routes]"), 2)
+
     def test_register_contact_preserves_sip_transport(self):
         scenario_text = (ROOT / "sipp" / "scenarios" / "register_contact.xml").read_text(encoding="ISO-8859-1")
 
@@ -610,8 +627,10 @@ Content-Length: 0
             self.assertIn(str(ROOT / "sipp" / "scenarios" / "pcap" / "g711u_60s.pcap"), args.uac_scenario.read_text(encoding="ISO-8859-1"))
             self.assertNotIn("[media_pcap]", args.uac_scenario.read_text(encoding="ISO-8859-1"))
             self.assertNotIn("[uas_sdp_payloads]", args.uas_scenario.read_text(encoding="ISO-8859-1"))
-            self.assertIn("ACK sip:[service]@[remote_ip]:[remote_port];transport=[transport]", args.uac_scenario.read_text(encoding="ISO-8859-1"))
-            self.assertIn("BYE sip:[service]@[remote_ip]:[remote_port];transport=[transport]", args.uac_scenario.read_text(encoding="ISO-8859-1"))
+            uac_xml = args.uac_scenario.read_text(encoding="ISO-8859-1")
+            self.assertIn("ACK [next_url] SIP/2.0", uac_xml)
+            self.assertIn("BYE [next_url] SIP/2.0", uac_xml)
+            self.assertGreaterEqual(uac_xml.count("[routes]"), 2)
 
     def test_tcp_signalling_scenario_uses_dialog_transport_for_ack_and_bye(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -630,8 +649,9 @@ Content-Length: 0
             run_b2bua_sipp_smoke.prepare_transport_scenario(args, run_dir)
 
             uac_xml = args.uac_scenario.read_text(encoding="ISO-8859-1")
-            self.assertIn("ACK sip:[service]@[remote_ip]:[remote_port];transport=[transport]", uac_xml)
-            self.assertIn("BYE sip:[service]@[remote_ip]:[remote_port];transport=[transport]", uac_xml)
+            self.assertIn("ACK [next_url] SIP/2.0", uac_xml)
+            self.assertIn("BYE [next_url] SIP/2.0", uac_xml)
+            self.assertGreaterEqual(uac_xml.count("[routes]"), 2)
 
     def test_b2bua_transcoding_media_scenario_makes_b_leg_pcma_only(self):
         with tempfile.TemporaryDirectory() as tmp:

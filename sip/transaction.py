@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,7 +11,7 @@ from .dialog import extract_branch, parse_cseq_number
 
 
 Address = Tuple[str, int]
-TransactionKey = Tuple[str, str, int]
+TransactionKey = Tuple[str, str, str, int]
 SendPacket = Callable[[bytes, Address], None]
 
 
@@ -202,5 +203,13 @@ class TransactionManager:
 def make_transaction_key(method: str, via_header: str, cseq_header: str, call_id: str) -> TransactionKey:
     cseq = parse_cseq_number(cseq_header)
     branch = extract_branch(via_header) or f"legacy:{call_id}"
-    return branch, method.upper(), cseq
+    sent_by = extract_via_sent_by(via_header) or f"legacy:{call_id}"
+    return branch, sent_by, method.upper(), cseq
 
+
+def extract_via_sent_by(via_header: str) -> str:
+    """Return the top Via sent-by value used for RFC 3261 transaction matching."""
+
+    top_via = via_header.split(",", 1)[0].strip()
+    match = re.match(r"^SIP/2\.0/\S+\s+([^;,\s]+)", top_via, re.IGNORECASE)
+    return match.group(1).lower() if match else ""
