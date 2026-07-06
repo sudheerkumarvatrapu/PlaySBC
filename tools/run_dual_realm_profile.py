@@ -46,8 +46,10 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
     prepare_media_scenarios,
     prepare_registration_scenario,
     prepare_transport_scenario,
+    render_harness_config_templates,
     rtpengine_anchor_ports,
     rtpengine_load_media_complete,
+    rtpengine_query_stats,
     sipp_timeout_seconds,
     sipp_trace_args,
     should_run_rtcp,
@@ -74,6 +76,7 @@ PEER_RTPENGINE_IP = "192.168.28.40"
 CORE_SUBNET = "172.28.0.0/24"
 PEER_SUBNET = "192.168.28.0/24"
 SIP_PORT = 5060
+TLS_PORT = 5061
 REGISTER_PORT = 5070
 UA_RTP_MIN = 6000
 UA_RTP_MAX = 7998
@@ -174,7 +177,8 @@ def execution_detail(args: SimpleNamespace) -> str:
     codec_path = f"{args.media_codec or 'signalling-only'} -> {uas_media_codec(args) if args.media_enabled else 'signalling-only'}"
     return (
         f"Run SIPp A -> PlaySBC -> SIPp B; profile={args.profile}; calls={args.calls}; "
-        f"rate={args.rate} cps; hold={args.hold_ms / 1000:.3f} s; transport={args.sip_transport.upper()}; "
+        f"rate={args.rate} cps; hold={args.hold_ms / 1000:.3f} s; "
+        f"transport=A/{args.uac_transport.upper()}-B/{args.uas_transport.upper()}; "
         f"media_backend={args.media_backend}; codec_path={codec_path}; "
         f"register_caller={args.register_caller}; register_callee={args.register_callee}."
     )
@@ -204,7 +208,6 @@ def profile_args(profile: str, run_id: str, log_folder: str) -> SimpleNamespace:
             "uac_rtp_max": UA_RTP_MAX,
             "uas_rtp_min": UA_RTP_MIN,
             "uas_rtp_max": UA_RTP_MAX,
-            "rtpengine_url": f"udp://{CORE_RTPENGINE_IP}:2223",
             "media_driver": "sipp-pcap",
             "sipp_pcap_sudo": False,
             "pcap_topology": "dual-realm",
@@ -215,7 +218,12 @@ def profile_args(profile: str, run_id: str, log_folder: str) -> SimpleNamespace:
             "dry_run": False,
         }
     )
+    if values.get("rtpengine_url") == BASE_DEFAULTS["rtpengine_url"]:
+        values["rtpengine_url"] = f"udp://{CORE_RTPENGINE_IP}:2223"
     args = SimpleNamespace(**values)
+    transports = [value.strip() for value in str(args.sip_transport).split(",") if value.strip()]
+    args.uac_transport = args.uac_transport or (transports[0] if len(transports) == 1 else "udp")
+    args.uas_transport = args.uas_transport or (transports[0] if len(transports) == 1 else "udp")
     args.media_enabled = bool(args.media_codec)
     args.media_pcap = args.media_pcap or (MEDIA_PCAPS[args.media_codec] if args.media_codec else "")
     args.server_codec = args.server_codec or args.media_codec or "PCMU"
@@ -258,6 +266,7 @@ def render_helm_config(args: SimpleNamespace, work_dir: Path, env: dict[str, str
         "sip_advertised_ip": CORE_SBC_IP,
         "b2bua_advertised_ip": PEER_SBC_IP,
         "sip_port": SIP_PORT,
+        "tls_port": TLS_PORT,
         "sip_transport": args.sip_transport,
         "rtp_min": SERVER_RTP_MIN,
         "rtp_max": SERVER_RTP_MAX,
@@ -268,12 +277,28 @@ def render_helm_config(args: SimpleNamespace, work_dir: Path, env: dict[str, str
         "bridge_rooms": ["bridge"],
         "b2bua_routes": effective_b2bua_routes(args),
         "route_policies": effective_route_policies(args),
+        "trunk_groups": render_harness_config_templates(args.trunk_groups, args),
+        "hunt_groups": render_harness_config_templates(args.hunt_groups, args),
+        "number_normalization": args.number_normalization,
+        "header_normalization": args.header_normalization,
+        "transport_policies": args.transport_policies,
+        "call_admission": args.call_admission,
         "b2bua_ladder_logs": args.ladder_enabled,
         "media_backend": args.media_backend,
         "rtpengine_url": args.rtpengine_url,
         "rtpengine_timeout": args.rtpengine_timeout,
-        "rtpengine_directions": ["core", "peer"],
+        "rtpengine_directions": args.rtpengine_directions,
+        "rtpengine_max_sessions": args.rtpengine_max_sessions,
+        "rtpengine_offer_transport_protocol": args.rtpengine_offer_transport_protocol,
+        "rtpengine_answer_transport_protocol": args.rtpengine_answer_transport_protocol,
+        "rtpengine_sdes": args.rtpengine_sdes,
+        "rtpengine_dtls": args.rtpengine_dtls,
+        "media_quality": args.media_quality,
         "reject_unknown_routes": args.reject_unknown_routes,
+        "tls_certfile": "/etc/playsbc/tls/tls.crt" if "tls" in str(args.sip_transport).split(",") else "",
+        "tls_keyfile": "/etc/playsbc/tls/tls.key" if "tls" in str(args.sip_transport).split(",") else "",
+        "tls_cafile": "/etc/playsbc/tls/ca.crt" if "tls" in str(args.sip_transport).split(",") else "",
+        "tls_verify_peer": args.tls_verify_peer,
         "debug": True,
     }
     values_path = work_dir / "helm-values.yaml"
@@ -296,8 +321,12 @@ def render_helm_config(args: SimpleNamespace, work_dir: Path, env: dict[str, str
     return config_path
 
 
-def transport_args(args: SimpleNamespace, role: str) -> list[str]:
-    if str(args.sip_transport).lower() != "tcp":
+def transport_args(args: SimpleNamespace, role: str, transport_name: str) -> list[str]:
+    transport = str(transport_name).lower()
+    if transport == "tls":
+        mode = "l1" if role == "server" else "ln"
+        return ["-t", mode]
+    if transport != "tcp":
         return []
     if role == "server":
         return ["-t", "t1"]
@@ -326,13 +355,15 @@ def uas_command(args: SimpleNamespace, scenario: str) -> list[str]:
         "-timeout_error",
         "-nostdin",
     ]
-    return command + sipp_trace_args(args) + transport_args(args, "server")
+    if args.uas_srtp:
+        command.append("-srtpcheck_debug")
+    return command + sipp_trace_args(args) + transport_args(args, "server", args.uas_transport)
 
 
 def uac_command(args: SimpleNamespace, scenario: str) -> list[str]:
     command = [
         "sipp",
-        f"{CORE_SBC_IP}:{SIP_PORT}",
+        f"{CORE_SBC_IP}:{TLS_PORT if args.uac_transport == 'tls' else SIP_PORT}",
         "-sf",
         scenario,
         "-s",
@@ -359,15 +390,19 @@ def uac_command(args: SimpleNamespace, scenario: str) -> list[str]:
         "-timeout_error",
         "-nostdin",
     ]
-    return command + sipp_trace_args(args) + transport_args(args, "client")
+    if args.uac_srtp:
+        command.append("-srtpcheck_debug")
+    return command + sipp_trace_args(args) + transport_args(args, "client", args.uac_transport)
 
 
 def register_command(args: SimpleNamespace, scenario: str, user: str, realm: str) -> list[str]:
     local_ip = PEER_UA_IP if realm == "peer" else CORE_UA_IP
     server_ip = PEER_SBC_IP if realm == "peer" else CORE_SBC_IP
+    transport_name = args.uas_transport if realm == "peer" else args.uac_transport
+    remote_port = TLS_PORT if transport_name == "tls" else SIP_PORT
     command = [
         "sipp",
-        f"{server_ip}:{SIP_PORT}",
+        f"{server_ip}:{remote_port}",
         "-sf",
         scenario,
         "-s",
@@ -395,7 +430,7 @@ def register_command(args: SimpleNamespace, scenario: str, user: str, realm: str
         "-trace_counts",
         "-trace_logs",
     ]
-    return command + transport_args(args, "client")
+    return command + transport_args(args, "client", transport_name)
 
 
 def exec_command(service: str, work_path: str, command: list[str]) -> list[str]:
@@ -523,31 +558,35 @@ def rtcp_command(
     target_port: int,
     duration: float,
     cname: str,
+    receiver_report: bool,
 ) -> list[str]:
+    command = [
+        "python3",
+        "/app/tools/send_rtcp_reports.py",
+        "--local-ip",
+        source_ip,
+        "--source-port",
+        str(source_port),
+        "--target-ip",
+        target_ip,
+        "--target-port",
+        str(target_port),
+        "--ssrc",
+        "0xC0DEC0DE",
+        "--cname",
+        cname,
+        "--duration-seconds",
+        f"{duration:.3f}",
+        "--interval-seconds",
+        "5",
+        "--expect-reply",
+    ]
+    if receiver_report:
+        command.append("--receiver-report")
     return exec_command(
         service,
         "/app",
-        [
-            "python3",
-            "/app/tools/send_rtcp_reports.py",
-            "--local-ip",
-            source_ip,
-            "--source-port",
-            str(source_port),
-            "--target-ip",
-            target_ip,
-            "--target-port",
-            str(target_port),
-            "--ssrc",
-            "0xC0DEC0DE",
-            "--cname",
-            cname,
-            "--duration-seconds",
-            f"{duration:.3f}",
-            "--interval-seconds",
-            "5",
-            "--expect-reply",
-        ],
+        command,
     )
 
 
@@ -565,11 +604,17 @@ def start_rtcp_processes(
     commands = [
         (
             "rtcp-a",
-            rtcp_command("core-tools", CORE_UA_IP, UA_RTP_MIN + 1, core_target, core_port, duration, "core-a@playsbc"),
+            rtcp_command(
+                "core-tools", CORE_UA_IP, UA_RTP_MIN + 1, core_target, core_port, duration,
+                "core-a@playsbc", args.rtcp_receiver_reports,
+            ),
         ),
         (
             "rtcp-b",
-            rtcp_command("peer-tools", PEER_UA_IP, UA_RTP_MIN + 1, peer_target, peer_port, duration, "peer-b@playsbc"),
+            rtcp_command(
+                "peer-tools", PEER_UA_IP, UA_RTP_MIN + 1, peer_target, peer_port, duration,
+                "peer-b@playsbc", args.rtcp_receiver_reports,
+            ),
         ),
     ]
     processes = []
@@ -604,6 +649,107 @@ def cleanup_work_dir(work_dir: Path, timeout: float = 2.0) -> bool:
         if not work_dir.exists():
             return True
     return True
+
+
+def prepare_tls_assets(work_dir: Path, env: dict[str, str], enabled: bool) -> Path:
+    tls_dir = work_dir / "tls"
+    tls_dir.mkdir(parents=True, exist_ok=True)
+    env["PLAYSBC_TOPOLOGY_TLS_DIR"] = str(tls_dir.resolve())
+    if not enabled:
+        return tls_dir
+    if not shutil.which("openssl"):
+        raise RuntimeError("openssl is required for the TLS SIPp regression profile")
+    openssl_config = tls_dir / "openssl.cnf"
+    openssl_config.write_text(
+        "\n".join(
+            [
+                "[req]",
+                "prompt = no",
+                "distinguished_name = subject",
+                "x509_extensions = extensions",
+                "[subject]",
+                "CN = playsbc-lab",
+                "[extensions]",
+                "subjectAltName = @alt_names",
+                "extendedKeyUsage = serverAuth,clientAuth",
+                "[alt_names]",
+                f"IP.1 = {CORE_SBC_IP}",
+                f"IP.2 = {PEER_SBC_IP}",
+                f"IP.3 = {CORE_UA_IP}",
+                f"IP.4 = {PEER_UA_IP}",
+                "DNS.1 = playsbc",
+            ]
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "2",
+            "-keyout",
+            str(tls_dir / "tls.key"),
+            "-out",
+            str(tls_dir / "tls.crt"),
+            "-config",
+            str(openssl_config),
+        ],
+        env=env,
+    )
+    shutil.copyfile(tls_dir / "tls.crt", tls_dir / "ca.crt")
+    for role_dir in (
+        work_dir / "registration-callee",
+        work_dir / "registration-caller",
+        work_dir / "sipp-a-uac",
+        work_dir / "sipp-b-uas",
+    ):
+        shutil.copyfile(tls_dir / "tls.crt", role_dir / "cacert.pem")
+        shutil.copyfile(tls_dir / "tls.key", role_dir / "cakey.pem")
+    return tls_dir
+
+
+def validate_expected_log_markers(bundle: Path, args: SimpleNamespace) -> list[str]:
+    failures = []
+    markers = getattr(args, "expected_log_markers", {}) or {}
+    for filename, expected_values in markers.items():
+        path = bundle / str(filename)
+        text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        for expected in expected_values:
+            if str(expected) not in text:
+                failures.append(f"{filename} missing expected marker: {expected}")
+    secure_media = bool(getattr(args, "uac_srtp", False) or getattr(args, "uas_srtp", False))
+    secure_packets = 0
+    secure_errors = 0
+    if secure_media:
+        secure_stats = rtpengine_query_stats(bundle)
+        secure_packets = int(secure_stats["rtp_packets_total"])
+        secure_errors = int(secure_stats["rtp_errors_total"])
+        if secure_packets <= 0:
+            failures.append("SRTP/RTP interworking profile has no RTPengine media packets")
+        if secure_errors:
+            failures.append(f"SRTP/RTP interworking profile has {secure_errors} RTPengine media errors")
+    append_log(
+        bundle,
+        "log.platform",
+        "PROFILE EVIDENCE MARKERS",
+        "\n".join(
+            [
+                f"status={'passed' if not failures else 'failed'}",
+                f"marker_file_count={len(markers)}",
+                f"secure_media={str(secure_media).lower()}",
+                f"rtpengine_media_packets={secure_packets}",
+                f"rtpengine_media_errors={secure_errors}",
+                *[f"failure={failure}" for failure in failures],
+            ]
+        ),
+    )
+    return failures
 
 
 def merge_capture_files(bundle: Path, args: SimpleNamespace) -> tuple[int, int]:
@@ -661,12 +807,12 @@ def pcap_realm_packet_counts(path: Path) -> tuple[int, int]:
 def validate_topology(bundle: Path, work_dir: Path, args: SimpleNamespace) -> list[str]:
     failures = []
     config_text = (work_dir / "server-config.yaml").read_text(encoding="utf-8", errors="replace")
-    for expected in (
+    expected_config_values = [
         f"sip_advertised_ip: {CORE_SBC_IP}",
         f"b2bua_advertised_ip: {PEER_SBC_IP}",
-        "- core",
-        "- peer",
-    ):
+        *[f"- {direction}" for direction in args.rtpengine_directions],
+    ]
+    for expected in expected_config_values:
         if expected not in config_text:
             failures.append(f"Helm config missing dual-realm value: {expected}")
     capture = bundle / "capture.pcap"
@@ -750,6 +896,7 @@ def main() -> int:
     )
 
     try:
+        prepare_tls_assets(work_dir, env, "tls" in str(profile.sip_transport).split(","))
         uac_scenario, uas_scenario, registration_scenario = prepare_scenarios(profile, bundle, work_dir)
         append_robot_phase(bundle, phase_records, active_phase, "passed", phase_started, phase_detail)
 
@@ -944,6 +1091,9 @@ def main() -> int:
         topology_failures = validate_topology(bundle, work_dir, profile)
         if topology_failures:
             results.append(SmokeResult("dual-realm-validation", [], 1, "failed", 0.0))
+        marker_failures = validate_expected_log_markers(bundle, profile)
+        if marker_failures:
+            results.append(SmokeResult("profile-evidence-markers", [], 1, "failed", 0.0))
         if failure is not None:
             append_log(bundle, "log.platform", "DUAL REALM RUNNER FAILURE", f"{type(failure).__name__}: {failure}")
     except BaseException as exc:

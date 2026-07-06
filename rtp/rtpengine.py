@@ -85,14 +85,45 @@ class RtpengineClient:
         sdp: str,
         codec: Optional[Dict[str, Any]] = None,
         direction: Sequence[str] = (),
+        transport_protocol: str = "",
+        sdes: Sequence[str] = (),
+        dtls: str = "",
     ) -> Dict[str, Any]:
         return await self.request(
             "offer",
-            self._sdp_fields(call_id, from_tag, sdp, codec=codec, direction=direction),
+            self._sdp_fields(
+                call_id,
+                from_tag,
+                sdp,
+                codec=codec,
+                direction=direction,
+                transport_protocol=transport_protocol,
+                sdes=sdes,
+                dtls=dtls,
+            ),
         )
 
-    async def answer(self, *, call_id: str, from_tag: str, to_tag: str, sdp: str, codec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        fields = self._sdp_fields(call_id, from_tag, sdp, codec=codec)
+    async def answer(
+        self,
+        *,
+        call_id: str,
+        from_tag: str,
+        to_tag: str,
+        sdp: str,
+        codec: Optional[Dict[str, Any]] = None,
+        transport_protocol: str = "",
+        sdes: Sequence[str] = (),
+        dtls: str = "",
+    ) -> Dict[str, Any]:
+        fields = self._sdp_fields(
+            call_id,
+            from_tag,
+            sdp,
+            codec=codec,
+            transport_protocol=transport_protocol,
+            sdes=sdes,
+            dtls=dtls,
+        )
         fields["to-tag"] = to_tag
         return await self.request("answer", fields)
 
@@ -119,12 +150,17 @@ class RtpengineClient:
         sdp: str,
         codec: Optional[Dict[str, Any]] = None,
         direction: Sequence[str] = (),
+        transport_protocol: str = "",
+        sdes: Sequence[str] = (),
+        dtls: str = "",
     ) -> Dict[str, Any]:
+        flags = ["trust address"]
+        flags.extend(f"SDES-{option}" for option in sdes)
         fields: Dict[str, Any] = {
             "call-id": call_id,
             "from-tag": from_tag,
             "sdp": sdp,
-            "flags": ["trust address"],
+            "flags": flags,
             "replace": ["origin", "session-connection"],
         }
         if codec:
@@ -133,6 +169,10 @@ class RtpengineClient:
             if len(direction) != 2:
                 raise ValueError("RTPengine direction must contain from and to interface names")
             fields["direction"] = list(direction)
+        if transport_protocol:
+            fields["transport protocol"] = transport_protocol
+        if dtls:
+            fields["DTLS"] = dtls
         return fields
 
 

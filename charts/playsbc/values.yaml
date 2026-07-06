@@ -8,10 +8,35 @@ image:
 service:
   type: ClusterIP
   sipPort: 5062
+  tlsPort: 5061
+  healthPort: 8080
+  sessionAffinity: ClientIP
 
 hostNetwork: false
 
 resources: {}
+
+authSecret:
+  enabled: false
+  existingSecret: ""
+  users: {}
+
+tls:
+  enabled: false
+  existingSecret: ""
+
+rtpengine:
+  enabled: false
+  image:
+    repository: drachtio/rtpengine
+    tag: latest
+    pullPolicy: IfNotPresent
+  controlPort: 2223
+  rtpMin: 30000
+  rtpMax: 32000
+  hostNetwork: true
+  sessionAffinity: ClientIP
+  resources: {}
 
 playsbc:
   config:
@@ -19,6 +44,7 @@ playsbc:
     sip_advertised_ip: ""
     b2bua_advertised_ip: ""
     sip_port: 5062
+    tls_port: 5061
     sip_transport: udp
     rtp_min: 30000
     rtp_max: 30100
@@ -33,10 +59,29 @@ playsbc:
         match: "*"
         target: registration
         priority: 10
+    trunk_groups: []
+    hunt_groups: []
+    number_normalization: []
+    header_normalization: {}
+    transport_policies: []
+    call_admission: {}
     b2bua_ladder_logs: true
     media_backend: internal
     rtpengine_url: udp://rtpengine:2223
     rtpengine_timeout: 3.0
     rtpengine_directions: []
+    rtpengine_max_sessions: -1
+    rtpengine_offer_transport_protocol: ""
+    rtpengine_answer_transport_protocol: ""
+    rtpengine_sdes: []
+    rtpengine_dtls: ""
+    media_quality: {}
     reject_unknown_routes: false
+    tls_certfile: ""
+    tls_keyfile: ""
+    tls_cafile: ""
+    tls_verify_peer: false
+    health_ip: 0.0.0.0
+    health_port: 8080
+    users_file: ""
     debug: false

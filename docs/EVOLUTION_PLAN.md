@@ -6,45 +6,30 @@ PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-cer
 
 ### Signalling And Routing
 
-- SIP over UDP/TCP; REGISTER, OPTIONS, INVITE, ACK, CANCEL, and BYE
+- SIP over UDP/TCP/TLS; REGISTER, OPTIONS, INVITE, ACK, CANCEL, and BYE
 - Digest registration, dialog/transaction state, registrar-backed routing
-- Static trunks, route policies, E.164 matching, and failure propagation
+- Trunk groups, primary/secondary selection, hunt groups, route policies, E.164/header normalization, CAC, health state, and counters
 
 ### Media
 
 - G.711u/G.711a RTP, internal transcoding, and RFC 4733 DTMF
-- RTCP evidence for single calls and a load canary
-- RTPengine anchoring, SDP rewrite, interface selection, and transcoding
+- RTCP sender/receiver evidence and quality analytics for single calls; load profiles omit RTCP validation
+- RTPengine anchoring, SDP rewrite, interface selection, transcoding, bidirectional SDES-SRTP/RTP interworking, and fault profiles
+- RTCP receiver-report loss/jitter analytics for single calls
 
 ### Lab Platform
 
 - Dual-realm Docker topology: core `172.28.0.0/24`, peer `192.168.28.0/24`
 - Dual-homed PlaySBC and RTPengine with Docker-based SIPp agents
 - Helm-rendered configuration for every regression profile
-- SBC category logs, combined live PCAP, and Robot-style HTML report
+- SBC category logs, combined live PCAP, and Robot-style HTML report with single-call ladders
 - Signalling, media, auth, routing, negative, soak, and 5 cps / 60-second CHT profiles
+- Kubernetes Helm lab with health probes, Secret-backed SIP users, RTPengine pairing, kind/minikube values, and a dialog-affinity experiment
 
 ## Next
 
-### SBC Lab Features
-
-- Trunk groups and primary/secondary failover
-- Header and E.164 normalization policies
-- Hunt groups, call admission control, and trunk health state
-- Per-trunk metrics and failure counters
-
-### Transport And Media
-
-- SIP over TLS and transport-specific policies
-- TCP reuse/failure coverage
-- RTPengine failure, port exhaustion, and interface-failure profiles
-- Receiver-report and media-quality analytics
-
-### Kubernetes Lab
-
-- Health probes and secret-backed SIP users
-- RTPengine deployment pairing and media-network model
-- `kind`/`minikube` runbook and dialog-affinity experiment
+- Multi-node RTPengine/PlaySBC node pairing and shared registrar/dialog state
+- Active SIP OPTIONS trunk probing and timed health recovery
 
 ## Later
 

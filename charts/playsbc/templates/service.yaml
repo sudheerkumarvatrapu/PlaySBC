@@ -6,6 +6,7 @@ metadata:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  sessionAffinity: {{ .Values.service.sessionAffinity }}
   selector:
     app.kubernetes.io/name: {{ include "playsbc.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -17,4 +18,12 @@ spec:
     - name: sip-tcp
       port: {{ .Values.service.sipPort }}
       targetPort: sip-tcp
+      protocol: TCP
+    - name: sip-tls
+      port: {{ .Values.service.tlsPort }}
+      targetPort: sip-tls
+      protocol: TCP
+    - name: health
+      port: {{ .Values.service.healthPort }}
+      targetPort: health
       protocol: TCP

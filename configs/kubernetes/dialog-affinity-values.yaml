@@ -1,0 +1,17 @@
+replicaCount: 2
+
+service:
+  sessionAffinity: ClientIP
+
+rtpengine:
+  enabled: true
+  sessionAffinity: ClientIP
+
+playsbc:
+  config:
+    sip_transport: udp,tcp
+    route_policies:
+      - name: registered-endpoints
+        match: "*"
+        target: registration
+        priority: 10

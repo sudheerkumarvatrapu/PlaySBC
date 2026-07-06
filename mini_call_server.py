@@ -27,6 +27,7 @@ import random
 import re
 import secrets
 import socket
+import ssl
 import struct
 import time
 from dataclasses import dataclass, field
@@ -35,7 +36,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
-from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp
+from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp, parse_receiver_reports
 from rtp.rtpengine import RtpengineClient, RtpengineError, parse_rtpengine_url
 from sip.dialog import DialogError, DialogManager
 from sip.transaction import TransactionManager
@@ -66,6 +67,7 @@ class ServerConfig:
     sip_advertised_ip: str = ""
     b2bua_advertised_ip: str = ""
     sip_port: int = 5060
+    tls_port: int = 5061
     sip_transport: str = "udp"
     rtp_min: int = 10000
     rtp_max: int = 10100
@@ -76,12 +78,31 @@ class ServerConfig:
     bridge_rooms: Tuple[str, ...] = ("bridge",)
     b2bua_routes: Dict[str, str] = field(default_factory=dict)
     route_policies: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
+    trunk_groups: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
+    hunt_groups: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
+    number_normalization: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
+    header_normalization: Dict[str, Any] = field(default_factory=dict)
+    transport_policies: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
+    call_admission: Dict[str, Any] = field(default_factory=dict)
     b2bua_ladder_logs: bool = True
     media_backend: str = "internal"
     rtpengine_url: str = "udp://127.0.0.1:2223"
     rtpengine_timeout: float = 3.0
     rtpengine_directions: Tuple[str, ...] = field(default_factory=tuple)
+    rtpengine_max_sessions: int = -1
+    rtpengine_offer_transport_protocol: str = ""
+    rtpengine_answer_transport_protocol: str = ""
+    rtpengine_sdes: Tuple[str, ...] = field(default_factory=tuple)
+    rtpengine_dtls: str = ""
+    media_quality: Dict[str, Any] = field(default_factory=dict)
     reject_unknown_routes: bool = False
+    tls_certfile: str = ""
+    tls_keyfile: str = ""
+    tls_cafile: str = ""
+    tls_verify_peer: bool = False
+    health_ip: str = "0.0.0.0"
+    health_port: int = 8080
+    users_file: str = ""
     debug: bool = False
 
     @property
@@ -94,6 +115,7 @@ SERVER_CONFIG_KEYS = {
     "sip_advertised_ip",
     "b2bua_advertised_ip",
     "sip_port",
+    "tls_port",
     "sip_transport",
     "rtp_min",
     "rtp_max",
@@ -104,17 +126,36 @@ SERVER_CONFIG_KEYS = {
     "bridge_rooms",
     "b2bua_routes",
     "route_policies",
+    "trunk_groups",
+    "hunt_groups",
+    "number_normalization",
+    "header_normalization",
+    "transport_policies",
+    "call_admission",
     "b2bua_ladder_logs",
     "media_backend",
     "rtpengine_url",
     "rtpengine_timeout",
     "rtpengine_directions",
+    "rtpengine_max_sessions",
+    "rtpengine_offer_transport_protocol",
+    "rtpengine_answer_transport_protocol",
+    "rtpengine_sdes",
+    "rtpengine_dtls",
+    "media_quality",
     "reject_unknown_routes",
+    "tls_certfile",
+    "tls_keyfile",
+    "tls_cafile",
+    "tls_verify_peer",
+    "health_ip",
+    "health_port",
+    "users_file",
     "debug",
 }
 
 MEDIA_BACKENDS = {"internal", "rtpengine"}
-SIP_TRANSPORTS = {"udp", "tcp"}
+SIP_TRANSPORTS = {"udp", "tcp", "tls"}
 
 DTMF_EVENTS = {
     0: "0",
@@ -234,6 +275,36 @@ class RouteResult:
     target: SipUri
     policy_name: str
     source: str
+    original_user: str = ""
+    routed_user: str = ""
+    trunk_name: str = ""
+    group_name: str = ""
+
+
+@dataclass
+class TrunkRuntime:
+    name: str
+    uri: str
+    priority: int = 100
+    enabled: bool = True
+    healthy: bool = True
+    max_calls: int = 0
+    active_calls: int = 0
+    attempts: int = 0
+    successes: int = 0
+    failures: int = 0
+    consecutive_failures: int = 0
+
+    @classmethod
+    def from_config(cls, value: Dict[str, Any], index: int) -> "TrunkRuntime":
+        return cls(
+            name=str(value.get("name") or f"trunk-{index + 1}"),
+            uri=str(value.get("uri") or value.get("target") or ""),
+            priority=int(value.get("priority", (index + 1) * 10)),
+            enabled=bool(value.get("enabled", True)),
+            healthy=str(value.get("state", "up")).lower() not in {"down", "failed", "disabled"},
+            max_calls=max(0, int(value.get("max_calls", 0))),
+        )
 
 
 class RoutingEngine:
@@ -248,14 +319,110 @@ class RoutingEngine:
 
     REGISTRATION_TARGETS = {"registration", "registrar", "location"}
 
-    def __init__(self, policies: Tuple[Dict[str, Any], ...], static_routes: Dict[str, str]):
+    def __init__(
+        self,
+        policies: Tuple[Dict[str, Any], ...],
+        static_routes: Dict[str, str],
+        trunk_groups: Tuple[Dict[str, Any], ...] = (),
+        hunt_groups: Tuple[Dict[str, Any], ...] = (),
+        number_normalization: Tuple[Dict[str, Any], ...] = (),
+        header_normalization: Optional[Dict[str, Any]] = None,
+        transport_policies: Tuple[Dict[str, Any], ...] = (),
+        call_admission: Optional[Dict[str, Any]] = None,
+    ):
         self.policies = sorted(
             (RoutePolicy.from_config(policy) for policy in policies),
             key=lambda policy: (policy.priority, policy.name),
         )
         self.static_routes = static_routes
+        self.number_normalization = number_normalization
+        self.header_normalization = dict(header_normalization or {})
+        self.transport_policies = transport_policies
+        self.call_admission = dict(call_admission or {})
+        self.active_calls = 0
+        self.rejected_calls = 0
+        self.trunk_groups: Dict[str, Tuple[str, ...]] = {}
+        self.hunt_groups: Dict[str, Tuple[str, ...]] = {}
+        self.group_strategies: Dict[str, str] = {}
+        self.group_cursors: Dict[str, int] = {}
+        self.trunks: Dict[str, TrunkRuntime] = {}
+        self._load_groups(trunk_groups, "trunk")
+        self._load_groups(hunt_groups, "hunt")
+
+    def _load_groups(self, groups: Tuple[Dict[str, Any], ...], kind: str) -> None:
+        destination = self.trunk_groups if kind == "trunk" else self.hunt_groups
+        for group_index, group in enumerate(groups):
+            group_name = str(group.get("name") or f"{kind}-group-{group_index + 1}")
+            members = []
+            for member_index, value in enumerate(group.get("members", [])):
+                if isinstance(value, str):
+                    member = TrunkRuntime(f"{group_name}-{member_index + 1}", value, (member_index + 1) * 10)
+                elif isinstance(value, dict):
+                    member = TrunkRuntime.from_config(value, member_index)
+                else:
+                    continue
+                if not member.uri:
+                    continue
+                unique_name = member.name
+                if unique_name in self.trunks:
+                    unique_name = f"{group_name}-{member.name}"
+                    member.name = unique_name
+                self.trunks[unique_name] = member
+                members.append(unique_name)
+            destination[group_name] = tuple(members)
+            self.group_strategies[group_name] = str(group.get("strategy", "priority")).lower()
+            self.group_cursors[group_name] = 0
+
+    def normalize_number(self, user: str) -> Tuple[str, str]:
+        for value in self.number_normalization:
+            if not bool(value.get("enabled", True)):
+                continue
+            pattern = str(value.get("pattern", ""))
+            if pattern and re.search(pattern, user):
+                replacement = str(value.get("replacement", ""))
+                return re.sub(pattern, replacement, user, count=1), str(value.get("name", pattern))
+            match = str(value.get("match", ""))
+            if match and fnmatch.fnmatchcase(user, match):
+                strip_prefix = str(value.get("strip_prefix", ""))
+                normalized = user[len(strip_prefix) :] if strip_prefix and user.startswith(strip_prefix) else user
+                return str(value.get("add_prefix", "")) + normalized, str(value.get("name", match))
+        return user, ""
+
+    def _transport_target(self, user: str, target: SipUri) -> SipUri:
+        for value in self.transport_policies:
+            if not bool(value.get("enabled", True)):
+                continue
+            if fnmatch.fnmatchcase(user, str(value.get("match", "*"))):
+                transport = normalize_sip_transport(str(value.get("transport", target.transport)))
+                return SipUri(target.user, target.host, target.port, transport)
+        return target
+
+    def _resolve_group(self, group_name: str, user: str, source: str) -> Optional[RouteResult]:
+        members = self.trunk_groups.get(group_name) if source == "trunk-group" else self.hunt_groups.get(group_name)
+        if not members:
+            return None
+        available = [
+            self.trunks[name]
+            for name in members
+            if self.trunks[name].enabled
+            and self.trunks[name].healthy
+            and (self.trunks[name].max_calls <= 0 or self.trunks[name].active_calls < self.trunks[name].max_calls)
+        ]
+        if not available:
+            return None
+        strategy = self.group_strategies.get(group_name, "priority")
+        if strategy in {"round-robin", "round_robin", "rr"}:
+            cursor = self.group_cursors[group_name] % len(available)
+            member = available[cursor]
+            self.group_cursors[group_name] = cursor + 1
+        else:
+            member = min(available, key=lambda item: (item.priority, item.name))
+        target = self._transport_target(user, parse_sip_uri(format_route_target(member.uri, user)))
+        return RouteResult(target, group_name, source, routed_user=user, trunk_name=member.name, group_name=group_name)
 
     def resolve(self, user: str, registrations: Dict[str, Registration]) -> Optional[RouteResult]:
+        original_user = user
+        user, _normalization_policy = self.normalize_number(user)
         now = time.time()
         for policy in self.policies:
             if not policy.matches(user):
@@ -265,16 +432,103 @@ class RoutingEngine:
             if target.lower() in self.REGISTRATION_TARGETS:
                 registration = registrations.get(user)
                 if registration and not registration.is_expired(now):
-                    return RouteResult(registration.target, policy.name, "registrar")
+                    target = self._transport_target(user, registration.target)
+                    return RouteResult(target, policy.name, "registrar", original_user, user)
                 continue
 
-            return RouteResult(parse_sip_uri(format_route_target(target, user)), policy.name, "policy")
+            lowered = target.lower()
+            if lowered.startswith("trunk-group:"):
+                result = self._resolve_group(target.split(":", 1)[1].strip(), user, "trunk-group")
+                if result:
+                    result.original_user = original_user
+                    result.policy_name = policy.name
+                    return result
+                continue
+            if lowered.startswith("hunt-group:"):
+                result = self._resolve_group(target.split(":", 1)[1].strip(), user, "hunt-group")
+                if result:
+                    result.original_user = original_user
+                    result.policy_name = policy.name
+                    return result
+                continue
+
+            uri = self._transport_target(user, parse_sip_uri(format_route_target(target, user)))
+            return RouteResult(uri, policy.name, "policy", original_user, user)
 
         static_route = self.static_routes.get(user)
         if static_route:
-            return RouteResult(parse_sip_uri(format_route_target(static_route, user)), "b2bua_routes", "static")
+            uri = self._transport_target(user, parse_sip_uri(format_route_target(static_route, user)))
+            return RouteResult(uri, "b2bua_routes", "static", original_user, user)
 
         return None
+
+    def normalize_headers(self, headers: Dict[str, str], route: RouteResult, call_id: str) -> Dict[str, str]:
+        normalized = dict(headers)
+        for remove_name in self.header_normalization.get("remove", []):
+            for existing in tuple(normalized):
+                if existing.lower() == str(remove_name).lower():
+                    normalized.pop(existing, None)
+        context = {
+            "user": route.routed_user or route.target.user,
+            "original_user": route.original_user or route.target.user,
+            "trunk": route.trunk_name,
+            "group": route.group_name,
+            "call_id": call_id,
+        }
+        for name, value in dict(self.header_normalization.get("set", {})).items():
+            normalized[str(name)] = str(value).format(**context)
+        return normalized
+
+    def admit(self, route: RouteResult) -> bool:
+        global_limit = max(0, int(self.call_admission.get("max_concurrent_calls", 0)))
+        if bool(self.call_admission.get("enabled", False)) and self.active_calls >= global_limit:
+            self.rejected_calls += 1
+            return False
+        trunk = self.trunks.get(route.trunk_name)
+        if trunk and trunk.max_calls and trunk.active_calls >= trunk.max_calls:
+            trunk.failures += 1
+            self.rejected_calls += 1
+            return False
+        self.active_calls += 1
+        if trunk:
+            trunk.active_calls += 1
+            trunk.attempts += 1
+        return True
+
+    def release(self, route: RouteResult) -> None:
+        self.active_calls = max(0, self.active_calls - 1)
+        trunk = self.trunks.get(route.trunk_name)
+        if trunk:
+            trunk.active_calls = max(0, trunk.active_calls - 1)
+
+    def record_outcome(self, route: RouteResult, success: bool) -> None:
+        trunk = self.trunks.get(route.trunk_name)
+        if not trunk:
+            return
+        if success:
+            trunk.successes += 1
+            trunk.consecutive_failures = 0
+            trunk.healthy = True
+            return
+        trunk.failures += 1
+        trunk.consecutive_failures += 1
+        failure_threshold = max(1, int(self.call_admission.get("trunk_failure_threshold", 3)))
+        if trunk.consecutive_failures >= failure_threshold:
+            trunk.healthy = False
+
+    def metrics(self) -> Dict[str, int]:
+        values = {
+            "playsbc_active_calls": self.active_calls,
+            "playsbc_admission_rejections_total": self.rejected_calls,
+        }
+        for name, trunk in sorted(self.trunks.items()):
+            prefix = "playsbc_trunk_" + re.sub(r"[^a-zA-Z0-9_]", "_", name)
+            values[f"{prefix}_healthy"] = int(trunk.healthy)
+            values[f"{prefix}_active_calls"] = trunk.active_calls
+            values[f"{prefix}_attempts_total"] = trunk.attempts
+            values[f"{prefix}_successes_total"] = trunk.successes
+            values[f"{prefix}_failures_total"] = trunk.failures
+        return values
 
 
 class SbcLogger:
@@ -339,6 +593,12 @@ class SbcLogger:
 
     def tcp(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
         self.write("tcp", event, detail, call_id=call_id, leg=leg)
+
+    def tls(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("tls", event, detail, call_id=call_id, leg=leg)
+
+    def call(self, event: str, detail: str = "", call_id: str = "", leg: str = "") -> None:
+        self.write("call", event, detail, call_id=call_id, leg=leg)
 
     def write_block(self, category: str, title: str, block: str, call_id: str = "") -> None:
         if not self.enabled:
@@ -528,6 +788,8 @@ class B2BUACall:
     route_policy: str
     route_source: str
     flow_log: B2BUAFlowLog
+    route_result: Optional[RouteResult] = None
+    admission_released: bool = False
     media_backend: str = "internal"
     rtpengine_call_id: str = ""
     rtpengine_from_tag: str = ""
@@ -604,6 +866,8 @@ class RtpSession:
     rtcp_packets_received: int = 0
     rtcp_packets_sent: int = 0
     rtcp_packets_relayed: int = 0
+    quality_loss_warn_percent: float = 1.0
+    quality_jitter_warn_ms: float = 30.0
     relay_wait_logged: bool = False
     closed: bool = False
 
@@ -906,6 +1170,7 @@ class RtcpProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
         try:
             packets = parse_compound_rtcp(data)
+            receiver_reports = parse_receiver_reports(packets)
         except ValueError as exc:
             if self.session.logger:
                 self.session.logger.networking(
@@ -915,6 +1180,24 @@ class RtcpProtocol(asyncio.DatagramProtocol):
                     leg=self.session.leg_label or self.session.media_mode,
                 )
             return
+
+        for report in receiver_reports:
+            quality = (
+                "degraded"
+                if report.loss_percent > self.session.quality_loss_warn_percent
+                or report.jitter_ms > self.session.quality_jitter_warn_ms
+                else "good"
+            )
+            self.session.log(
+                "RTCP RECEIVER QUALITY",
+                (
+                    f"reporter_ssrc={report.reporter_ssrc} source_ssrc={report.source_ssrc} "
+                    f"fraction_lost={report.fraction_lost} cumulative_lost={report.cumulative_lost} "
+                    f"loss_percent={report.loss_percent:.3f} jitter={report.jitter} "
+                    f"jitter_ms={report.jitter_ms:.3f} highest_sequence={report.highest_sequence} "
+                    f"quality={quality}"
+                ),
+            )
 
         self.session.remote_rtcp_addr = addr
         self.session.rtcp_packets_received += 1
@@ -949,7 +1232,15 @@ class RtcpProtocol(asyncio.DatagramProtocol):
 
 
 class MediaServer:
-    def __init__(self, local_ip: str, port_min: int, port_max: int, log_dir: Optional[Path], logger: SbcLogger):
+    def __init__(
+        self,
+        local_ip: str,
+        port_min: int,
+        port_max: int,
+        log_dir: Optional[Path],
+        logger: SbcLogger,
+        media_quality: Optional[Dict[str, Any]] = None,
+    ):
         self.local_ip = local_ip
         self.port_min = port_min if port_min % 2 == 0 else port_min + 1
         self.port_max = port_max
@@ -958,6 +1249,9 @@ class MediaServer:
         self.sessions: Dict[str, RtpSession] = {}
         self.bridge_waiting: Dict[str, RtpSession] = {}
         self.transcoder = G711Transcoder(logger)
+        quality = dict(media_quality or {})
+        self.quality_loss_warn_percent = float(quality.get("loss_warn_percent", 1.0))
+        self.quality_jitter_warn_ms = float(quality.get("jitter_warn_ms", 30.0))
         self._next_port = self.port_min
 
     async def create_session(
@@ -986,6 +1280,8 @@ class MediaServer:
             leg_label=leg_label,
             media_mode="bridge" if bridge_id else media_mode,
             bridge_id=bridge_id,
+            quality_loss_warn_percent=self.quality_loss_warn_percent,
+            quality_jitter_warn_ms=self.quality_jitter_warn_ms,
         )
         await loop.create_datagram_endpoint(
             lambda: RtpProtocol(session, self.transcoder),
@@ -1049,8 +1345,9 @@ class MediaServer:
 
 
 class SipTcpConnectionProtocol(asyncio.Protocol):
-    def __init__(self, server: "SipServerProtocol"):
+    def __init__(self, server: "SipServerProtocol", transport_name: str = "tcp"):
         self.server = server
+        self.transport_name = normalize_sip_transport(transport_name)
         self.transport: Optional[asyncio.Transport] = None
         self.peer: Tuple[str, int] = ("0.0.0.0", 0)
         self.buffer = bytearray()
@@ -1061,26 +1358,34 @@ class SipTcpConnectionProtocol(asyncio.Protocol):
         peer = transport.get_extra_info("peername")
         if isinstance(peer, tuple) and len(peer) >= 2:
             self.peer = (str(peer[0]), int(peer[1]))
-        self.server.register_tcp_connection(self.peer, self)
-        self.server.logger.tcp("TCP CONNECTED", f"protocol=sip peer={self.peer[0]}:{self.peer[1]}")
+        self.server.register_stream_connection(self.transport_name, self.peer, self)
+        self.server.logger.write(
+            self.transport_name,
+            f"{self.transport_name.upper()} CONNECTED",
+            f"protocol=sip peer={self.peer[0]}:{self.peer[1]}",
+        )
 
     def data_received(self, data: bytes) -> None:
         self.buffer.extend(data)
-        self.server.logger.tcp("TCP RX BYTES", f"protocol=sip source={self.peer[0]}:{self.peer[1]} bytes={len(data)}")
+        self.server.logger.write(
+            self.transport_name,
+            f"{self.transport_name.upper()} RX BYTES",
+            f"protocol=sip source={self.peer[0]}:{self.peer[1]} bytes={len(data)}",
+        )
         for message in self._pop_complete_messages():
-            self.server.receive_sip_data(message, self.peer, transport_name="tcp", connection=self)
+            self.server.receive_sip_data(message, self.peer, transport_name=self.transport_name, connection=self)
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.closed = True
-        self.server.unregister_tcp_connection(self.peer, self)
+        self.server.unregister_stream_connection(self.transport_name, self.peer, self)
         detail = f"protocol=sip peer={self.peer[0]}:{self.peer[1]}"
         if exc:
             detail += f" error={exc}"
-        self.server.logger.tcp("TCP DISCONNECTED", detail)
+        self.server.logger.write(self.transport_name, f"{self.transport_name.upper()} DISCONNECTED", detail)
 
     def send(self, packet: bytes) -> None:
         if not self.transport or self.closed:
-            raise ConnectionError(f"TCP connection to {self.peer[0]}:{self.peer[1]} is closed")
+            raise ConnectionError(f"{self.transport_name.upper()} connection to {self.peer[0]}:{self.peer[1]} is closed")
         self.transport.write(packet)
 
     def _pop_complete_messages(self) -> List[bytes]:
@@ -1116,6 +1421,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_routes: Dict[str, str],
         route_policies: Tuple[Dict[str, Any], ...],
         b2bua_ladder_logs: bool,
+        trunk_groups: Tuple[Dict[str, Any], ...] = (),
+        hunt_groups: Tuple[Dict[str, Any], ...] = (),
+        number_normalization: Tuple[Dict[str, Any], ...] = (),
+        header_normalization: Optional[Dict[str, Any]] = None,
+        transport_policies: Tuple[Dict[str, Any], ...] = (),
+        call_admission: Optional[Dict[str, Any]] = None,
         media_backend: str = "internal",
         rtpengine_client: Optional[RtpengineClient] = None,
         reject_unknown_routes: bool = False,
@@ -1123,6 +1434,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         sip_advertised_ip: str = "",
         b2bua_advertised_ip: str = "",
         rtpengine_directions: Tuple[str, ...] = (),
+        rtpengine_max_sessions: int = -1,
+        rtpengine_offer_transport_protocol: str = "",
+        rtpengine_answer_transport_protocol: str = "",
+        rtpengine_sdes: Tuple[str, ...] = (),
+        rtpengine_dtls: str = "",
+        tls_client_context: Optional[ssl.SSLContext] = None,
+        tls_port: int = 5061,
     ):
         self.local_ip = local_ip
         self.sip_advertised_ip = sip_advertised_ip or local_ip
@@ -1144,13 +1462,32 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, Registration] = {}
-        self.routing_engine = RoutingEngine(route_policies, b2bua_routes)
+        self.routing_engine = RoutingEngine(
+            route_policies,
+            b2bua_routes,
+            trunk_groups,
+            hunt_groups,
+            number_normalization,
+            header_normalization,
+            transport_policies,
+            call_admission,
+        )
         self.dialogs = DialogManager()
         self.transactions = TransactionManager(self._send_packet)
         self.pending_outbound_responses: Dict[str, asyncio.Queue] = {}
         self.b2bua_calls_by_inbound: Dict[str, B2BUACall] = {}
         self.b2bua_calls_by_outbound: Dict[str, B2BUACall] = {}
-        self.tcp_connections: Dict[Tuple[str, int], SipTcpConnectionProtocol] = {}
+        self.stream_connections: Dict[Tuple[str, str, int], SipTcpConnectionProtocol] = {}
+        self.stream_connects = 0
+        self.stream_reuses = 0
+        self.stream_failures = 0
+        self.rtpengine_max_sessions = rtpengine_max_sessions
+        self.rtpengine_offer_transport_protocol = rtpengine_offer_transport_protocol
+        self.rtpengine_answer_transport_protocol = rtpengine_answer_transport_protocol
+        self.rtpengine_sdes = rtpengine_sdes
+        self.rtpengine_dtls = rtpengine_dtls
+        self.tls_client_context = tls_client_context
+        self.tls_port = tls_port
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -1163,12 +1500,28 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.logger.platform("SIP SERVER STARTED", f"transport=tcp local={self.local_ip}:{self.local_port}")
         self.logger.tcp("TCP LISTENING", f"protocol=sip local={self.local_ip}:{self.local_port}")
 
-    def register_tcp_connection(self, peer: Tuple[str, int], connection: SipTcpConnectionProtocol) -> None:
-        self.tcp_connections[peer] = connection
+    def tls_server_started(self) -> None:
+        logging.info("SIP listening on tls:%s:%s", self.local_ip, self.tls_port)
+        self.logger.platform("SIP SERVER STARTED", f"transport=tls local={self.local_ip}:{self.tls_port}")
+        self.logger.tls("TLS LISTENING", f"protocol=sip local={self.local_ip}:{self.tls_port}")
 
-    def unregister_tcp_connection(self, peer: Tuple[str, int], connection: SipTcpConnectionProtocol) -> None:
-        if self.tcp_connections.get(peer) is connection:
-            self.tcp_connections.pop(peer, None)
+    def register_stream_connection(
+        self,
+        transport_name: str,
+        peer: Tuple[str, int],
+        connection: SipTcpConnectionProtocol,
+    ) -> None:
+        self.stream_connections[(transport_name, peer[0], peer[1])] = connection
+
+    def unregister_stream_connection(
+        self,
+        transport_name: str,
+        peer: Tuple[str, int],
+        connection: SipTcpConnectionProtocol,
+    ) -> None:
+        key = (transport_name, peer[0], peer[1])
+        if self.stream_connections.get(key) is connection:
+            self.stream_connections.pop(key, None)
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
         self.receive_sip_data(data, addr, transport_name="udp")
@@ -1324,27 +1677,61 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.cleanup_registrations()
             route = self.routing_engine.resolve(target_user, self.registrations)
             if route:
+                routed_user = route.routed_user or target_user
+                if routed_user != target_user:
+                    self.logger.sip(
+                        "NUMBER NORMALIZED",
+                        f"original={target_user} normalized={routed_user} route_policy={route.policy_name}",
+                        call_id=call_id,
+                    )
+                if not self.routing_engine.admit(route):
+                    self.logger.call(
+                        "CALL ADMISSION REJECTED",
+                        f"target={routed_user} trunk={route.trunk_name or 'none'} active={self.routing_engine.active_calls}",
+                        call_id=call_id,
+                    )
+                    self.send_response(message, 503, "Service Unavailable", to_header=to_header)
+                    return
+                if (
+                    self.media_backend == "rtpengine"
+                    and self.rtpengine_max_sessions >= 0
+                    and sum(1 for call in self.b2bua_calls_by_inbound.values() if call.media_backend == "rtpengine")
+                    >= self.rtpengine_max_sessions
+                ):
+                    self.routing_engine.release(route)
+                    self.logger.media(
+                        "RTPENGINE PORT POOL EXHAUSTED",
+                        f"session_limit={self.rtpengine_max_sessions}",
+                        call_id=call_id,
+                    )
+                    self.send_response(message, 503, "Media Capacity Exhausted", to_header=to_header)
+                    return
+                self.log_policy_metrics("CALL ADMITTED", route, call_id)
                 if self.media_backend == "rtpengine":
                     await self.handle_b2bua_invite_rtpengine(
                         message=message,
                         dialog=dialog,
                         to_header=to_header,
                         inbound_call_id=call_id,
-                        target_user=target_user,
+                        target_user=routed_user,
                         route=route,
                     )
+                    if call_id not in self.b2bua_calls_by_inbound:
+                        self.routing_engine.release(route)
                     return
                 await self.handle_b2bua_invite(
                     message=message,
                     dialog=dialog,
                     to_header=to_header,
                     inbound_call_id=call_id,
-                    target_user=target_user,
+                    target_user=routed_user,
                     route=route,
                     preferred_payload=preferred_payload,
                     remote_payloads=remote_payloads,
                     dtmf_payload_type=dtmf_payload_type,
                 )
+                if call_id not in self.b2bua_calls_by_inbound:
+                    self.routing_engine.release(route)
                 return
 
             if self.reject_unknown_routes:
@@ -1541,6 +1928,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             route_policy=route.policy_name,
             route_source=route.source,
             flow_log=flow_log,
+            route_result=route,
         )
         self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
         self.b2bua_calls_by_outbound[outbound_call_id] = b2bua_call
@@ -1584,6 +1972,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         status = final_response.status_code
         reason = final_response.reason_phrase or "Upstream Response"
         if status < 200 or status >= 300:
+            self.routing_engine.record_outcome(route, False)
+            self.log_policy_metrics("TRUNK FAILURE", route, inbound_call_id)
             b2bua_call.outbound_to_header = final_response.header("to")
             b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
             inbound_rtp.log("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
@@ -1593,6 +1983,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.send_response(message, status, reason, to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
             return
+
+        self.routing_engine.record_outcome(route, True)
+        self.log_policy_metrics("TRUNK SUCCESS", route, inbound_call_id)
 
         b2bua_call.outbound_to_header = final_response.header("to")
         b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
@@ -1666,6 +2059,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
         flow_log.write("MEDIA BACKEND", f"backend=rtpengine target={target.uri}")
+        if (
+            self.rtpengine_offer_transport_protocol
+            or self.rtpengine_answer_transport_protocol
+            or self.rtpengine_sdes
+            or self.rtpengine_dtls
+        ):
+            flow_log.write(
+                "RTPENGINE MEDIA SECURITY",
+                (
+                    f"offer_transport={self.rtpengine_offer_transport_protocol or 'preserve'} "
+                    f"answer_transport={self.rtpengine_answer_transport_protocol or 'preserve'} "
+                    f"sdes={','.join(self.rtpengine_sdes) or 'default'} "
+                    f"dtls={self.rtpengine_dtls or 'default'}"
+                ),
+            )
 
         from_tag = extract_header_tag(message.header("from")) or dialog.remote_tag or secrets.token_hex(6)
         remote_payloads = parse_sdp_payloads(message.body)
@@ -1698,6 +2106,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     sdp=message.body,
                     codec=codec_policy,
                     direction=self.rtpengine_directions,
+                    transport_protocol=self.rtpengine_offer_transport_protocol,
+                    sdes=self.rtpengine_sdes,
+                    dtls=self.rtpengine_dtls,
                 ),
                 flow_log,
             )
@@ -1713,7 +2124,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
             flow_log.write("RTPENGINE OFFER FAILED", str(exc))
+            flow_log.sip("B2BUA", "SIPp A", "488 Not Acceptable Here")
             self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
+            flow_log.render_ladder()
             return
 
         outbound_call_id = make_call_id()
@@ -1727,6 +2140,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             route_policy=route.policy_name,
             route_source=route.source,
             flow_log=flow_log,
+            route_result=route,
             media_backend="rtpengine",
             rtpengine_call_id=inbound_call_id,
             rtpengine_from_tag=from_tag,
@@ -1763,12 +2177,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_call.outbound_to_header = final_response.header("to")
         b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
         if status < 200 or status >= 300:
+            self.routing_engine.record_outcome(route, False)
+            self.log_policy_metrics("TRUNK FAILURE", route, inbound_call_id)
             flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
             self.send_outbound_ack(b2bua_call, invite_transaction=True)
             flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
             self.send_response(message, status, reason, to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
             return
+
+        self.routing_engine.record_outcome(route, True)
+        self.log_policy_metrics("TRUNK SUCCESS", route, inbound_call_id)
 
         to_tag = extract_header_tag(final_response.header("to")) or secrets.token_hex(6)
         b2bua_call.rtpengine_to_tag = to_tag
@@ -1781,6 +2200,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     to_tag=to_tag,
                     sdp=final_response.body,
                     codec=codec_policy,
+                    transport_protocol=self.rtpengine_answer_transport_protocol,
+                    sdes=self.rtpengine_sdes,
+                    dtls=self.rtpengine_dtls,
                 ),
                 flow_log,
             )
@@ -1865,6 +2287,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "Subject": f"B2BUA outbound leg for {b2bua_call.inbound_call_id}",
             "Content-Type": "application/sdp",
         }
+        if b2bua_call.route_result:
+            original_headers = set(headers)
+            headers = self.routing_engine.normalize_headers(headers, b2bua_call.route_result, b2bua_call.inbound_call_id)
+            self.logger.sip(
+                "HEADER NORMALIZATION",
+                (
+                    f"removed={','.join(sorted(original_headers - set(headers))) or 'none'} "
+                    f"added={','.join(sorted(set(headers) - original_headers)) or 'none'}"
+                ),
+                call_id=b2bua_call.inbound_call_id,
+            )
         packet = build_sip_request("INVITE", b2bua_call.outbound_target.uri, headers, body)
         self._send_packet(packet, b2bua_call.outbound_target.address, transport_name=transport_name)
         b2bua_call.flow_log.sip(
@@ -1987,12 +2420,34 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if b2bua_call.finalized:
             return
         b2bua_call.finalized = True
+        if b2bua_call.route_result and not b2bua_call.admission_released:
+            self.routing_engine.release(b2bua_call.route_result)
+            b2bua_call.admission_released = True
+            self.log_policy_metrics("CALL RELEASED", b2bua_call.route_result, b2bua_call.inbound_call_id)
         b2bua_call.flow_log.write("CALL END", f"reason={reason}")
         b2bua_call.flow_log.render_ladder()
         self.schedule_rtpengine_delete(b2bua_call)
         self.b2bua_calls_by_inbound.pop(b2bua_call.inbound_call_id, None)
         self.b2bua_calls_by_outbound.pop(b2bua_call.outbound_call_id, None)
         self.pending_outbound_responses.pop(b2bua_call.outbound_call_id, None)
+
+    def log_policy_metrics(self, event: str, route: RouteResult, call_id: str) -> None:
+        metrics = self.routing_engine.metrics()
+        detail = (
+            f"trunk={route.trunk_name or 'none'} group={route.group_name or 'none'} "
+            f"active_calls={metrics.get('playsbc_active_calls', 0)} "
+            f"admission_rejections={metrics.get('playsbc_admission_rejections_total', 0)}"
+        )
+        if route.trunk_name:
+            prefix = "playsbc_trunk_" + re.sub(r"[^a-zA-Z0-9_]", "_", route.trunk_name)
+            detail += (
+                f" healthy={metrics.get(prefix + '_healthy', 0)}"
+                f" attempts={metrics.get(prefix + '_attempts_total', 0)}"
+                f" successes={metrics.get(prefix + '_successes_total', 0)}"
+                f" failures={metrics.get(prefix + '_failures_total', 0)}"
+            )
+        detail += " " + " ".join(f"{name}={value}" for name, value in sorted(metrics.items()))
+        self.logger.call(event, detail, call_id=call_id)
 
     def schedule_rtpengine_delete(self, b2bua_call: B2BUACall) -> None:
         if b2bua_call.media_backend != "rtpengine" or not self.rtpengine_client:
@@ -2059,13 +2514,19 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             logging.info("Expired registration for %s", user)
 
     def make_via_header(self, transport_name: str = "udp") -> str:
-        return f"SIP/2.0/{normalize_sip_transport(transport_name).upper()} {self.b2bua_advertised_ip}:{self.local_port};branch=z9hG4bK-{secrets.token_hex(8)}"
+        transport_name = normalize_sip_transport(transport_name)
+        port = self.tls_port if transport_name == "tls" else self.local_port
+        return f"SIP/2.0/{transport_name.upper()} {self.b2bua_advertised_ip}:{port};branch=z9hG4bK-{secrets.token_hex(8)}"
 
     def local_contact_uri(self, transport_name: str = "udp") -> str:
-        return SipUri("b2bua", self.b2bua_advertised_ip, self.local_port, normalize_sip_transport(transport_name)).uri
+        transport_name = normalize_sip_transport(transport_name)
+        port = self.tls_port if transport_name == "tls" else self.local_port
+        return SipUri("b2bua", self.b2bua_advertised_ip, port, transport_name).uri
 
     def inbound_contact_uri(self, target_user: str, transport_name: str = "udp") -> str:
-        return SipUri(target_user, self.sip_advertised_ip, self.local_port, normalize_sip_transport(transport_name)).uri
+        transport_name = normalize_sip_transport(transport_name)
+        port = self.tls_port if transport_name == "tls" else self.local_port
+        return SipUri(target_user, self.sip_advertised_ip, port, transport_name).uri
 
     def authenticate_register(self, message: SipMessage, user: str) -> str:
         if not self.users:
@@ -2154,36 +2615,69 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         connection: Optional[SipTcpConnectionProtocol] = None,
     ) -> None:
         transport_name = normalize_sip_transport(transport_name)
-        if transport_name == "tcp":
+        if transport_name in {"tcp", "tls"}:
             if connection:
                 try:
                     connection.send(packet)
-                    self.logger.tcp("TCP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
+                    self.logger.write(
+                        transport_name,
+                        f"{transport_name.upper()} TX",
+                        f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}",
+                    )
                     return
                 except ConnectionError as exc:
-                    self.logger.networking("TCP TX FAILED", f"destination={destination[0]}:{destination[1]} error={exc}")
-            asyncio.create_task(self._send_tcp_packet(packet, destination))
+                    self.logger.networking(
+                        f"{transport_name.upper()} TX FAILED",
+                        f"destination={destination[0]}:{destination[1]} error={exc}",
+                    )
+            asyncio.create_task(self._send_stream_packet(packet, destination, transport_name))
             return
 
         if self.transport:
             self.logger.udp("UDP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
             self.transport.sendto(packet, destination)
 
-    async def _send_tcp_packet(self, packet: bytes, destination: Tuple[str, int]) -> None:
-        connection = self.tcp_connections.get(destination)
+    async def _send_stream_packet(
+        self,
+        packet: bytes,
+        destination: Tuple[str, int],
+        transport_name: str,
+    ) -> None:
+        key = (transport_name, destination[0], destination[1])
+        connection = self.stream_connections.get(key)
         try:
-            if not connection or connection.closed:
+            if connection and not connection.closed:
+                self.stream_reuses += 1
+                self.logger.write(
+                    transport_name,
+                    f"{transport_name.upper()} CONNECTION REUSED",
+                    f"destination={destination[0]}:{destination[1]} reuse_count={self.stream_reuses}",
+                )
+            else:
                 loop = asyncio.get_running_loop()
+                ssl_context = self.tls_client_context if transport_name == "tls" else None
                 _transport, protocol = await loop.create_connection(
-                    lambda: SipTcpConnectionProtocol(self),
+                    lambda: SipTcpConnectionProtocol(self, transport_name),
                     destination[0],
                     destination[1],
+                    ssl=ssl_context,
+                    server_hostname=destination[0] if ssl_context else None,
                 )
                 connection = protocol  # type: ignore[assignment]
+                self.stream_connects += 1
             connection.send(packet)
-            self.logger.tcp("TCP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
-        except (OSError, ConnectionError) as exc:
-            self.logger.networking("TCP TX FAILED", f"destination={destination[0]}:{destination[1]} error={exc}")
+            self.logger.write(
+                transport_name,
+                f"{transport_name.upper()} TX",
+                f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}",
+            )
+        except (OSError, ConnectionError, ssl.SSLError) as exc:
+            self.stream_failures += 1
+            self.stream_connections.pop(key, None)
+            self.logger.networking(
+                f"{transport_name.upper()} TX FAILED",
+                f"destination={destination[0]}:{destination[1]} failures={self.stream_failures} error={exc}",
+            )
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.transactions.close()
@@ -2824,11 +3318,13 @@ def split_yaml_inline_items(value: str) -> List[str]:
 
 
 def coerce_config_value(key: str, value: Any) -> Any:
-    if key in {"sip_port", "rtp_min", "rtp_max"}:
+    if key == "rtpengine_dtls" and isinstance(value, bool):
+        return "off" if not value else "active"
+    if key in {"sip_port", "tls_port", "rtp_min", "rtp_max", "health_port", "rtpengine_max_sessions"}:
         return int(value)
     if key == "rtpengine_timeout":
         return float(value)
-    if key in {"debug", "b2bua_ladder_logs", "reject_unknown_routes"}:
+    if key in {"debug", "b2bua_ladder_logs", "reject_unknown_routes", "tls_verify_peer"}:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -2842,21 +3338,25 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if not isinstance(value, dict):
             raise ValueError("b2bua_routes must be a JSON object mapping dialed users to SIP URIs")
         return {str(username): str(uri) for username, uri in value.items()}
-    if key == "route_policies":
+    if key in {"route_policies", "trunk_groups", "hunt_groups", "number_normalization", "transport_policies"}:
         if not isinstance(value, list):
-            raise ValueError("route_policies must be a list of route policy objects")
+            raise ValueError(f"{key} must be a list of policy objects")
         policies = []
         for item in value:
             if not isinstance(item, dict):
-                raise ValueError("each route policy must be a JSON object")
+                raise ValueError(f"each {key} entry must be a JSON object")
             policies.append(dict(item))
         return tuple(policies)
-    if key == "rtpengine_directions":
+    if key in {"header_normalization", "call_admission", "media_quality"}:
+        if not isinstance(value, dict):
+            raise ValueError(f"{key} must be a JSON object")
+        return dict(value)
+    if key in {"rtpengine_directions", "rtpengine_sdes"}:
         if isinstance(value, str):
             return tuple(item.strip() for item in value.split(",") if item.strip())
         if isinstance(value, list):
             return tuple(str(item) for item in value)
-        raise ValueError("rtpengine_directions must be a string or list of interface names")
+        raise ValueError(f"{key} must be a string or list of strings")
     if key == "bridge_rooms":
         if isinstance(value, str):
             return (value,)
@@ -2874,6 +3374,14 @@ def coerce_config_value(key: str, value: Any) -> Any:
         "auth_realm",
         "media_backend",
         "rtpengine_url",
+        "tls_certfile",
+        "tls_keyfile",
+        "tls_cafile",
+        "health_ip",
+        "users_file",
+        "rtpengine_offer_transport_protocol",
+        "rtpengine_answer_transport_protocol",
+        "rtpengine_dtls",
     }:
         return str(value)
     return value
@@ -2883,6 +3391,7 @@ def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> Serve
     overrides = {
         "sip_ip": getattr(args, "sip_ip", None),
         "sip_port": getattr(args, "sip_port", None),
+        "tls_port": getattr(args, "tls_port", None),
         "sip_transport": getattr(args, "sip_transport", None),
         "rtp_min": getattr(args, "rtp_min", None),
         "rtp_max": getattr(args, "rtp_max", None),
@@ -2907,6 +3416,10 @@ def validate_config(config: ServerConfig) -> None:
     config.sip_transport = ",".join(parse_sip_transport_set(config.sip_transport))
     if config.sip_port <= 0 or config.sip_port > 65535:
         raise ValueError("sip_port must be between 1 and 65535")
+    if config.tls_port <= 0 or config.tls_port > 65535:
+        raise ValueError("tls_port must be between 1 and 65535")
+    if config.health_port <= 0 or config.health_port > 65535:
+        raise ValueError("health_port must be between 1 and 65535")
     if config.rtp_min <= 0 or config.rtp_max > 65535 or config.rtp_min > config.rtp_max:
         raise ValueError("RTP port range must be within 1-65535 and rtp_min must be <= rtp_max")
     if not config.auth_realm:
@@ -2922,6 +3435,20 @@ def validate_config(config: ServerConfig) -> None:
         raise ValueError("rtpengine_directions must contain exactly two interface names")
     if any(not direction.strip() for direction in config.rtpengine_directions):
         raise ValueError("rtpengine_directions interface names must not be empty")
+    if config.rtpengine_max_sessions < -1:
+        raise ValueError("rtpengine_max_sessions must be -1 (unlimited) or greater")
+    supported_media_transports = {"", "RTP/AVP", "RTP/SAVP", "RTP/AVPF", "RTP/SAVPF"}
+    for media_transport in (
+        config.rtpengine_offer_transport_protocol,
+        config.rtpengine_answer_transport_protocol,
+    ):
+        if media_transport not in supported_media_transports:
+            raise ValueError(f"Unsupported RTPengine media transport protocol {media_transport!r}")
+    if config.rtpengine_dtls not in {"", "off", "no", "disable", "active", "passive"}:
+        raise ValueError(f"Unsupported RTPengine DTLS policy {config.rtpengine_dtls!r}")
+    if "tls" in parse_sip_transport_set(config.sip_transport):
+        if not config.tls_certfile or not config.tls_keyfile:
+            raise ValueError("tls_certfile and tls_keyfile are required when SIP TLS is enabled")
     for user, route_uri in config.b2bua_routes.items():
         if not user:
             raise ValueError("b2bua_routes keys must not be empty")
@@ -2930,12 +3457,105 @@ def validate_config(config: ServerConfig) -> None:
         policy = RoutePolicy.from_config(policy_config)
         if not policy.name:
             raise ValueError("route policy name must not be empty")
-        if policy.target.lower() not in RoutingEngine.REGISTRATION_TARGETS:
+        if (
+            policy.target.lower() not in RoutingEngine.REGISTRATION_TARGETS
+            and not policy.target.lower().startswith(("trunk-group:", "hunt-group:"))
+        ):
             parse_sip_uri(format_route_target(policy.target, "test-user"))
+    engine = RoutingEngine(
+        config.route_policies,
+        config.b2bua_routes,
+        config.trunk_groups,
+        config.hunt_groups,
+        config.number_normalization,
+        config.header_normalization,
+        config.transport_policies,
+        config.call_admission,
+    )
+    referenced_groups = [
+        policy.target.split(":", 1)[1].strip()
+        for policy in engine.policies
+        if policy.target.lower().startswith(("trunk-group:", "hunt-group:"))
+    ]
+    known_groups = set(engine.trunk_groups) | set(engine.hunt_groups)
+    missing = sorted(set(referenced_groups) - known_groups)
+    if missing:
+        raise ValueError(f"route policies reference unknown groups: {', '.join(missing)}")
 
 
 def resolve_log_dir(config: ServerConfig) -> Optional[Path]:
     return Path(config.log_dir) if config.log_dir else None
+
+
+def load_secret_users(path: str) -> Dict[str, str]:
+    if not path:
+        return {}
+    secret_path = Path(path)
+    text = secret_path.read_text(encoding="utf-8")
+    payload = parse_simple_yaml(text) if secret_path.suffix.lower() in {".yaml", ".yml"} else json.loads(text)
+    if isinstance(payload, dict) and isinstance(payload.get("users"), dict):
+        payload = payload["users"]
+    if not isinstance(payload, dict):
+        raise ValueError(f"SIP users file {secret_path} must contain a username/password object")
+    return {str(username): str(password) for username, password in payload.items()}
+
+
+def create_tls_contexts(config: ServerConfig) -> Tuple[Optional[ssl.SSLContext], Optional[ssl.SSLContext]]:
+    if "tls" not in parse_sip_transport_set(config.sip_transport):
+        return None, None
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    server_context.load_cert_chain(config.tls_certfile, config.tls_keyfile)
+    if config.tls_verify_peer:
+        server_context.verify_mode = ssl.CERT_REQUIRED
+        if config.tls_cafile:
+            server_context.load_verify_locations(config.tls_cafile)
+
+    client_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=config.tls_cafile or None)
+    client_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if not config.tls_verify_peer:
+        client_context.check_hostname = False
+        client_context.verify_mode = ssl.CERT_NONE
+    return server_context, client_context
+
+
+async def handle_health_request(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    protocol: SipServerProtocol,
+) -> None:
+    try:
+        request_line = (await asyncio.wait_for(reader.readline(), timeout=2.0)).decode("ascii", errors="replace")
+        path = request_line.split(" ", 2)[1] if len(request_line.split(" ", 2)) >= 2 else "/healthz"
+        if path == "/metrics":
+            metrics = protocol.routing_engine.metrics()
+            metrics.update(
+                {
+                    "playsbc_stream_connects_total": protocol.stream_connects,
+                    "playsbc_stream_reuses_total": protocol.stream_reuses,
+                    "playsbc_stream_failures_total": protocol.stream_failures,
+                }
+            )
+            body = "\n".join(f"{name} {value}" for name, value in sorted(metrics.items())) + "\n"
+        else:
+            body = "ready\n" if path == "/readyz" else "ok\n"
+        response = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain; version=0.0.4\r\n"
+            f"Content-Length: {len(body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n\r\n"
+            + body
+        )
+        writer.write(response.encode("utf-8"))
+        await writer.drain()
+    except (asyncio.TimeoutError, ConnectionError, OSError):
+        pass
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
 
 
 async def main() -> None:
@@ -2943,7 +3563,8 @@ async def main() -> None:
     parser.add_argument("--config", help="Path to a JSON or YAML config file")
     parser.add_argument("--ip", dest="sip_ip", help="IP address to bind and advertise")
     parser.add_argument("--sip-port", type=int, help="SIP port")
-    parser.add_argument("--sip-transport", help="SIP transport to listen on: udp, tcp, or udp,tcp")
+    parser.add_argument("--sip-transport", help="SIP transport to listen on: udp, tcp, tls, or a comma-separated set")
+    parser.add_argument("--tls-port", type=int, help="SIP TLS listener port")
     parser.add_argument("--rtp-min", type=int, help="First RTP UDP port")
     parser.add_argument("--rtp-max", type=int, help="Last RTP UDP port")
     parser.add_argument("--log-dir", help="Directory for per-call log files")
@@ -2957,6 +3578,9 @@ async def main() -> None:
 
     try:
         config = apply_cli_overrides(load_config_file(args.config), args)
+        if config.users_file:
+            config.users.update(load_secret_users(config.users_file))
+        tls_server_context, tls_client_context = create_tls_contexts(config)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -2989,6 +3613,7 @@ async def main() -> None:
         config.rtp_max,
         log_dir,
         sbc_logger,
+        config.media_quality,
     )
     rtpengine_client = None
     if config.media_backend == "rtpengine":
@@ -3007,13 +3632,26 @@ async def main() -> None:
         config.b2bua_routes,
         config.route_policies,
         config.b2bua_ladder_logs,
-        config.media_backend,
-        rtpengine_client,
-        config.reject_unknown_routes,
-        config.sip_transport,
-        config.sip_advertised_ip,
-        config.b2bua_advertised_ip,
-        config.rtpengine_directions,
+        trunk_groups=config.trunk_groups,
+        hunt_groups=config.hunt_groups,
+        number_normalization=config.number_normalization,
+        header_normalization=config.header_normalization,
+        transport_policies=config.transport_policies,
+        call_admission=config.call_admission,
+        media_backend=config.media_backend,
+        rtpengine_client=rtpengine_client,
+        reject_unknown_routes=config.reject_unknown_routes,
+        sip_transport=config.sip_transport,
+        sip_advertised_ip=config.sip_advertised_ip,
+        b2bua_advertised_ip=config.b2bua_advertised_ip,
+        rtpengine_directions=config.rtpengine_directions,
+        rtpengine_max_sessions=config.rtpengine_max_sessions,
+        rtpengine_offer_transport_protocol=config.rtpengine_offer_transport_protocol,
+        rtpengine_answer_transport_protocol=config.rtpengine_answer_transport_protocol,
+        rtpengine_sdes=config.rtpengine_sdes,
+        rtpengine_dtls=config.rtpengine_dtls,
+        tls_client_context=tls_client_context,
+        tls_port=config.tls_port,
     )
     loop = asyncio.get_running_loop()
     sip_transports = parse_sip_transport_set(config.sip_transport)
@@ -3026,12 +3664,30 @@ async def main() -> None:
         sip_listeners.append(udp_transport)
     if "tcp" in sip_transports:
         tcp_server = await loop.create_server(
-            lambda: SipTcpConnectionProtocol(sip_protocol),
+            lambda: SipTcpConnectionProtocol(sip_protocol, "tcp"),
             config.sip_ip,
             config.sip_port,
         )
         sip_listeners.append(tcp_server)
         sip_protocol.tcp_server_started()
+
+    if "tls" in sip_transports:
+        tls_server = await loop.create_server(
+            lambda: SipTcpConnectionProtocol(sip_protocol, "tls"),
+            config.sip_ip,
+            config.tls_port,
+            ssl=tls_server_context,
+        )
+        sip_listeners.append(tls_server)
+        sip_protocol.tls_server_started()
+
+    health_server = await asyncio.start_server(
+        lambda reader, writer: handle_health_request(reader, writer, sip_protocol),
+        config.health_ip,
+        config.health_port,
+    )
+    sip_listeners.append(health_server)
+    sbc_logger.platform("HEALTH SERVER STARTED", f"local={config.health_ip}:{config.health_port}")
 
     await asyncio.Future()
 

@@ -1,3 +1,16 @@
+{{- $config := deepCopy .Values.playsbc.config -}}
+{{- if .Values.authSecret.enabled -}}
+{{- $_ := set $config "users_file" "/etc/playsbc-secret/users.yaml" -}}
+{{- end -}}
+{{- if .Values.tls.enabled -}}
+{{- $_ := set $config "tls_certfile" "/etc/playsbc-tls/tls.crt" -}}
+{{- $_ := set $config "tls_keyfile" "/etc/playsbc-tls/tls.key" -}}
+{{- $_ := set $config "tls_cafile" "/etc/playsbc-tls/ca.crt" -}}
+{{- end -}}
+{{- if .Values.rtpengine.enabled -}}
+{{- $_ := set $config "media_backend" "rtpengine" -}}
+{{- $_ := set $config "rtpengine_url" (printf "udp://%s-rtpengine:%v" (include "playsbc.fullname" .) .Values.rtpengine.controlPort) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,4 +19,4 @@ metadata:
 {{ include "playsbc.labels" . | indent 4 }}
 data:
   server.yaml: |
-{{ toYaml .Values.playsbc.config | indent 4 }}
+{{ toYaml $config | indent 4 }}

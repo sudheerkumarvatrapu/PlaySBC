@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,22 @@ ALL_B2BUA_PROFILES = (
     "esbc-static-trunk-route",
     "esbc-e164-route-policy",
     "esbc-trunk-failure",
+    "esbc-trunk-failover",
+    "esbc-header-normalization",
+    "esbc-e164-normalization",
+    "esbc-hunt-group",
+    "esbc-call-admission",
+    "esbc-trunk-metrics",
+    "tls-transport-policy",
+    "tcp-connection-reuse",
+    "tcp-connection-failure",
+    "rtpengine-control-failure",
+    "rtpengine-port-exhaustion",
+    "rtpengine-interface-failure",
+    "rtcp-receiver-quality",
+    "tls-srtp-to-udp-rtp",
+    "tls-srtp-to-tcp-rtp",
+    "udp-rtp-to-tls-srtp",
     "small-load-2cps-10s",
     "soak-1cps-30s",
     "load-5cps-60s",
@@ -59,6 +76,12 @@ RTPENGINE_B2BUA_PROFILES = (
     "rtpengine-media",
     "rtpengine-transcoding",
     "tcp-rtpengine-transcoding",
+    "rtpengine-control-failure",
+    "rtpengine-port-exhaustion",
+    "rtpengine-interface-failure",
+    "tls-srtp-to-udp-rtp",
+    "tls-srtp-to-tcp-rtp",
+    "udp-rtp-to-tls-srtp",
     "load-5cps-60s-rtpengine-transcoding",
 )
 REAL_TOPOLOGY_PROFILE = "real-topology-rtpengine-transcoding"
@@ -103,6 +126,7 @@ class ReportRow:
     log_path: str
     command: str
     phases: List[ReportPhase] = field(default_factory=list)
+    sip_ladder: str = ""
 
 
 def make_run_id() -> str:
@@ -130,8 +154,8 @@ def real_topology_command(profile_run_id: str, log_root: Path) -> List[str]:
     ]
 
 
-def dual_realm_command(profile: str, profile_run_id: str, log_root: Path) -> List[str]:
-    return [
+def dual_realm_command(profile: str, profile_run_id: str, log_root: Path, *, rebuild: bool = False) -> List[str]:
+    command = [
         sys.executable,
         str(ROOT / "tools" / "run_dual_realm_profile.py"),
         "--profile",
@@ -141,6 +165,11 @@ def dual_realm_command(profile: str, profile_run_id: str, log_root: Path) -> Lis
         "--output-root",
         str(log_root),
     ]
+    if rebuild:
+        command.append("--rebuild")
+    else:
+        command.append("--skip-build")
+    return command
 
 
 class SudoKeepalive:
@@ -361,6 +390,23 @@ def read_execution_phases(log_path: Path) -> List[ReportPhase]:
     return sorted(phases, key=lambda phase: order.get(phase.name, len(order)))
 
 
+def read_sip_ladder(log_path: Path) -> str:
+    sip_log = log_path / "log.sip"
+    if not sip_log.exists():
+        return ""
+    lines = sip_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    for index, line in enumerate(lines):
+        if " | B2BUA SIP LADDER" not in line:
+            continue
+        ladder = []
+        for candidate in lines[index + 1 :]:
+            if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| ", candidate):
+                break
+            ladder.append(candidate.rstrip())
+        return "\n".join(ladder).strip()
+    return ""
+
+
 def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[ReportRow]:
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     rows = []
@@ -431,6 +477,7 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
             log_path=str(log_path),
             command=aggregate_command,
             phases=phases,
+            sip_ladder=read_sip_ladder(log_path),
         )
     ]
 
@@ -458,6 +505,12 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
                 f"<td>{html.escape(phase.detail)}</td>"
                 "</tr>"
             )
+        ladder_html = ""
+        if row.sip_ladder:
+            ladder_html = (
+                "<section class=\"ladder\"><h2>SIP Ladder</h2>"
+                f"<pre>{html.escape(row.sip_ladder)}</pre></section>"
+            )
         row_html.append(
             f"<details class=\"test-case {status_class}\" open>"
             "<summary>"
@@ -477,6 +530,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
             "</tr></thead><tbody>"
             f"{''.join(phase_html)}"
             "</tbody></table>"
+            f"{ladder_html}"
             "</div></details>"
         )
 
@@ -518,6 +572,9 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
     code {{ font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }}
     .keyword {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; color: #1d4ed8; }}
     .elapsed {{ font-variant-numeric: tabular-nums; white-space: nowrap; }}
+    .ladder {{ margin-top: 16px; }}
+    .ladder h2 {{ margin: 0 0 8px; font-size: 14px; text-transform: uppercase; color: #374151; }}
+    .ladder pre {{ margin: 0; padding: 14px; overflow-x: auto; border: 1px solid #d1d5db; background: #111827; color: #e5e7eb; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .badge {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 4px 8px; font-weight: 700; font-size: 12px; }}
     .badge.pass {{ color: #166534; background: #dcfce7; border: 1px solid #16a34a; }}
     .badge.blocked {{ color: #92400e; background: #fef3c7; border: 1px solid #f59e0b; }}
@@ -633,10 +690,15 @@ def main() -> int:
 
         if not args.skip_b2bua:
             profiles = ALL_B2BUA_PROFILES if args.all_b2bua_profiles else tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
-            for profile in profiles:
+            for profile_index, profile in enumerate(profiles):
                 profile_run_id = f"{run_id}-{profile}"
                 profile_log_path = b2bua_log_root / profile_run_id
-                command = dual_realm_command(profile, profile_run_id, b2bua_log_root)
+                command = dual_realm_command(
+                    profile,
+                    profile_run_id,
+                    b2bua_log_root,
+                    rebuild=profile_index == 0,
+                )
                 command_text = " ".join(command)
                 returncode, duration, stdout, stderr = run_command(command, args.timeout)
                 actual_log_path = extract_b2bua_log_path(stdout, profile_log_path)

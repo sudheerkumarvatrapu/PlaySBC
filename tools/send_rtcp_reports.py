@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp
+from rtp.rtcp import build_compound_receiver_report, build_compound_sender_report, parse_compound_rtcp
 
 
 def send_reports(
@@ -26,6 +26,7 @@ def send_reports(
     duration_seconds: float,
     interval_seconds: float,
     expect_reply: bool,
+    receiver_report: bool = False,
 ) -> int:
     started = time.monotonic()
     next_send = started
@@ -39,13 +40,22 @@ def send_reports(
             if now >= next_send:
                 elapsed = max(now - started, 0.0)
                 media_packets = int(elapsed * 50)
-                report = build_compound_sender_report(
-                    ssrc=ssrc,
-                    cname=cname,
-                    rtp_timestamp=media_packets * 160,
-                    packet_count=media_packets,
-                    octet_count=media_packets * 160,
-                )
+                if receiver_report:
+                    report = build_compound_receiver_report(
+                        reporter_ssrc=ssrc,
+                        source_ssrc=ssrc ^ 0x01010101,
+                        cname=cname,
+                        highest_sequence=media_packets,
+                        jitter=8,
+                    )
+                else:
+                    report = build_compound_sender_report(
+                        ssrc=ssrc,
+                        cname=cname,
+                        rtp_timestamp=media_packets * 160,
+                        packet_count=media_packets,
+                        octet_count=media_packets * 160,
+                    )
                 sock.sendto(report, (target_ip, target_port))
                 sent += 1
                 next_send += interval_seconds
@@ -79,6 +89,7 @@ def main() -> int:
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--interval-seconds", type=float, default=5.0)
     parser.add_argument("--expect-reply", action="store_true")
+    parser.add_argument("--receiver-report", action="store_true")
     args = parser.parse_args()
     return send_reports(
         local_ip=args.local_ip,
@@ -90,6 +101,7 @@ def main() -> int:
         duration_seconds=args.duration_seconds,
         interval_seconds=args.interval_seconds,
         expect_reply=args.expect_reply,
+        receiver_report=args.receiver_report,
     )
 
 

@@ -33,13 +33,51 @@ spec:
             - name: sip-tcp
               containerPort: {{ .Values.service.sipPort }}
               protocol: TCP
+            - name: sip-tls
+              containerPort: {{ .Values.service.tlsPort }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.service.healthPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           volumeMounts:
             - name: config
               mountPath: /etc/playsbc
               readOnly: true
+{{- if .Values.authSecret.enabled }}
+            - name: auth-secret
+              mountPath: /etc/playsbc-secret
+              readOnly: true
+{{- end }}
+{{- if .Values.tls.enabled }}
+            - name: tls-secret
+              mountPath: /etc/playsbc-tls
+              readOnly: true
+{{- end }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "playsbc.fullname" . }}-config
+{{- if .Values.authSecret.enabled }}
+        - name: auth-secret
+          secret:
+            secretName: {{ default (printf "%s-auth" (include "playsbc.fullname" .)) .Values.authSecret.existingSecret }}
+{{- end }}
+{{- if .Values.tls.enabled }}
+        - name: tls-secret
+          secret:
+            secretName: {{ required "tls.existingSecret is required when TLS is enabled" .Values.tls.existingSecret }}
+{{- end }}

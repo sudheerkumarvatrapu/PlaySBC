@@ -1,0 +1,87 @@
+sip_ip: 0.0.0.0
+sip_port: 5060
+tls_port: 5061
+sip_transport: udp,tcp,tls
+tls_certfile: /etc/playsbc/tls/tls.crt
+tls_keyfile: /etc/playsbc/tls/tls.key
+tls_cafile: /etc/playsbc/tls/ca.crt
+tls_verify_peer: false
+
+default_codec: PCMU
+media_backend: rtpengine
+rtpengine_url: udp://rtpengine:2223
+rtpengine_directions: [core, peer]
+rtpengine_max_sessions: 500
+rtpengine_sdes:
+  - no-AEAD_AES_256_GCM
+  - no-AEAD_AES_128_GCM
+  - no-AES_256_CM_HMAC_SHA1_80
+  - no-AES_256_CM_HMAC_SHA1_32
+  - no-AES_192_CM_HMAC_SHA1_80
+  - no-AES_192_CM_HMAC_SHA1_32
+  - no-AES_CM_128_HMAC_SHA1_32
+  - no-F8_128_HMAC_SHA1_80
+  - no-F8_128_HMAC_SHA1_32
+  - no-NULL_HMAC_SHA1_80
+  - no-NULL_HMAC_SHA1_32
+rtpengine_dtls: disable
+media_quality:
+  loss_warn_percent: 1.0
+  jitter_warn_ms: 30.0
+
+number_normalization:
+  - name: international-access-to-plus
+    pattern: ^00
+    replacement: "+"
+
+header_normalization:
+  remove: [Subject]
+  set:
+    X-PlaySBC-Trunk: "{trunk}"
+    X-PlaySBC-Original-User: "{original_user}"
+
+transport_policies:
+  - name: secure-enterprise-peer
+    match: "+1800*"
+    transport: tls
+
+call_admission:
+  enabled: true
+  max_concurrent_calls: 100
+  trunk_failure_threshold: 3
+
+trunk_groups:
+  - name: enterprise
+    strategy: priority
+    members:
+      - name: primary
+        uri: sip:{user}@primary.example.invalid:5061;transport=tls
+        priority: 10
+        max_calls: 80
+      - name: secondary
+        uri: sip:{user}@secondary.example.invalid:5061;transport=tls
+        priority: 20
+        max_calls: 80
+
+hunt_groups:
+  - name: support
+    strategy: round-robin
+    members:
+      - name: support-1
+        uri: sip:{user}@support-1.example.invalid:5060
+      - name: support-2
+        uri: sip:{user}@support-2.example.invalid:5060
+
+route_policies:
+  - name: support-hunt
+    match: support
+    target: hunt-group:support
+    priority: 10
+  - name: enterprise-trunks
+    match: "+*"
+    target: trunk-group:enterprise
+    priority: 20
+
+health_ip: 0.0.0.0
+health_port: 8080
+users_file: /etc/playsbc-secret/users.yaml

@@ -23,7 +23,7 @@ env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regressio
 | Core | `172.28.0.10` | `172.28.0.20` | `172.28.0.40` |
 | Peer | `192.168.28.30` | `192.168.28.20` | `192.168.28.40` |
 
-Helm renders the configuration for each profile. RTPengine uses `direction=[core, peer]`; SIPp A and SIPp B never share a Docker network.
+Helm renders the configuration for each profile. RTPengine uses `direction=[core, peer]`; SIPp A and SIPp B never share a Docker network. Fault profiles cover control loss, session exhaustion, and invalid interfaces. Mixed secure profiles exercise TLS plus `RTP/SAVP` on one leg and UDP/TCP plus `RTP/AVP` on the other.
 
 ## Focused Topology Call
 

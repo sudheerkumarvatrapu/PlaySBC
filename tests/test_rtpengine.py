@@ -72,6 +72,36 @@ class RtpengineEncodingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client._sdp_fields("call-1", "tag-a", "v=0\r\n", direction=("core",))
 
+    def test_client_builds_srtp_to_rtp_transport_policy(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        fields = client._sdp_fields(
+            "call-1",
+            "tag-a",
+            "v=0\r\n",
+            direction=("core", "peer"),
+            transport_protocol="RTP/AVP",
+        )
+        packet = client.build_packet("offer", fields, cookie="cookie1")
+
+        self.assertIn(b"18:transport protocol7:RTP/AVP", packet)
+
+    def test_client_builds_backward_compatible_sdes_policy_flags(self):
+        client = RtpengineClient("udp://127.0.0.1:2223")
+
+        fields = client._sdp_fields(
+            "call-1",
+            "tag-a",
+            "v=0\r\n",
+            transport_protocol="RTP/SAVP",
+            sdes=("only-AES_CM_128_HMAC_SHA1_80",),
+            dtls="disable",
+        )
+        packet = client.build_packet("offer", fields, cookie="cookie1")
+
+        self.assertIn(b"33:SDES-only-AES_CM_128_HMAC_SHA1_80", packet)
+        self.assertIn(b"4:DTLS7:disable", packet)
+
     def test_client_decodes_cookie_response(self):
         client = RtpengineClient("udp://127.0.0.1:2223")
         response = b"cookie1 " + bencode({"result": "ok", "sdp": "v=0\r\n"})

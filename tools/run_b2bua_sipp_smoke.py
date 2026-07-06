@@ -54,6 +54,19 @@ STATIC_TRUNK_ROUTE_POLICY = [
         "priority": 20,
     }
 ]
+RTPENGINE_SDES_AES_CM_128_ONLY = [
+    "no-AEAD_AES_256_GCM",
+    "no-AEAD_AES_128_GCM",
+    "no-AES_256_CM_HMAC_SHA1_80",
+    "no-AES_256_CM_HMAC_SHA1_32",
+    "no-AES_192_CM_HMAC_SHA1_80",
+    "no-AES_192_CM_HMAC_SHA1_32",
+    "no-AES_CM_128_HMAC_SHA1_32",
+    "no-F8_128_HMAC_SHA1_80",
+    "no-F8_128_HMAC_SHA1_32",
+    "no-NULL_HMAC_SHA1_80",
+    "no-NULL_HMAC_SHA1_32",
+]
 CRLF = "\r\n"
 DIAGNOSTIC_PCAP_PORT = 65530
 LOG_FILES = (
@@ -77,6 +90,8 @@ BASE_DEFAULTS = {
     "host": "127.0.0.1",
     "server_port": 25062,
     "sip_transport": "udp",
+    "uac_transport": "",
+    "uas_transport": "",
     "uac_port": 25081,
     "uas_port": 25082,
     "register_port": 25083,
@@ -107,6 +122,28 @@ BASE_DEFAULTS = {
     "media_backend": "internal",
     "rtpengine_url": "udp://127.0.0.1:2223",
     "rtpengine_timeout": 3.0,
+    "rtpengine_directions": ["core", "peer"],
+    "rtpengine_max_sessions": -1,
+    "rtpengine_offer_transport_protocol": "",
+    "rtpengine_answer_transport_protocol": "",
+    "rtpengine_sdes": [],
+    "rtpengine_dtls": "",
+    "uac_srtp": False,
+    "uas_srtp": False,
+    "trunk_groups": [],
+    "hunt_groups": [],
+    "number_normalization": [],
+    "header_normalization": {},
+    "transport_policies": [],
+    "call_admission": {},
+    "media_quality": {},
+    "rtcp_receiver_reports": False,
+    "rtcp_enabled": True,
+    "expected_log_markers": {},
+    "tls_certfile": "",
+    "tls_keyfile": "",
+    "tls_cafile": "",
+    "tls_verify_peer": False,
     "registration_driver": "sipp",
     "registration_scenario": "register_contact.xml",
     "registration_auth_expected": "",
@@ -313,6 +350,253 @@ B2BUA_PROFILES = {
         "uas_scenario": "b2bua_uas_failed_outbound.xml",
         "route_policies": STATIC_TRUNK_ROUTE_POLICY,
     },
+    "esbc-trunk-failover": {
+        "caller": "enterprise-a",
+        "callee": "failover-b",
+        "register_callee": False,
+        "route_policies": [
+            {"name": "enterprise-trunks", "match": "*", "target": "trunk-group:enterprise", "priority": 10}
+        ],
+        "trunk_groups": [
+            {
+                "name": "enterprise",
+                "strategy": "priority",
+                "members": [
+                    {
+                        "name": "primary",
+                        "uri": "sip:{user}@{host}:{uas_port}",
+                        "priority": 10,
+                        "state": "down",
+                    },
+                    {
+                        "name": "secondary",
+                        "uri": "sip:{user}@{host}:{uas_port}",
+                        "priority": 20,
+                    },
+                ],
+            }
+        ],
+        "expected_log_markers": {"log.call": ["trunk=secondary", "playsbc_trunk_secondary_successes_total=1"]},
+    },
+    "esbc-header-normalization": {
+        "caller": "enterprise-a",
+        "callee": "header-policy-b",
+        "register_callee": False,
+        "route_policies": STATIC_TRUNK_ROUTE_POLICY,
+        "header_normalization": {
+            "remove": ["Subject"],
+            "set": {"X-PlaySBC-Trunk": "{trunk}", "X-PlaySBC-Original-User": "{original_user}"},
+        },
+        "expected_log_markers": {"log.sip": ["HEADER NORMALIZATION", "X-PlaySBC-Original-User", "Subject"]},
+    },
+    "esbc-e164-normalization": {
+        "caller": "enterprise-a",
+        "callee": "0018005550100",
+        "register_callee": False,
+        "number_normalization": [
+            {"name": "international-access-to-plus", "pattern": "^00", "replacement": "+"}
+        ],
+        "route_policies": [
+            {
+                "name": "normalized-e164",
+                "match": "+1800*",
+                "target": "sip:{user}@{host}:{uas_port}",
+                "priority": 10,
+            }
+        ],
+        "expected_log_markers": {"log.sip": ["NUMBER NORMALIZED", "normalized=+18005550100"]},
+    },
+    "esbc-hunt-group": {
+        "caller": "enterprise-a",
+        "callee": "support",
+        "register_callee": False,
+        "calls": 2,
+        "rate": 1,
+        "ladder": False,
+        "route_policies": [
+            {"name": "support-hunt", "match": "support", "target": "hunt-group:support", "priority": 10}
+        ],
+        "hunt_groups": [
+            {
+                "name": "support",
+                "strategy": "round-robin",
+                "members": [
+                    {"name": "support-1", "uri": "sip:{user}@{host}:{uas_port}"},
+                    {"name": "support-2", "uri": "sip:{user}@{host}:{uas_port}"},
+                ],
+            }
+        ],
+        "expected_log_markers": {
+            "log.call": ["playsbc_trunk_support_1_attempts_total=1", "playsbc_trunk_support_2_attempts_total=1"]
+        },
+    },
+    "esbc-call-admission": {
+        "caller": "enterprise-a",
+        "callee": "capacity-b",
+        "register_callee": False,
+        "start_uas": False,
+        "uac_scenario": "b2bua_uac_failed_outbound.xml",
+        "route_policies": STATIC_TRUNK_ROUTE_POLICY,
+        "call_admission": {"enabled": True, "max_concurrent_calls": 0},
+        "expected_log_markers": {"log.call": ["CALL ADMISSION REJECTED"]},
+    },
+    "esbc-trunk-metrics": {
+        "caller": "enterprise-a",
+        "callee": "metrics-b",
+        "register_callee": False,
+        "route_policies": [
+            {"name": "metrics-trunk", "match": "*", "target": "trunk-group:metrics", "priority": 10}
+        ],
+        "trunk_groups": [
+            {
+                "name": "metrics",
+                "members": [{"name": "carrier-a", "uri": "sip:{user}@{host}:{uas_port}"}],
+            }
+        ],
+        "expected_log_markers": {
+            "log.call": ["playsbc_trunk_carrier_a_attempts_total=1", "playsbc_trunk_carrier_a_successes_total=1"]
+        },
+    },
+    "tls-transport-policy": {
+        "caller": "tls-a",
+        "callee": "tls-b",
+        "sip_transport": "tls",
+        "transport_policies": [{"name": "secure-peer", "match": "*", "transport": "tls"}],
+        "expected_log_markers": {"log.tls": ["TLS CONNECTED", "TLS TX"]},
+    },
+    "tcp-connection-reuse": {
+        "caller": "tcp-a",
+        "callee": "tcp-b",
+        "sip_transport": "tcp",
+        "expected_log_markers": {"log.tcp": ["TCP CONNECTION REUSED"]},
+    },
+    "tcp-connection-failure": {
+        "caller": "tcp-a",
+        "callee": "unreachable-b",
+        "sip_transport": "tcp",
+        "register_callee": False,
+        "start_uas": False,
+        "uac_scenario": "b2bua_uac_expect_480.xml",
+        "route_policies": [
+            {
+                "name": "unreachable-tcp-peer",
+                "match": "*",
+                "target": "sip:{user}@192.168.28.99:5060;transport=tcp",
+                "priority": 10,
+            }
+        ],
+        "expected_log_markers": {"log.networking": ["TCP TX FAILED"]},
+    },
+    "rtpengine-control-failure": {
+        "caller": "fault-a",
+        "callee": "fault-b",
+        "media_backend": "rtpengine",
+        "rtpengine_url": "udp://192.168.28.99:2223",
+        "rtpengine_timeout": 0.2,
+        "register_callee": False,
+        "start_uas": False,
+        "uac_scenario": "b2bua_uac_expect_488.xml",
+        "route_policies": STATIC_TRUNK_ROUTE_POLICY,
+        "expected_log_markers": {"log.media": ["RTPENGINE OFFER FAILED"]},
+    },
+    "rtpengine-port-exhaustion": {
+        "caller": "fault-a",
+        "callee": "fault-b",
+        "media_backend": "rtpengine",
+        "rtpengine_max_sessions": 0,
+        "register_callee": False,
+        "start_uas": False,
+        "uac_scenario": "b2bua_uac_failed_outbound.xml",
+        "route_policies": STATIC_TRUNK_ROUTE_POLICY,
+        "expected_log_markers": {"log.media": ["RTPENGINE PORT POOL EXHAUSTED"]},
+    },
+    "rtpengine-interface-failure": {
+        "caller": "fault-a",
+        "callee": "fault-b",
+        "media_backend": "rtpengine",
+        "rtpengine_directions": ["missing-core", "missing-peer"],
+        "register_callee": False,
+        "start_uas": False,
+        "uac_scenario": "b2bua_uac_expect_488.xml",
+        "route_policies": STATIC_TRUNK_ROUTE_POLICY,
+        "expected_log_markers": {"log.media": ["RTPENGINE OFFER FAILED"]},
+    },
+    "rtcp-receiver-quality": {
+        "caller": "quality-a",
+        "callee": "quality-b",
+        "media_codec": "PCMU",
+        "hold_ms": 10000,
+        "rtcp_receiver_reports": True,
+        "media_quality": {"loss_warn_percent": 1.0, "jitter_warn_ms": 30.0},
+        "expected_log_markers": {"log.platform": ["RTCP RECEIVER QUALITY", "jitter_ms=1.000", "quality=good"]},
+    },
+    "tls-srtp-to-udp-rtp": {
+        "caller": "secure-core-a",
+        "callee": "plain-udp-b",
+        "sip_transport": "udp,tls",
+        "uac_transport": "tls",
+        "uas_transport": "udp",
+        "media_backend": "rtpengine",
+        "media_codec": "PCMU",
+        "hold_ms": 10000,
+        "uac_srtp": True,
+        "rtcp_enabled": False,
+        "rtpengine_offer_transport_protocol": "RTP/AVP",
+        "rtpengine_answer_transport_protocol": "RTP/SAVP",
+        "rtpengine_sdes": RTPENGINE_SDES_AES_CM_128_ONLY,
+        "rtpengine_dtls": "disable",
+        "transport_policies": [{"name": "plain-udp-peer", "match": "*", "transport": "udp"}],
+        "expected_log_markers": {
+            "log.tls": ["TLS CONNECTED"],
+            "log.sip": ["a=crypto:", "RTP/SAVP", "RTP/AVP"],
+            "log.media": ["RTPENGINE MEDIA SECURITY", "offer_transport=RTP/AVP", "answer_transport=RTP/SAVP"],
+        },
+    },
+    "tls-srtp-to-tcp-rtp": {
+        "caller": "secure-core-a",
+        "callee": "plain-tcp-b",
+        "sip_transport": "tcp,tls",
+        "uac_transport": "tls",
+        "uas_transport": "tcp",
+        "media_backend": "rtpengine",
+        "media_codec": "PCMU",
+        "hold_ms": 10000,
+        "uac_srtp": True,
+        "rtcp_enabled": False,
+        "rtpengine_offer_transport_protocol": "RTP/AVP",
+        "rtpengine_answer_transport_protocol": "RTP/SAVP",
+        "rtpengine_sdes": RTPENGINE_SDES_AES_CM_128_ONLY,
+        "rtpengine_dtls": "disable",
+        "transport_policies": [{"name": "plain-tcp-peer", "match": "*", "transport": "tcp"}],
+        "expected_log_markers": {
+            "log.tls": ["TLS CONNECTED"],
+            "log.tcp": ["TCP CONNECTED"],
+            "log.sip": ["a=crypto:", "RTP/SAVP", "RTP/AVP"],
+            "log.media": ["RTPENGINE MEDIA SECURITY", "offer_transport=RTP/AVP", "answer_transport=RTP/SAVP"],
+        },
+    },
+    "udp-rtp-to-tls-srtp": {
+        "caller": "plain-udp-a",
+        "callee": "secure-peer-b",
+        "sip_transport": "udp,tls",
+        "uac_transport": "udp",
+        "uas_transport": "tls",
+        "media_backend": "rtpengine",
+        "media_codec": "PCMU",
+        "hold_ms": 10000,
+        "uas_srtp": True,
+        "rtcp_enabled": False,
+        "rtpengine_offer_transport_protocol": "RTP/SAVP",
+        "rtpengine_answer_transport_protocol": "RTP/AVP",
+        "rtpengine_sdes": RTPENGINE_SDES_AES_CM_128_ONLY,
+        "rtpengine_dtls": "disable",
+        "transport_policies": [{"name": "secure-tls-peer", "match": "*", "transport": "tls"}],
+        "expected_log_markers": {
+            "log.tls": ["TLS CONNECTED"],
+            "log.sip": ["RTP/SAVP", "RTP/AVP"],
+            "log.media": ["RTPENGINE MEDIA SECURITY", "offer_transport=RTP/SAVP", "answer_transport=RTP/AVP"],
+        },
+    },
 }
 PROFILE_DESCRIPTIONS = {
     "basic-signalling": "One SIPp A -> B2BUA -> registered SIPp B call without RTP replay.",
@@ -340,6 +624,22 @@ PROFILE_DESCRIPTIONS = {
     "esbc-static-trunk-route": "Enterprise SBC-style static trunk route from SIPp A through B2BUA to SIPp B without registrar lookup.",
     "esbc-e164-route-policy": "Enterprise SBC-style E.164 prefix route policy from SIPp A through B2BUA to SIPp B.",
     "esbc-trunk-failure": "Enterprise SBC-style trunk failure propagation when the outbound trunk returns 503.",
+    "esbc-trunk-failover": "Route through a healthy secondary trunk when the primary trunk is administratively down.",
+    "esbc-header-normalization": "Remove and add configured outbound SIP headers before sending the peer-leg INVITE.",
+    "esbc-e164-normalization": "Normalize an international access prefix to E.164 before route-policy evaluation.",
+    "esbc-hunt-group": "Distribute two calls across a round-robin hunt group and verify member counters.",
+    "esbc-call-admission": "Reject a call with 503 when the configured concurrent-call admission limit is exhausted.",
+    "esbc-trunk-metrics": "Complete one trunk-group call and verify per-trunk attempt and success counters.",
+    "tls-transport-policy": "Register and complete a B2BUA call over TLS on both realms using a transport policy.",
+    "tcp-connection-reuse": "Complete a TCP B2BUA call and verify PlaySBC reuses its peer transport connection.",
+    "tcp-connection-failure": "Route to an unreachable TCP peer and verify transport failure plus 480 propagation.",
+    "rtpengine-control-failure": "Use an unreachable RTPengine control endpoint and require a deterministic 488 response.",
+    "rtpengine-port-exhaustion": "Set media-session capacity to zero and require deterministic 503 admission rejection.",
+    "rtpengine-interface-failure": "Request missing RTPengine logical interfaces and require deterministic 488 failure.",
+    "rtcp-receiver-quality": "Send RTCP receiver reports and validate parsed loss and jitter quality analytics.",
+    "tls-srtp-to-udp-rtp": "Bridge a core TLS/SRTP leg to a peer SIP-over-UDP/RTP leg through RTPengine.",
+    "tls-srtp-to-tcp-rtp": "Bridge a core TLS/SRTP leg to a peer SIP-over-TCP/RTP leg through RTPengine.",
+    "udp-rtp-to-tls-srtp": "Bridge a core SIP-over-UDP/RTP leg to a peer TLS/SRTP leg through RTPengine.",
 }
 
 
@@ -650,7 +950,10 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
 
 
 def sipp_transport_args(args: argparse.Namespace, role: str = "client") -> List[str]:
-    if str(getattr(args, "sip_transport", "udp")).lower() != "tcp":
+    transport = str(getattr(args, "sip_transport", "udp")).lower()
+    if transport == "tls":
+        return ["-t", "l1"] if role == "server" else ["-t", "ln"]
+    if transport != "tcp":
         return []
     if role == "server":
         return ["-t", "t1"]
@@ -706,6 +1009,7 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
     config = {
         "sip_ip": args.host,
         "sip_port": args.server_port,
+        "tls_port": args.server_port,
         "sip_transport": args.sip_transport,
         "rtp_min": args.server_rtp_min,
         "rtp_max": args.server_rtp_max,
@@ -716,11 +1020,28 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "bridge_rooms": ["bridge"],
         "b2bua_routes": effective_b2bua_routes(args),
         "route_policies": effective_route_policies(args),
+        "trunk_groups": render_harness_config_templates(getattr(args, "trunk_groups", []), args),
+        "hunt_groups": render_harness_config_templates(getattr(args, "hunt_groups", []), args),
+        "number_normalization": getattr(args, "number_normalization", []),
+        "header_normalization": getattr(args, "header_normalization", {}),
+        "transport_policies": getattr(args, "transport_policies", []),
+        "call_admission": getattr(args, "call_admission", {}),
         "b2bua_ladder_logs": args.ladder_enabled,
         "media_backend": args.media_backend,
         "rtpengine_url": args.rtpengine_url,
         "rtpengine_timeout": args.rtpengine_timeout,
+        "rtpengine_directions": getattr(args, "rtpengine_directions", []),
+        "rtpengine_max_sessions": getattr(args, "rtpengine_max_sessions", -1),
+        "rtpengine_offer_transport_protocol": getattr(args, "rtpengine_offer_transport_protocol", ""),
+        "rtpengine_answer_transport_protocol": getattr(args, "rtpengine_answer_transport_protocol", ""),
+        "rtpengine_sdes": getattr(args, "rtpengine_sdes", []),
+        "rtpengine_dtls": getattr(args, "rtpengine_dtls", ""),
+        "media_quality": getattr(args, "media_quality", {}),
         "reject_unknown_routes": args.reject_unknown_routes,
+        "tls_certfile": getattr(args, "tls_certfile", ""),
+        "tls_keyfile": getattr(args, "tls_keyfile", ""),
+        "tls_cafile": getattr(args, "tls_cafile", ""),
+        "tls_verify_peer": getattr(args, "tls_verify_peer", False),
         "debug": True,
     }
     values_path = work_dir / "helm-values.yaml"
@@ -863,7 +1184,7 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
             uac_payloads, uac_rtpmaps = uac_sdp_payloads(args)
             text = text.replace("[uac_sdp_payloads]", uac_payloads)
             text = text.replace("[uac_sdp_rtpmaps]", uac_rtpmaps)
-            if str(getattr(args, "sip_transport", "udp")).lower() == "tcp":
+            if str(getattr(args, "uac_transport", "") or getattr(args, "sip_transport", "udp")).lower() in {"tcp", "tls"}:
                 text = re.sub(
                     r"(?m)^(\s+(?:ACK|BYE) sip:\[service\]@\[remote_ip\]:\[remote_port\]) SIP/2\.0$",
                     r"\1;transport=[transport] SIP/2.0",
@@ -873,6 +1194,36 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
             uas_payloads, uas_rtpmaps = uas_sdp_payloads(args)
             text = text.replace("[uas_sdp_payloads]", uas_payloads)
             text = text.replace("[uas_sdp_rtpmaps]", uas_rtpmaps)
+        secure_leg = bool(
+            getattr(args, "uac_srtp", False) if attr_name == "uac_scenario" else getattr(args, "uas_srtp", False)
+        )
+        if secure_leg:
+            text = text.replace("[media_port]", "[rtpstream_audio_port]")
+            text = text.replace(" RTP/AVP ", " RTP/SAVP ")
+            text = text.replace(
+                "      a=ptime:20",
+                (
+                    "      a=crypto:[cryptotag1audio] "
+                    "[cryptosuiteaescm128sha1801audio] inline:[cryptokeyparams1audio]\n"
+                    "      a=rtcp:[rtpstream_audio_port+1]\n"
+                    "      a=ptime:20"
+                ),
+            )
+            # SIPp's SRTP echo path selects the negotiated remote SDES key for
+            # transmit. rtp_stream uses the locally offered key, which causes
+            # RTPengine to reject the packets as authentication failures.
+            secure_action = '<exec rtp_echo="startaudio,0,PCMU/8000"/>'
+            text = re.sub(
+                r"\n\s*<nop>\s*<action>\s*<exec play_pcap_audio=\"[^\"]+\"/>\s*</action>\s*</nop>\s*",
+                (
+                    "\n  <nop>\n"
+                    "    <action>\n"
+                    f"      {secure_action}\n"
+                    "    </action>\n"
+                    "  </nop>\n\n"
+                ),
+                text,
+            )
         destination.write_text(text, encoding="ISO-8859-1")
         setattr(args, attr_name, destination.resolve())
 
@@ -895,7 +1246,7 @@ def prepare_registration_scenario(args: argparse.Namespace, run_dir: Path) -> No
 
 
 def prepare_transport_scenario(args: argparse.Namespace, run_dir: Path) -> None:
-    if str(getattr(args, "sip_transport", "udp")).lower() != "tcp":
+    if str(getattr(args, "uac_transport", "") or getattr(args, "sip_transport", "udp")).lower() not in {"tcp", "tls"}:
         return
     source = Path(args.uac_scenario)
     text = source.read_text(encoding="ISO-8859-1")
@@ -940,7 +1291,12 @@ def build_media_player_commands(args: argparse.Namespace) -> List[Tuple[str, Lis
 def should_run_rtcp(args: argparse.Namespace) -> bool:
     single_call = args.calls == 1 and args.rate == 1
     load_canary = str(getattr(args, "profile", "")) == "load-5cps-60s-rtpengine-transcoding"
-    return bool(args.media_enabled and args.hold_ms >= 5000 and (single_call or load_canary))
+    return bool(
+        getattr(args, "rtcp_enabled", True)
+        and args.media_enabled
+        and args.hold_ms >= 5000
+        and (single_call or load_canary)
+    )
 
 
 def wait_for_rtcp_anchor_ports(work_dir: Path, args: argparse.Namespace, timeout: float = 8.0) -> Tuple[int, int]:
@@ -2668,6 +3024,9 @@ def collect_work_logs(log_dir: Path, work_dir: Path, args: Optional[argparse.Nam
                 append_file_section(log_dir, "log.sip", f"{leg.upper()} SIP TRACE {trace.name}", trace)
         for trace in sorted(leg_dir.glob("*_logs.log")):
             append_file_section(log_dir, "log.sipp", f"{leg.upper()} EVENT TRACE {trace.name}", trace)
+        for trace in sorted(leg_dir.glob("*srtp*")):
+            if trace.is_file() and trace.suffix != ".raw" and trace.stat().st_size <= 1_000_000:
+                append_file_section(log_dir, "log.media", f"{leg.upper()} SRTP TRACE {trace.name}", trace)
 
     for media_log in sorted(work_dir.glob("media-*.log")):
         append_file_section(log_dir, "log.media", f"MEDIA PLAYER {media_log.name}", media_log)
@@ -2766,7 +3125,7 @@ def main() -> int:
     parser.add_argument("--list-profiles", action="store_true", help="List named B2BUA SIPp test profiles")
     parser.add_argument("--host", default=BASE_DEFAULTS["host"])
     parser.add_argument("--server-port", type=int, default=BASE_DEFAULTS["server_port"])
-    parser.add_argument("--sip-transport", choices=("udp", "tcp", "udp,tcp"), default=BASE_DEFAULTS["sip_transport"], help="PlaySBC SIP listener transport for this run")
+    parser.add_argument("--sip-transport", choices=("udp", "tcp", "tls", "udp,tcp"), default=BASE_DEFAULTS["sip_transport"], help="PlaySBC SIP listener transport for this run")
     parser.add_argument("--uac-port", type=int, default=BASE_DEFAULTS["uac_port"])
     parser.add_argument("--uas-port", type=int, default=BASE_DEFAULTS["uas_port"])
     parser.add_argument("--register-port", type=int, default=BASE_DEFAULTS["register_port"])

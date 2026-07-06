@@ -1442,7 +1442,8 @@ Content-Length: 0
         self.assertIn("playsbc:", values)
         self.assertIn("route_policies:", values)
         self.assertIn("server.yaml: |", configmap)
-        self.assertIn("toYaml .Values.playsbc.config", configmap)
+        self.assertIn("deepCopy .Values.playsbc.config", configmap)
+        self.assertIn("toYaml $config", configmap)
         self.assertIn("/etc/playsbc/server.yaml", deployment)
 
     def test_b2bua_profiles_are_listed(self):
@@ -1737,6 +1738,27 @@ Content-Length: 0
         self.assertIn("Robot-style execution log", report)
         self.assertIn("Keyword / Phase", report)
 
+    def test_regression_report_embeds_single_call_sip_ladder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            (bundle / "log.sip").write_text(
+                "2026-07-05 10:00:00 | B2BUA SIP LADDER | call_id=call-1\n"
+                "SIP LADDER\nStep       SIPp A       B2BUA       SIPp B\n"
+                "2026-07-05 10:00:01 | SIP RX REQUEST\n",
+                encoding="utf-8",
+            )
+            ladder = run_regression_suite.read_sip_ladder(bundle)
+            row = run_regression_suite.ReportRow(
+                "B2BUA basic-signalling", "basic-signalling", "passed", 0, 1.0, str(bundle), "cmd",
+                sip_ladder=ladder,
+            )
+
+            report = run_regression_suite.render_html([row], "2026-07-05", "ladder-report")
+
+            self.assertIn("SIP LADDER", ladder)
+            self.assertIn("<h2>SIP Ladder</h2>", report)
+            self.assertIn("SIPp A", report)
+
     def test_regression_report_reads_measured_robot_phases_from_platform_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
@@ -2017,7 +2039,10 @@ Content-Length: 0
         self.assertIn("password is required", detail)
 
     def test_regression_suite_can_target_all_b2bua_profiles(self):
-        self.assertEqual(len(run_regression_suite.ALL_B2BUA_PROFILES), 26)
+        self.assertEqual(
+            len(run_regression_suite.ALL_B2BUA_PROFILES),
+            len(run_b2bua_sipp_smoke.B2BUA_PROFILES) + 1,
+        )
         self.assertEqual(
             set(run_regression_suite.ALL_B2BUA_PROFILES),
             set(run_b2bua_sipp_smoke.B2BUA_PROFILES) | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
@@ -2042,6 +2067,13 @@ Content-Length: 0
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("tls-transport-policy", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("rtpengine-port-exhaustion", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("rtcp-receiver-quality", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("tls-srtp-to-udp-rtp", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("tls-srtp-to-tcp-rtp", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("udp-rtp-to-tls-srtp", run_regression_suite.ALL_B2BUA_PROFILES)
 
     def test_real_topology_profile_uses_one_regression_bundle(self):
         command = run_regression_suite.real_topology_command(
@@ -2061,6 +2093,18 @@ Content-Length: 0
             )
             self.assertIn("run_dual_realm_profile.py", " ".join(command))
             self.assertEqual(command[command.index("--profile") + 1], profile)
+            self.assertIn("--skip-build", command)
+
+    def test_first_dual_realm_profile_can_rebuild_current_images(self):
+        command = run_regression_suite.dual_realm_command(
+            "basic-signalling",
+            "regression-test-basic-signalling",
+            Path("/tmp/playsbc-regression"),
+            rebuild=True,
+        )
+
+        self.assertIn("--rebuild", command)
+        self.assertNotIn("--skip-build", command)
 
     def test_direct_rtpengine_profile_blocks_before_sipp_when_down(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2405,6 +2449,63 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(uac[uac.index("-i") + 1], "172.28.0.10")
         self.assertEqual(uas[uas.index("-i") + 1], "192.168.28.30")
         self.assertEqual(args.rtpengine_url, "udp://172.28.0.40:2223")
+
+    def test_dual_realm_mixed_tls_srtp_profile_uses_independent_leg_transports(self):
+        args = run_dual_realm_profile.profile_args("tls-srtp-to-tcp-rtp", "secure-call", "b2bua-Regression")
+        uac = run_dual_realm_profile.uac_command(args, "/output/work/sipp-a-uac/secure.xml")
+        uas = run_dual_realm_profile.uas_command(args, "/output/work/sipp-b-uas/plain.xml")
+
+        self.assertEqual(args.uac_transport, "tls")
+        self.assertEqual(args.uas_transport, "tcp")
+        self.assertEqual(uac[1], "172.28.0.20:5061")
+        self.assertEqual(uac[uac.index("-t") + 1], "ln")
+        self.assertEqual(uas[uas.index("-t") + 1], "t1")
+        self.assertEqual(args.rtpengine_offer_transport_protocol, "RTP/AVP")
+        self.assertEqual(args.rtpengine_answer_transport_protocol, "RTP/SAVP")
+        self.assertIn("no-AEAD_AES_256_GCM", args.rtpengine_sdes)
+        self.assertIn("no-NULL_HMAC_SHA1_32", args.rtpengine_sdes)
+        self.assertNotIn("no-AES_CM_128_HMAC_SHA1_80", args.rtpengine_sdes)
+        self.assertEqual(args.rtpengine_dtls, "disable")
+
+    def test_secure_media_profile_generates_savp_and_plain_avp_scenarios(self):
+        args = run_dual_realm_profile.profile_args("tls-srtp-to-udp-rtp", "secure-call", "b2bua-Regression")
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "sipp-a-uac").mkdir()
+            (work / "sipp-b-uas").mkdir()
+            run_b2bua_sipp_smoke.prepare_media_scenarios(args, work)
+            secure = Path(args.uac_scenario).read_text(encoding="ISO-8859-1")
+            plain = Path(args.uas_scenario).read_text(encoding="ISO-8859-1")
+
+        self.assertIn("RTP/SAVP", secure)
+        self.assertIn("cryptosuiteaescm128sha1801audio", secure)
+        self.assertIn("[rtpstream_audio_port]", secure)
+        self.assertNotIn("play_pcap_audio", secure)
+        self.assertIn('rtp_echo="startaudio,0,PCMU/8000"', secure)
+        self.assertIn("RTP/AVP", plain)
+        self.assertIn("play_pcap_audio", plain)
+
+    def test_sipp_docker_image_is_built_with_tls_and_pcap(self):
+        dockerfile = (ROOT / "docker" / "sipp.Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("SIPP_VERSION=v3.7.7", dockerfile)
+        self.assertIn("-DUSE_SSL=1", dockerfile)
+        self.assertIn("-DUSE_PCAP=1", dockerfile)
+
+    def test_kubernetes_chart_has_health_secret_rtpengine_and_affinity_lab(self):
+        chart = ROOT / "charts" / "playsbc"
+        deployment = (chart / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+        configmap = (chart / "templates" / "configmap.yaml").read_text(encoding="utf-8")
+        rtpengine = (chart / "templates" / "rtpengine.yaml").read_text(encoding="utf-8")
+        kind_values = (ROOT / "configs" / "kubernetes" / "kind-values.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("readinessProbe:", deployment)
+        self.assertIn("livenessProbe:", deployment)
+        self.assertIn("users_file", configmap)
+        self.assertIn("rtpengine_url", configmap)
+        self.assertIn("status.hostIP", rtpengine)
+        self.assertIn("sessionAffinity", rtpengine)
+        self.assertIn("rtpengine:\n  enabled: true", kind_values)
 
     def test_dual_realm_load_profiles_use_bounded_media_capture(self):
         internal = run_dual_realm_profile.profile_args("load-5cps-60s", "internal-load", "b2bua-Regression")

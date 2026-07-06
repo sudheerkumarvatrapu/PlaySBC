@@ -1,0 +1,33 @@
+image:
+  repository: playsbc
+  tag: local
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+
+authSecret:
+  enabled: true
+  users:
+    "1001": change-me-in-a-private-values-file
+
+rtpengine:
+  enabled: true
+  image:
+    repository: playsbc/rtpengine
+    tag: local
+    pullPolicy: IfNotPresent
+  hostNetwork: true
+  sessionAffinity: ClientIP
+
+playsbc:
+  config:
+    sip_transport: udp,tcp
+    health_port: 8080
+    rtpengine_directions: []
+    route_policies:
+      - name: registered-endpoints
+        match: "*"
+        target: registration
+        priority: 10

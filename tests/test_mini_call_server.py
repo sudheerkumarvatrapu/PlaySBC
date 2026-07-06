@@ -5,7 +5,15 @@ import unittest
 from pathlib import Path
 
 import mini_call_server as server
-from rtp.rtcp import RTCP_SDES, RTCP_SR, build_compound_sender_report, parse_compound_rtcp
+from rtp.rtcp import (
+    RTCP_RR,
+    RTCP_SDES,
+    RTCP_SR,
+    build_compound_receiver_report,
+    build_compound_sender_report,
+    parse_compound_rtcp,
+    parse_receiver_reports,
+)
 
 
 class SipParsingTests(unittest.TestCase):
@@ -567,6 +575,94 @@ class RoutingEngineTests(unittest.TestCase):
         self.assertIsNotNone(route)
         self.assertEqual(route.source, "static")
         self.assertEqual(route.target.address, ("127.0.0.1", 27000))
+
+    def test_trunk_group_skips_down_primary_and_counts_secondary(self):
+        engine = server.RoutingEngine(
+            ({"name": "carrier", "match": "*", "target": "trunk-group:carrier"},),
+            {},
+            (
+                {
+                    "name": "carrier",
+                    "members": [
+                        {"name": "primary", "uri": "sip:{user}@192.0.2.10:5060", "state": "down"},
+                        {"name": "secondary", "uri": "sip:{user}@192.0.2.20:5060", "priority": 20},
+                    ],
+                },
+            ),
+        )
+
+        route = engine.resolve("18005550100", {})
+
+        self.assertIsNotNone(route)
+        self.assertEqual(route.trunk_name, "secondary")
+        self.assertTrue(engine.admit(route))
+        engine.record_outcome(route, True)
+        engine.release(route)
+        metrics = engine.metrics()
+        self.assertEqual(metrics["playsbc_trunk_secondary_attempts_total"], 1)
+        self.assertEqual(metrics["playsbc_trunk_secondary_successes_total"], 1)
+
+    def test_number_header_and_transport_policies_apply_before_routing(self):
+        engine = server.RoutingEngine(
+            ({"name": "e164", "match": "+1800*", "target": "sip:{user}@192.0.2.30:5060"},),
+            {},
+            number_normalization=({"name": "00-to-plus", "pattern": "^00", "replacement": "+"},),
+            header_normalization={"remove": ["Subject"], "set": {"X-Original": "{original_user}"}},
+            transport_policies=({"match": "+1800*", "transport": "tls"},),
+        )
+
+        route = engine.resolve("0018005550100", {})
+        headers = engine.normalize_headers({"Subject": "remove", "Via": "keep"}, route, "call-1")
+
+        self.assertEqual(route.routed_user, "+18005550100")
+        self.assertEqual(route.target.transport, "tls")
+        self.assertNotIn("Subject", headers)
+        self.assertEqual(headers["X-Original"], "0018005550100")
+
+    def test_round_robin_hunt_and_zero_capacity_admission(self):
+        hunt = server.RoutingEngine(
+            ({"name": "support", "match": "support", "target": "hunt-group:support"},),
+            {},
+            hunt_groups=(
+                {
+                    "name": "support",
+                    "strategy": "round-robin",
+                    "members": [
+                        {"name": "one", "uri": "sip:{user}@192.0.2.1:5060"},
+                        {"name": "two", "uri": "sip:{user}@192.0.2.2:5060"},
+                    ],
+                },
+            ),
+        )
+        self.assertEqual(hunt.resolve("support", {}).trunk_name, "one")
+        self.assertEqual(hunt.resolve("support", {}).trunk_name, "two")
+
+        admission = server.RoutingEngine(
+            ({"name": "lab", "match": "*", "target": "sip:{user}@192.0.2.1:5060"},),
+            {},
+            call_admission={"enabled": True, "max_concurrent_calls": 0},
+        )
+        route = admission.resolve("blocked", {})
+        self.assertFalse(admission.admit(route))
+        self.assertEqual(admission.metrics()["playsbc_admission_rejections_total"], 1)
+
+    def test_receiver_report_exposes_loss_and_jitter_analytics(self):
+        compound = build_compound_receiver_report(
+            reporter_ssrc=1,
+            source_ssrc=2,
+            cname="quality@playsbc",
+            fraction_lost=64,
+            cumulative_lost=3,
+            highest_sequence=100,
+            jitter=80,
+        )
+        packets = parse_compound_rtcp(compound)
+        reports = parse_receiver_reports(packets)
+
+        self.assertEqual(packets[0].packet_type, RTCP_RR)
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0].loss_percent, 25.0)
+        self.assertEqual(reports[0].jitter_ms, 10.0)
 
 
 class B2BUAFlowLogTests(unittest.TestCase):
