@@ -27,5 +27,8 @@ playsbc:
     rtpengine_directions:
       - core
       - peer
+    rtpengine_interfaces:
+      - core
+      - peer
     reject_unknown_routes: true
     debug: true

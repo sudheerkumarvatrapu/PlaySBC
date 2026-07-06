@@ -288,6 +288,7 @@ def render_helm_config(args: SimpleNamespace, work_dir: Path, env: dict[str, str
         "rtpengine_url": args.rtpengine_url,
         "rtpengine_timeout": args.rtpengine_timeout,
         "rtpengine_directions": args.rtpengine_directions,
+        "rtpengine_interfaces": args.rtpengine_interfaces,
         "rtpengine_max_sessions": args.rtpengine_max_sessions,
         "rtpengine_offer_transport_protocol": args.rtpengine_offer_transport_protocol,
         "rtpengine_answer_transport_protocol": args.rtpengine_answer_transport_protocol,

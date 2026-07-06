@@ -396,6 +396,7 @@ class ConfigTests(unittest.TestCase):
                     '"media_backend": "rtpengine", '
                     '"rtpengine_url": "udp://127.0.0.1:2223", '
                     '"rtpengine_directions": ["core", "peer"], '
+                    '"rtpengine_interfaces": ["core", "peer"], '
                     '"sip_advertised_ip": "172.28.0.20", '
                     '"b2bua_advertised_ip": "192.168.28.20", '
                     '"rtpengine_timeout": 1.5}'
@@ -424,6 +425,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.rtpengine_url, "udp://127.0.0.1:2223")
             self.assertEqual(config.rtpengine_timeout, 1.5)
             self.assertEqual(config.rtpengine_directions, ("core", "peer"))
+            self.assertEqual(config.rtpengine_interfaces, ("core", "peer"))
             self.assertEqual(config.sip_advertised_ip, "172.28.0.20")
             self.assertEqual(config.b2bua_advertised_ip, "192.168.28.20")
 
@@ -443,12 +445,14 @@ class ConfigTests(unittest.TestCase):
             sip_advertised_ip="172.28.0.20",
             b2bua_advertised_ip="192.168.28.20",
             rtpengine_directions=("core", "peer"),
+            rtpengine_interfaces=("core", "peer"),
         )
 
         self.assertIn("192.168.28.20:5060", protocol.make_via_header())
         self.assertEqual(protocol.local_contact_uri(), "sip:b2bua@192.168.28.20:5060")
         self.assertEqual(protocol.sip_advertised_ip, "172.28.0.20")
         self.assertEqual(protocol.rtpengine_directions, ("core", "peer"))
+        self.assertEqual(protocol.rtpengine_interfaces, frozenset(("core", "peer")))
 
     def test_load_yaml_config_file(self):
         config = server.load_config_file(str(Path(__file__).resolve().parents[1] / "configs" / "config.b2bua.example.yaml"))

@@ -89,6 +89,7 @@ class ServerConfig:
     rtpengine_url: str = "udp://127.0.0.1:2223"
     rtpengine_timeout: float = 3.0
     rtpengine_directions: Tuple[str, ...] = field(default_factory=tuple)
+    rtpengine_interfaces: Tuple[str, ...] = field(default_factory=tuple)
     rtpengine_max_sessions: int = -1
     rtpengine_offer_transport_protocol: str = ""
     rtpengine_answer_transport_protocol: str = ""
@@ -137,6 +138,7 @@ SERVER_CONFIG_KEYS = {
     "rtpengine_url",
     "rtpengine_timeout",
     "rtpengine_directions",
+    "rtpengine_interfaces",
     "rtpengine_max_sessions",
     "rtpengine_offer_transport_protocol",
     "rtpengine_answer_transport_protocol",
@@ -1434,6 +1436,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         sip_advertised_ip: str = "",
         b2bua_advertised_ip: str = "",
         rtpengine_directions: Tuple[str, ...] = (),
+        rtpengine_interfaces: Tuple[str, ...] = (),
         rtpengine_max_sessions: int = -1,
         rtpengine_offer_transport_protocol: str = "",
         rtpengine_answer_transport_protocol: str = "",
@@ -1458,6 +1461,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.media_backend = media_backend
         self.rtpengine_client = rtpengine_client
         self.rtpengine_directions = rtpengine_directions
+        self.rtpengine_interfaces = frozenset(rtpengine_interfaces)
         self.reject_unknown_routes = reject_unknown_routes
         self.nonces: Dict[str, float] = {}
         self.transport: Optional[asyncio.DatagramTransport] = None
@@ -2059,6 +2063,23 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
         flow_log.write("MEDIA BACKEND", f"backend=rtpengine target={target.uri}")
+        unavailable_interfaces = [
+            direction
+            for direction in self.rtpengine_directions
+            if self.rtpengine_interfaces and direction not in self.rtpengine_interfaces
+        ]
+        if unavailable_interfaces:
+            detail = (
+                f"requested={','.join(self.rtpengine_directions)} "
+                f"available={','.join(sorted(self.rtpengine_interfaces))} "
+                f"unavailable={','.join(unavailable_interfaces)}"
+            )
+            self.logger.media("RTPENGINE INTERFACE UNAVAILABLE", detail, call_id=inbound_call_id)
+            flow_log.write("RTPENGINE OFFER FAILED", f"interface_unavailable {detail}")
+            flow_log.sip("B2BUA", "SIPp A", "488 Not Acceptable Here")
+            self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
+            flow_log.render_ladder()
+            return
         if (
             self.rtpengine_offer_transport_protocol
             or self.rtpengine_answer_transport_protocol
@@ -3351,7 +3372,7 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a JSON object")
         return dict(value)
-    if key in {"rtpengine_directions", "rtpengine_sdes"}:
+    if key in {"rtpengine_directions", "rtpengine_interfaces", "rtpengine_sdes"}:
         if isinstance(value, str):
             return tuple(item.strip() for item in value.split(",") if item.strip())
         if isinstance(value, list):
@@ -3435,6 +3456,8 @@ def validate_config(config: ServerConfig) -> None:
         raise ValueError("rtpengine_directions must contain exactly two interface names")
     if any(not direction.strip() for direction in config.rtpengine_directions):
         raise ValueError("rtpengine_directions interface names must not be empty")
+    if any(not interface.strip() for interface in config.rtpengine_interfaces):
+        raise ValueError("rtpengine_interfaces names must not be empty")
     if config.rtpengine_max_sessions < -1:
         raise ValueError("rtpengine_max_sessions must be -1 (unlimited) or greater")
     supported_media_transports = {"", "RTP/AVP", "RTP/SAVP", "RTP/AVPF", "RTP/SAVPF"}
@@ -3645,6 +3668,7 @@ async def main() -> None:
         sip_advertised_ip=config.sip_advertised_ip,
         b2bua_advertised_ip=config.b2bua_advertised_ip,
         rtpengine_directions=config.rtpengine_directions,
+        rtpengine_interfaces=config.rtpengine_interfaces,
         rtpengine_max_sessions=config.rtpengine_max_sessions,
         rtpengine_offer_transport_protocol=config.rtpengine_offer_transport_protocol,
         rtpengine_answer_transport_protocol=config.rtpengine_answer_transport_protocol,

@@ -135,9 +135,15 @@ REGISTER sip:192.168.28.20:5060 SIP/2.0
 Content-Length: 0
 
 ----------------------------------------------- 2026-07-04T04:36:46.324000
-UDP message received [80] bytes :
+TLS message received [80] bytes :
 
 SIP/2.0 401 Unauthorized
+Content-Length: 0
+
+---------- 2026-07-04T04:36:46.326000Z
+UDP message sent [90] bytes:
+
+OPTIONS sip:192.168.28.20:5060 SIP/2.0
 Content-Length: 0
 
 """
@@ -146,9 +152,10 @@ Content-Length: 0
             path.write_text(trace, encoding="utf-8")
             messages = run_b2bua_sipp_smoke.sipp_trace_messages(path)
 
-        self.assertEqual([message[1] for message in messages], ["sent", "received"])
+        self.assertEqual([message[1] for message in messages], ["sent", "received", "sent"])
         self.assertTrue(messages[0][2].startswith(b"REGISTER "))
         self.assertTrue(messages[1][2].startswith(b"SIP/2.0 401"))
+        self.assertTrue(messages[2][2].startswith(b"OPTIONS "))
 
     def test_all_xml_scenarios_are_well_formed(self):
         scenarios = ROOT / "sipp" / "scenarios"

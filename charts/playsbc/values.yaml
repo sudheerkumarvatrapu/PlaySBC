@@ -70,6 +70,7 @@ playsbc:
     rtpengine_url: udp://rtpengine:2223
     rtpengine_timeout: 3.0
     rtpengine_directions: []
+    rtpengine_interfaces: []
     rtpengine_max_sessions: -1
     rtpengine_offer_transport_protocol: ""
     rtpengine_answer_transport_protocol: ""

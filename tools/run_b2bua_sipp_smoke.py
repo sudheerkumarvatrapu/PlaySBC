@@ -123,6 +123,7 @@ BASE_DEFAULTS = {
     "rtpengine_url": "udp://127.0.0.1:2223",
     "rtpengine_timeout": 3.0,
     "rtpengine_directions": ["core", "peer"],
+    "rtpengine_interfaces": ["core", "peer"],
     "rtpengine_max_sessions": -1,
     "rtpengine_offer_transport_protocol": "",
     "rtpengine_answer_transport_protocol": "",
@@ -519,7 +520,9 @@ B2BUA_PROFILES = {
         "start_uas": False,
         "uac_scenario": "b2bua_uac_expect_488.xml",
         "route_policies": STATIC_TRUNK_ROUTE_POLICY,
-        "expected_log_markers": {"log.media": ["RTPENGINE OFFER FAILED"]},
+        "expected_log_markers": {
+            "log.media": ["RTPENGINE INTERFACE UNAVAILABLE", "RTPENGINE OFFER FAILED"]
+        },
     },
     "rtcp-receiver-quality": {
         "caller": "quality-a",
@@ -1031,6 +1034,7 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "rtpengine_url": args.rtpengine_url,
         "rtpengine_timeout": args.rtpengine_timeout,
         "rtpengine_directions": getattr(args, "rtpengine_directions", []),
+        "rtpengine_interfaces": getattr(args, "rtpengine_interfaces", []),
         "rtpengine_max_sessions": getattr(args, "rtpengine_max_sessions", -1),
         "rtpengine_offer_transport_protocol": getattr(args, "rtpengine_offer_transport_protocol", ""),
         "rtpengine_answer_transport_protocol": getattr(args, "rtpengine_answer_transport_protocol", ""),
@@ -1995,9 +1999,10 @@ def rtcp_media_packets(rtp_packets: List[PcapPacket], interval_seconds: float = 
 
 
 def parse_iso_timestamp(value: str) -> float:
+    value = value.strip().removesuffix("Z")
     for timestamp_format in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f"):
         try:
-            return datetime.strptime(value.strip(), timestamp_format).timestamp()
+            return datetime.strptime(value, timestamp_format).timestamp()
         except ValueError:
             continue
     return time.time()
@@ -2013,8 +2018,8 @@ def parse_log_timestamp(line: str) -> float:
 def sipp_trace_protocol_messages(path: Path) -> List[Tuple[float, str, str, bytes]]:
     text = path.read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(
-        r"^-{10,}\s+([0-9T :.\-]+)\n"
-        r"(UDP|TCP) message (sent|received) "
+        r"^-{10,}\s+([0-9T :.\-]+Z?)\n"
+        r"(UDP|TCP|TLS) message (sent|received) "
         r"(?:\[\d+\]\s*bytes|\(\d+\s*bytes\))\s*:\n\n",
         re.MULTILINE,
     )
