@@ -48,6 +48,23 @@ services:
       peer:
         ipv4_address: 192.168.28.20
 
+  rasa-mock:
+    image: playsbc-real-topology-playsbc:latest
+    command:
+      - python3
+      - /app/tools/mock_rasa_server.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5005"
+      - --reply
+      - "PlaySBC AI bot accepted {message} from {caller} to {callee}"
+    depends_on:
+      - playsbc
+    networks:
+      core:
+        ipv4_address: 172.28.0.60
+
   sipp-b:
     <<: *sipp-common
     depends_on:
@@ -216,7 +233,7 @@ services:
   capture-signalling:
     <<: *sipp-common
     entrypoint: ["tcpdump"]
-    command: ["-U", "--immediate-mode", "-i", "any", "-s", "0", "-w", "/output/signalling.pcap", "port", "5060", "or", "port", "5061", "or", "port", "2223"]
+    command: ["-U", "--immediate-mode", "-i", "any", "-s", "0", "-w", "/output/signalling.pcap", "port", "5060", "or", "port", "5061", "or", "port", "2223", "or", "port", "5005"]
     cap_add:
       - NET_ADMIN
       - NET_RAW

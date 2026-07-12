@@ -67,6 +67,27 @@ class SipParsingTests(unittest.TestCase):
             "sip:1002@127.0.0.1:25082;transport=tcp",
         )
 
+    def test_route_policy_can_target_ai_voice_gateway(self):
+        engine = server.RoutingEngine(
+            (
+                {
+                    "name": "ai-rasa",
+                    "match": "ai-bot",
+                    "target": "ai-gateway:rasa-support",
+                    "priority": 5,
+                },
+            ),
+            {},
+        )
+
+        route = engine.resolve("ai-bot", {})
+
+        self.assertIsNotNone(route)
+        assert route is not None
+        self.assertEqual(route.source, "ai-gateway")
+        self.assertEqual(route.group_name, "rasa-support")
+        self.assertEqual(route.target.uri, "sip:rasa-support@ai-gateway.local:5060")
+
     def test_b2bua_outbound_transport_inherits_tcp_when_contact_omits_transport(self):
         protocol = server.SipServerProtocol(
             "127.0.0.1",
@@ -137,6 +158,32 @@ class SipParsingTests(unittest.TestCase):
         sdp = server.make_sdp("127.0.0.1", 30000, server.PCMA, dtmf_payload_type=101, payloads=(0, 8, 101))
         self.assertIn("m=audio 30000 RTP/AVP 8 0 101", sdp)
 
+    def test_yaml_config_accepts_ai_voice_gateway_route_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "server.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "route_policies:",
+                        "  - name: ai-rasa",
+                        "    match: ai-bot",
+                        "    target: ai-gateway:rasa-support",
+                        "    priority: 5",
+                        "ai_voice_gateway:",
+                        "  enabled: true",
+                        "  provider: rasa",
+                        "  rasa_webhook_url: http://127.0.0.1:5005/webhooks/rest/webhook",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = server.load_config_file(str(config_path))
+
+        self.assertTrue(config.ai_voice_gateway["enabled"])
+        self.assertEqual(config.ai_voice_gateway["provider"], "rasa")
+
 
 class CodecTests(unittest.TestCase):
     def test_choose_payload_prefers_default_when_remote_supports_it(self):
@@ -195,6 +242,31 @@ class RtcpTests(unittest.TestCase):
         self.assertEqual(destination, ("127.0.0.1", 27001))
         packets = parse_compound_rtcp(relayed)
         self.assertEqual(int.from_bytes(packets[0].payload[:4], "big"), outbound.ssrc)
+
+    def test_ai_gateway_local_endpoint_replies_to_rtcp_sender_report(self):
+        class DummyTransport:
+            def __init__(self):
+                self.sent = []
+
+            def sendto(self, packet, destination):
+                self.sent.append((packet, destination))
+
+        session = server.RtpSession("ai-call", "127.0.0.1", 30000, media_mode="ai-gateway")
+        session.rtcp_transport = DummyTransport()
+        report = build_compound_sender_report(
+            ssrc=0xC0DEC0DE,
+            cname="sipp-a@playsbc",
+            rtp_timestamp=8000,
+            packet_count=50,
+            octet_count=8000,
+        )
+
+        server.RtcpProtocol(session).datagram_received(report, ("127.0.0.1", 6001))
+
+        self.assertEqual(session.rtcp_packets_received, 1)
+        self.assertEqual(session.rtcp_packets_sent, 1)
+        _payload, destination = session.rtcp_transport.sent[0]
+        self.assertEqual(destination, ("127.0.0.1", 6001))
 
 
 class ResponseTests(unittest.TestCase):

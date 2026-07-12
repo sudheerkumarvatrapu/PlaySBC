@@ -2166,6 +2166,7 @@ Content-Length: 0
         self.assertIn("register-auth-success", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("register-auth-failure", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("dtmf-rfc4733", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("unknown-route", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("failed-outbound", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("cancel", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2561,6 +2562,19 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(uac[uac.index("-i") + 1], "172.28.0.10")
         self.assertEqual(uas[uas.index("-i") + 1], "192.168.28.30")
         self.assertEqual(args.rtpengine_url, "udp://172.28.0.40:2223")
+
+    def test_dual_realm_ai_profile_targets_rasa_mock_and_skips_peer_uas(self):
+        args = run_dual_realm_profile.profile_args("ai-rasa-lab", "ai-call", "b2bua-Regression")
+        uac = run_dual_realm_profile.uac_command(args, "/output/work/sipp-a-uac/ai.xml")
+
+        self.assertTrue(run_dual_realm_profile.needs_ai_mock(args))
+        self.assertFalse(args.start_uas)
+        self.assertFalse(args.register_callee)
+        self.assertIn("172.28.0.60:5005", args.ai_voice_gateway["rasa_webhook_url"])
+        self.assertEqual(uac[1], "172.28.0.20:5060")
+        self.assertIn("log.ai", run_regression_suite.B2BUA_LOG_FILES)
+        self.assertIn("log.ai", run_b2bua_sipp_smoke.LOG_FILES)
+        self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
 
     def test_dual_realm_mixed_tls_srtp_profile_uses_independent_leg_transports(self):
         args = run_dual_realm_profile.profile_args("tls-srtp-to-tcp-rtp", "secure-call", "b2bua-Regression")

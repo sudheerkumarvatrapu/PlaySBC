@@ -17,6 +17,17 @@ PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-cer
 - RTPengine anchoring, SDP rewrite, interface selection, transcoding, bidirectional SDES-SRTP/RTP interworking, and fault profiles
 - RTCP receiver-report loss/jitter analytics for single calls
 
+### AI Voice Gateway
+
+```text
+SIP caller -> PlaySBC AI route -> RTP media session -> STT/intent adapter -> Rasa REST -> TTS adapter/log prompt
+```
+
+- Route policies can target `ai-gateway:<bot-name>`.
+- Phase 1 uses a lab adapter: SIP/RTP is real, Rasa is called through its REST channel, and STT/TTS are logged adapter stages.
+- Regression includes `ai-rasa-lab`: SIPp A calls `ai-bot`, PlaySBC answers, sends a Rasa REST turn, logs `log.ai`, and captures SIP/RTP/HTTP evidence.
+- Real Rasa can replace the mock by changing `ai_voice_gateway.rasa_webhook_url`.
+
 ### Lab Platform
 
 - Dual-realm Docker topology: core `172.28.0.0/24`, peer `192.168.28.0/24`
@@ -39,11 +50,9 @@ PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-cer
 
 ### AI Voice Gateway
 
-```text
-Caller -> SIP/B2BUA -> RTP -> STT -> LLM -> TTS -> RTP
-```
-
-Keep AI behind a media adapter so the SIP/B2BUA core remains stable.
+- Real STT/TTS engines such as Whisper/Vosk/Piper/Coqui behind the current adapter boundary
+- Rasa callback or streaming channel support for longer bot responses
+- Bot-assisted B2BUA calls where the AI can join, transfer, or release calls
 
 ## Delivery Rule
 

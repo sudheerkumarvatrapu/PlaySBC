@@ -1,0 +1,88 @@
+import asyncio
+import json
+import unittest
+from unittest import mock
+
+from ai_gateway import AiVoiceConfig, AiVoiceGateway, DtmfIntentMapper, RasaRestClient, RasaRestConfig
+
+
+class FakeHttpResponse:
+    status = 200
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class RasaRestClientTests(unittest.TestCase):
+    def test_rasa_rest_client_posts_sender_message_and_metadata(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["timeout"] = timeout
+            captured["url"] = request.full_url
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["content_type"] = request.headers["Content-type"]
+            return FakeHttpResponse([{"text": "reply to hello"}])
+
+        client = RasaRestClient(
+            RasaRestConfig(
+                webhook_url="http://rasa.example/webhooks/rest/webhook",
+                timeout=2.0,
+            )
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            responses = client.send_message("call-1", "hello", {"caller": "alice"})
+
+        self.assertEqual(responses[0].text, "reply to hello")
+        self.assertEqual(captured["timeout"], 2.0)
+        self.assertEqual(captured["url"], "http://rasa.example/webhooks/rest/webhook")
+        self.assertEqual(captured["body"]["sender"], "call-1")
+        self.assertEqual(captured["body"]["message"], "hello")
+        self.assertEqual(captured["body"]["metadata"]["caller"], "alice")
+        self.assertEqual(captured["content_type"], "application/json")
+
+    def test_ai_voice_gateway_returns_rasa_turn_result(self):
+        async def fake_send(_client, sender, message, metadata):
+            self.assertEqual(sender, "call-2")
+            self.assertEqual(message, "hello from voice")
+            self.assertEqual(metadata["callee"], "ai-bot")
+            return [FakeBotResponse("reply to hello from voice")]
+
+        with mock.patch.object(RasaRestClient, "send_message_async", fake_send):
+            gateway = AiVoiceGateway(
+                AiVoiceConfig(
+                    enabled=True,
+                    rasa_webhook_url="http://rasa.example/webhooks/rest/webhook",
+                    initial_message="hello from voice",
+                )
+            )
+
+            result = asyncio.run(gateway.start_turn("call-2", {"callee": "ai-bot"}))
+
+        self.assertFalse(result.fallback_used)
+        self.assertEqual(result.user_text, "hello from voice")
+        self.assertEqual(result.rendered_text, "reply to hello from voice")
+
+    def test_dtmf_mapper_translates_digits_to_text(self):
+        mapper = DtmfIntentMapper({"1": "balance", "2": "support"})
+
+        self.assertEqual(mapper.text_for_digits("12"), "balance support")
+        self.assertEqual(mapper.text_for_digits("9"), "dtmf 9")
+
+
+class FakeBotResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+if __name__ == "__main__":
+    unittest.main()

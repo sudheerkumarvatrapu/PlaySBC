@@ -30,6 +30,22 @@ media_quality:
   loss_warn_percent: 1.0
   jitter_warn_ms: 30.0
 
+ai_voice_gateway:
+  enabled: true
+  provider: rasa
+  bot_name: rasa-support
+  rasa_webhook_url: http://rasa:5005/webhooks/rest/webhook
+  rasa_timeout: 3.0
+  input_mode: scripted
+  initial_message: hello from playsbc voice
+  fallback_text: Rasa lab bot is unavailable
+  dtmf_intents:
+    "0": agent
+    "1": sales
+    "2": support
+    "3": billing
+    "5": help
+
 number_normalization:
   - name: international-access-to-plus
     pattern: ^00

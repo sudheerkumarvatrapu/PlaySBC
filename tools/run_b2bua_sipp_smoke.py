@@ -73,6 +73,7 @@ LOG_FILES = (
     "log.sip",
     "log.media",
     "log.transcoding",
+    "log.ai",
     "log.platform",
     "log.networking",
     "log.udp",
@@ -162,6 +163,7 @@ BASE_DEFAULTS = {
     "transport_policies": [],
     "call_admission": {},
     "media_quality": {},
+    "ai_voice_gateway": {},
     "rtcp_receiver_reports": False,
     "rtcp_enabled": True,
     "expected_log_markers": {},
@@ -275,6 +277,37 @@ B2BUA_PROFILES = {
         "media_driver": "sipp-pcap",
         "hold_ms": 10000,
         "dtmf_expected": True,
+    },
+    "ai-rasa-lab": {
+        "caller": "ai-core-a",
+        "callee": "ai-bot",
+        "register_callee": False,
+        "start_uas": False,
+        "media_codec": "PCMU",
+        "media_driver": "sipp-pcap",
+        "hold_ms": 10000,
+        "route_policies": [
+            {
+                "name": "ai-rasa-gateway",
+                "match": "ai-bot",
+                "target": "ai-gateway:rasa-support",
+                "priority": 5,
+            }
+        ],
+        "ai_voice_gateway": {
+            "enabled": True,
+            "provider": "rasa",
+            "bot_name": "rasa-support",
+            "rasa_webhook_url": "http://172.28.0.60:5005/webhooks/rest/webhook",
+            "rasa_timeout": 3.0,
+            "input_mode": "scripted",
+            "initial_message": "hello from playsbc voice",
+            "fallback_text": "Rasa lab bot is unavailable",
+        },
+        "expected_log_markers": {
+            "log.ai": ["AI VOICE CALL START", "RASA REST REQUEST", "RASA REST RESPONSE", "AI TTS OUTPUT"],
+            "log.sip": ["AI VOICE CALL LADDER"],
+        },
     },
     "invalid-bye": {
         "callee": "invalid-bye-b",
@@ -638,6 +671,7 @@ PROFILE_DESCRIPTIONS = {
     "register-auth-success": "Complete a REGISTER digest challenge, register SIPp B, then place a B2BUA call to it.",
     "register-auth-failure": "Attempt REGISTER digest authentication with a wrong password and require a second 401 response.",
     "dtmf-rfc4733": "Send and relay an RFC 4733 telephone-event during an established B2BUA media call.",
+    "ai-rasa-lab": "Terminate one SIPp media call into the PlaySBC AI Voice Gateway and verify a Rasa REST turn.",
     "invalid-bye": "Send a BYE outside any dialog and expect PlaySBC to reject it.",
     "unknown-route": "Call an unregistered user with unknown-route rejection enabled and expect 404.",
     "failed-outbound": "Register SIPp B, have the outbound leg reject INVITE, and verify PlaySBC propagates failure.",
@@ -1078,6 +1112,7 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "rtpengine_sdes": getattr(args, "rtpengine_sdes", []),
         "rtpengine_dtls": getattr(args, "rtpengine_dtls", ""),
         "media_quality": getattr(args, "media_quality", {}),
+        "ai_voice_gateway": getattr(args, "ai_voice_gateway", {}),
         "reject_unknown_routes": args.reject_unknown_routes,
         "tls_certfile": getattr(args, "tls_certfile", ""),
         "tls_keyfile": getattr(args, "tls_keyfile", ""),
@@ -1340,6 +1375,12 @@ def should_run_rtcp(args: argparse.Namespace) -> bool:
     )
 
 
+def rtcp_expected_sender_names(args: argparse.Namespace) -> Tuple[str, ...]:
+    if not bool(getattr(args, "start_uas", True)):
+        return ("rtcp-a",)
+    return ("rtcp-a", "rtcp-b")
+
+
 def wait_for_rtcp_anchor_ports(work_dir: Path, args: argparse.Namespace, timeout: float = 8.0) -> Tuple[int, int]:
     if args.media_backend != "rtpengine":
         return int(args.server_rtp_min) + 1, int(args.server_rtp_min) + 3
@@ -1382,10 +1423,10 @@ def build_rtcp_sender_commands(args: argparse.Namespace, work_dir: Path) -> List
             "--expect-reply",
         ]
 
-    return [
-        ("rtcp-a", command(args.uac_rtp_min + 1, a_target_port, "0xC0DEC0DE", "sipp-a@playsbc")),
-        ("rtcp-b", command(args.uas_rtp_min + 1, b_target_port, "0xC0DEC0DE", "sipp-b@playsbc")),
-    ]
+    commands = [("rtcp-a", command(args.uac_rtp_min + 1, a_target_port, "0xC0DEC0DE", "sipp-a@playsbc"))]
+    if "rtcp-b" in rtcp_expected_sender_names(args):
+        commands.append(("rtcp-b", command(args.uas_rtp_min + 1, b_target_port, "0xC0DEC0DE", "sipp-b@playsbc")))
+    return commands
 
 
 def build_register_command(
@@ -2872,10 +2913,11 @@ def append_rtcp_observation(log_dir: Path, work_dir: Path, args: argparse.Namesp
         return True
     result_by_name = {result.name: result for result in results}
     sender_lines = []
-    for name in ("rtcp-a", "rtcp-b"):
+    expected_senders = rtcp_expected_sender_names(args)
+    for name in expected_senders:
         path = work_dir / f"{name}.log"
         sender_lines.append(path.read_text(encoding="utf-8", errors="replace").strip() if path.exists() else f"{name}=missing")
-    sender_ok = all(result_by_name.get(name) and result_by_name[name].status == "passed" for name in ("rtcp-a", "rtcp-b"))
+    sender_ok = all(result_by_name.get(name) and result_by_name[name].status == "passed" for name in expected_senders)
     summary = media_summary_stats(log_dir)
     query = rtpengine_query_stats(log_dir)
     observed = query["rtcp_packets_total"] if args.media_backend == "rtpengine" else summary["rtcp_packets_received_total"]

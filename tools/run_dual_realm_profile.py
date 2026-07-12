@@ -50,6 +50,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
     rtpengine_anchor_ports,
     rtpengine_load_media_complete,
     rtpengine_query_stats,
+    rtcp_expected_sender_names,
     sipp_timeout_seconds,
     sipp_trace_args,
     should_run_rtcp,
@@ -73,6 +74,7 @@ CORE_RTPENGINE_IP = "172.28.0.40"
 PEER_SBC_IP = "192.168.28.20"
 PEER_UA_IP = "192.168.28.30"
 PEER_RTPENGINE_IP = "192.168.28.40"
+RASA_MOCK_IP = "172.28.0.60"
 CORE_SUBNET = "172.28.0.0/24"
 PEER_SUBNET = "192.168.28.0/24"
 SIP_PORT = 5060
@@ -175,8 +177,13 @@ def append_skipped_robot_phases(bundle: Path, records: list[dict[str, object]]) 
 
 def execution_detail(args: SimpleNamespace) -> str:
     codec_path = f"{args.media_codec or 'signalling-only'} -> {uas_media_codec(args) if args.media_enabled else 'signalling-only'}"
+    path = (
+        "SIPp A -> PlaySBC AI Voice Gateway -> Rasa REST"
+        if needs_ai_mock(args)
+        else "SIPp A -> PlaySBC -> SIPp B"
+    )
     return (
-        f"Run SIPp A -> PlaySBC -> SIPp B; profile={args.profile}; calls={args.calls}; "
+        f"Run {path}; profile={args.profile}; calls={args.calls}; "
         f"rate={args.rate} cps; hold={args.hold_ms / 1000:.3f} s; "
         f"transport=A/{args.uac_transport.upper()}-B/{args.uas_transport.upper()}; "
         f"media_backend={args.media_backend}; codec_path={codec_path}; "
@@ -229,6 +236,17 @@ def profile_args(profile: str, run_id: str, log_folder: str) -> SimpleNamespace:
     args.server_codec = args.server_codec or args.media_codec or "PCMU"
     args.ladder_enabled = args.ladder if args.ladder is not None else (args.calls == 1 and args.rate == 1)
     return args
+
+
+def needs_ai_mock(args: SimpleNamespace) -> bool:
+    config = getattr(args, "ai_voice_gateway", {}) or {}
+    if not isinstance(config, dict):
+        return False
+    return bool(
+        config.get("enabled")
+        and str(config.get("provider", "rasa")).lower() == "rasa"
+        and RASA_MOCK_IP in str(config.get("rasa_webhook_url", ""))
+    )
 
 
 def container_path(path_value: object, bundle: Path) -> str:
@@ -295,6 +313,7 @@ def render_helm_config(args: SimpleNamespace, work_dir: Path, env: dict[str, str
         "rtpengine_sdes": args.rtpengine_sdes,
         "rtpengine_dtls": args.rtpengine_dtls,
         "media_quality": args.media_quality,
+        "ai_voice_gateway": args.ai_voice_gateway,
         "reject_unknown_routes": args.reject_unknown_routes,
         "tls_certfile": "/etc/playsbc/tls/tls.crt" if "tls" in str(args.sip_transport).split(",") else "",
         "tls_keyfile": "/etc/playsbc/tls/tls.key" if "tls" in str(args.sip_transport).split(",") else "",
@@ -525,6 +544,27 @@ def wait_for_rtpengine(env: dict[str, str], timeout: float = 20.0) -> None:
     raise RuntimeError("RTPengine did not become ready inside the core realm")
 
 
+def wait_for_rasa_mock(env: dict[str, str], timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    command = exec_command(
+        "playsbc",
+        "/app",
+        [
+            "python3",
+            "-c",
+            (
+                "import urllib.request; "
+                f"urllib.request.urlopen('http://{RASA_MOCK_IP}:5005/healthz', timeout=1).read()"
+            ),
+        ],
+    )
+    while time.monotonic() < deadline:
+        if run(command, env=env, check=False).returncode == 0:
+            return
+        time.sleep(0.5)
+    raise RuntimeError("Rasa mock did not become ready inside the core realm")
+
+
 def capture_services(args: SimpleNamespace) -> list[str]:
     services = ["capture-signalling"]
     if not args.media_enabled:
@@ -609,15 +649,18 @@ def start_rtcp_processes(
                 "core-tools", CORE_UA_IP, UA_RTP_MIN + 1, core_target, core_port, duration,
                 "core-a@playsbc", args.rtcp_receiver_reports,
             ),
-        ),
-        (
-            "rtcp-b",
-            rtcp_command(
-                "peer-tools", PEER_UA_IP, UA_RTP_MIN + 1, peer_target, peer_port, duration,
-                "peer-b@playsbc", args.rtcp_receiver_reports,
-            ),
-        ),
+        )
     ]
+    if "rtcp-b" in rtcp_expected_sender_names(args):
+        commands.append(
+            (
+                "rtcp-b",
+                rtcp_command(
+                    "peer-tools", PEER_UA_IP, UA_RTP_MIN + 1, peer_target, peer_port, duration,
+                    "peer-b@playsbc", args.rtcp_receiver_reports,
+                ),
+            )
+        )
     processes = []
     for name, command in commands:
         started = time.monotonic()
@@ -928,8 +971,12 @@ def main() -> int:
 
         captures = capture_services(profile)
         services = ["rtpengine", "playsbc", "core-agent", "peer-agent", "core-tools", "peer-tools", *captures]
+        if needs_ai_mock(profile):
+            services.insert(2, "rasa-mock")
         run(compose_command("up", "-d", *services), env=env)
         wait_for_server(env)
+        if needs_ai_mock(profile):
+            wait_for_rasa_mock(env)
         if profile.media_backend == "rtpengine":
             wait_for_rtpengine(env)
         append_robot_phase(bundle, phase_records, active_phase, "passed", phase_started, phase_detail)

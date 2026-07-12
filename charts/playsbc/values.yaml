@@ -77,6 +77,23 @@ playsbc:
     rtpengine_sdes: []
     rtpengine_dtls: ""
     media_quality: {}
+    ai_voice_gateway:
+      enabled: false
+      provider: rasa
+      bot_name: rasa-support
+      rasa_webhook_url: http://rasa:5005/webhooks/rest/webhook
+      rasa_timeout: 3.0
+      input_mode: scripted
+      initial_message: hello
+      fallback_text: AI assistant is not available right now.
+      dtmf_intents:
+        "0": agent
+        "1": sales
+        "2": support
+        "3": billing
+        "5": help
+        "*": repeat
+        "#": confirm
     reject_unknown_routes: false
     tls_certfile: ""
     tls_keyfile: ""
