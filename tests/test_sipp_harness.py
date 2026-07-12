@@ -157,6 +157,91 @@ Content-Length: 0
         self.assertTrue(messages[1][2].startswith(b"SIP/2.0 401"))
         self.assertTrue(messages[2][2].startswith(b"OPTIONS "))
 
+    def test_ordered_sip_trace_keeps_full_tls_messages_in_core_peer_order(self):
+        core_trace = """Problem EAGAIN on socket 10
+----------------------------------------------- 2026-07-07T01:00:00.100000Z
+TLS message sent [120] bytes:
+
+INVITE sip:peer-b@172.28.0.20:5061 SIP/2.0
+Call-ID: core-call
+CSeq: 1 INVITE
+Content-Length: 0
+
+----------------------------------------------- 2026-07-07T01:00:00.300000Z
+TLS message received [260] bytes:
+
+SIP/2.0 200 OK
+Call-ID: core-call
+CSeq: 1 INVITE
+Content-Type: application/sdp
+Content-Length: 90
+
+v=0
+o=sipp-b 1 1 IN IP4 172.28.0.40
+s=SIPp B
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:test
+
+"""
+        peer_trace = """----------------------------------------------- 2026-07-07T01:00:00.200000Z
+TLS message received [120] bytes:
+
+INVITE sip:peer-b@192.168.28.30:5060;transport=tls SIP/2.0
+Call-ID: peer-call
+CSeq: 1 INVITE
+Content-Length: 0
+
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "sipp-a-uac").mkdir()
+            (work / "sipp-b-uas").mkdir()
+            (work / "sipp-a-uac" / "uac_messages.log").write_text(core_trace, encoding="utf-8")
+            (work / "sipp-b-uas" / "uas_messages.log").write_text(peer_trace, encoding="utf-8")
+
+            ordered = run_b2bua_sipp_smoke.ordered_sip_trace_text(work)
+
+        self.assertIn("direction_order=CORE SIPp A <-> PlaySBC CORE <-> PlaySBC PEER <-> PEER SIPp B", ordered)
+        self.assertLess(
+            ordered.index("CORE SIPp A -> PlaySBC CORE | INVITE"),
+            ordered.index("PlaySBC PEER -> PEER SIPp B | INVITE"),
+        )
+        self.assertLess(
+            ordered.index("PlaySBC PEER -> PEER SIPp B | INVITE"),
+            ordered.index("PlaySBC CORE -> CORE SIPp A | SIP/2.0 200 OK"),
+        )
+        self.assertIn("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:test", ordered)
+        self.assertNotIn("Problem EAGAIN", ordered)
+
+    def test_collect_work_logs_keeps_log_sip_ordered_and_moves_raw_trace_to_log_sipp(self):
+        trace = """----------------------------------------------- 2026-07-07T01:00:00.100000Z
+TLS message sent [120] bytes:
+
+INVITE sip:peer-b@172.28.0.20:5061 SIP/2.0
+Call-ID: core-call
+CSeq: 1 INVITE
+Content-Length: 0
+
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs"
+            work = root / "work"
+            for folder in ("server", "registration-callee", "registration-caller", "sipp-a-uac", "sipp-b-uas"):
+                (work / folder).mkdir(parents=True)
+            (work / "server" / "stdout.log").write_text("server up", encoding="utf-8")
+            (work / "sipp-a-uac" / "uac_messages.log").write_text(trace, encoding="utf-8")
+            args = argparse_namespace(calls=1, rate=1)
+
+            run_b2bua_sipp_smoke.collect_work_logs(log_dir, work, args)
+
+            sip_log = (log_dir / "log.sip").read_text(encoding="utf-8")
+            sipp_log = (log_dir / "log.sipp").read_text(encoding="utf-8")
+
+        self.assertIn("ORDERED SIP MESSAGE TRACE CORE TO PEER", sip_log)
+        self.assertIn("CORE SIPp A -> PlaySBC CORE", sip_log)
+        self.assertNotIn("RAW SIP TRACE", sip_log)
+        self.assertIn("SIPP-A-UAC RAW SIP TRACE", sipp_log)
+
     def test_all_xml_scenarios_are_well_formed(self):
         scenarios = ROOT / "sipp" / "scenarios"
         for scenario in sorted(scenarios.glob("*.xml")):

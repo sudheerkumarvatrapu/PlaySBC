@@ -82,6 +82,30 @@ LOG_FILES = (
     "log.sipp",
 )
 DEFAULT_LOG_FOLDER = "b2bua-Regression"
+SIP_TRACE_LEG_LABELS = {
+    "registration-caller": {
+        "sent": ("CORE SIPp A", "PlaySBC CORE"),
+        "received": ("PlaySBC CORE", "CORE SIPp A"),
+    },
+    "sipp-a-uac": {
+        "sent": ("CORE SIPp A", "PlaySBC CORE"),
+        "received": ("PlaySBC CORE", "CORE SIPp A"),
+    },
+    "registration-callee": {
+        "sent": ("PEER SIPp B", "PlaySBC PEER"),
+        "received": ("PlaySBC PEER", "PEER SIPp B"),
+    },
+    "sipp-b-uas": {
+        "sent": ("PEER SIPp B", "PlaySBC PEER"),
+        "received": ("PlaySBC PEER", "PEER SIPp B"),
+    },
+}
+SIP_TRACE_LEG_ORDER = {
+    "registration-caller": 10,
+    "sipp-a-uac": 20,
+    "sipp-b-uas": 30,
+    "registration-callee": 40,
+}
 SIPP_PCAP_SUDO_BLOCKED_DETAIL = (
     "SIPp PCAP sudo mode requires cached sudo credentials. "
     "Run `sudo -v` in your terminal, then retry with `--sipp-pcap-sudo`."
@@ -653,6 +677,19 @@ class SmokeResult:
     returncode: Optional[int]
     status: str
     duration_seconds: float
+
+
+@dataclass
+class SippWireTraceEntry:
+    timestamp: float
+    order: int
+    leg: str
+    protocol: str
+    direction: str
+    source: str
+    destination: str
+    payload: bytes
+    trace_name: str
 
 
 @dataclass
@@ -2039,6 +2076,76 @@ def sipp_trace_messages(path: Path) -> List[Tuple[float, str, bytes]]:
     return [(timestamp, direction, payload) for timestamp, _protocol, direction, payload in sipp_trace_protocol_messages(path)]
 
 
+def sip_start_line(payload: bytes) -> str:
+    return payload.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+
+
+def sip_payload_text(payload: bytes) -> str:
+    return payload.decode("utf-8", errors="replace").replace("\r\n", "\n").rstrip()
+
+
+def sipp_trace_leg_labels(leg: str, direction: str) -> Tuple[str, str]:
+    return SIP_TRACE_LEG_LABELS.get(leg, {}).get(direction, (leg, "PlaySBC"))
+
+
+def sipp_wire_trace_entries(work_dir: Path) -> List[SippWireTraceEntry]:
+    entries: List[SippWireTraceEntry] = []
+    sequence = 0
+    for leg in ("registration-caller", "sipp-a-uac", "sipp-b-uas", "registration-callee"):
+        leg_dir = work_dir / leg
+        for trace in sorted(leg_dir.glob("*_messages.log")):
+            for timestamp, protocol, direction, payload in sipp_trace_protocol_messages(trace):
+                source, destination = sipp_trace_leg_labels(leg, direction)
+                entries.append(
+                    SippWireTraceEntry(
+                        timestamp=timestamp,
+                        order=(SIP_TRACE_LEG_ORDER.get(leg, 100) * 100000) + sequence,
+                        leg=leg,
+                        protocol=protocol,
+                        direction=direction,
+                        source=source,
+                        destination=destination,
+                        payload=payload,
+                        trace_name=trace.name,
+                    )
+                )
+                sequence += 1
+    return sorted(entries, key=lambda entry: (entry.timestamp, entry.order))
+
+
+def ordered_sip_trace_text(work_dir: Path) -> str:
+    entries = sipp_wire_trace_entries(work_dir)
+    if not entries:
+        return ""
+
+    lines = [
+        "direction_order=CORE SIPp A <-> PlaySBC CORE <-> PlaySBC PEER <-> PEER SIPp B",
+        f"message_count={len(entries)}",
+    ]
+    for index, entry in enumerate(entries, start=1):
+        timestamp = datetime.fromtimestamp(entry.timestamp).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        lines.extend(
+            [
+                "",
+                (
+                    f"{index:02d} {timestamp} | {entry.protocol.upper()} | "
+                    f"{entry.source} -> {entry.destination} | {sip_start_line(entry.payload)} | "
+                    f"trace={entry.leg}/{entry.trace_name}"
+                ),
+            ]
+        )
+        lines.extend(f"    {line}" if line else "" for line in sip_payload_text(entry.payload).splitlines())
+    return "\n".join(lines)
+
+
+def append_ordered_sip_trace(log_dir: Path, work_dir: Path, args: argparse.Namespace) -> None:
+    if is_load_like_run(args):
+        return
+    trace = ordered_sip_trace_text(work_dir)
+    if trace:
+        append_log_section(log_dir, "log.sip", "ORDERED SIP MESSAGE TRACE CORE TO PEER", trace)
+
+
 def normalize_sip_payload(payload_text: str) -> bytes:
     normalized = payload_text.replace("\r\n", "\n").strip("\n")
     if not normalized.strip():
@@ -3019,6 +3126,8 @@ def append_results(log_dir: Path, args: argparse.Namespace, results: List[SmokeR
 
 def collect_work_logs(log_dir: Path, work_dir: Path, args: Optional[argparse.Namespace] = None) -> None:
     append_file_section(log_dir, "log.platform", "SERVER STDOUT", work_dir / "server" / "stdout.log")
+    if args is not None:
+        append_ordered_sip_trace(log_dir, work_dir, args)
 
     for leg in ("registration-callee", "registration-caller", "sipp-a-uac", "sipp-b-uas"):
         leg_dir = work_dir / leg
@@ -3026,7 +3135,7 @@ def collect_work_logs(log_dir: Path, work_dir: Path, args: Optional[argparse.Nam
         append_file_section(log_dir, "log.sipp", f"{leg.upper()} STDERR", leg_dir / "stderr.log")
         if not (args and is_load_like_run(args)):
             for trace in sorted(leg_dir.glob("*_messages.log")):
-                append_file_section(log_dir, "log.sip", f"{leg.upper()} SIP TRACE {trace.name}", trace)
+                append_file_section(log_dir, "log.sipp", f"{leg.upper()} RAW SIP TRACE {trace.name}", trace)
         for trace in sorted(leg_dir.glob("*_logs.log")):
             append_file_section(log_dir, "log.sipp", f"{leg.upper()} EVENT TRACE {trace.name}", trace)
         for trace in sorted(leg_dir.glob("*srtp*")):
