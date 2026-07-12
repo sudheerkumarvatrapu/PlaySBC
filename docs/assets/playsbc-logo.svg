@@ -1,6 +1,6 @@
 <svg width="960" height="280" viewBox="0 0 960 280" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">PlaySBC logo</title>
-  <desc id="desc">A colorful PlaySBC logo for a playful Session Border Controller lab where SIP breaks safely before production.</desc>
+  <desc id="desc">A colorful PlaySBC logo for a playful Session Border Controller lab with SIP, RTP, RTPengine, Voice AI Gateway, and Rasa regression.</desc>
   <defs>
     <linearGradient id="bg" x1="40" y1="30" x2="920" y2="250" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#12355B"/>
@@ -44,15 +44,19 @@
   </g>
 
   <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="16" font-weight="700">
-    <rect x="316" y="194" width="72" height="34" rx="17" fill="#DBEAFE"/>
-    <text x="337" y="216" fill="#1E40AF">SIPp</text>
-    <rect x="402" y="194" width="104" height="34" rx="17" fill="#DCFCE7"/>
-    <text x="427" y="216" fill="#166534">B2BUA</text>
-    <rect x="520" y="194" width="72" height="34" rx="17" fill="#FEF3C7"/>
-    <text x="544" y="216" fill="#92400E">RTP</text>
-    <rect x="606" y="194" width="136" height="34" rx="17" fill="#EDE9FE"/>
-    <text x="626" y="216" fill="#6D28D9">Transcoding</text>
-    <rect x="756" y="194" width="128" height="34" rx="17" fill="#CCFBF1"/>
-    <text x="779" y="216" fill="#0F766E">Regression</text>
+    <rect x="316" y="190" width="72" height="30" rx="15" fill="#DBEAFE"/>
+    <text x="337" y="210" fill="#1E40AF">SIPp</text>
+    <rect x="402" y="190" width="104" height="30" rx="15" fill="#DCFCE7"/>
+    <text x="427" y="210" fill="#166534">B2BUA</text>
+    <rect x="520" y="190" width="112" height="30" rx="15" fill="#FEF3C7"/>
+    <text x="538" y="210" fill="#92400E">RTPengine</text>
+    <rect x="646" y="190" width="136" height="30" rx="15" fill="#EDE9FE"/>
+    <text x="666" y="210" fill="#6D28D9">Transcoding</text>
+    <rect x="796" y="190" width="112" height="30" rx="15" fill="#CCFBF1"/>
+    <text x="812" y="210" fill="#0F766E">Regression</text>
+    <rect x="316" y="226" width="158" height="26" rx="13" fill="#FCE7F3"/>
+    <text x="334" y="244" fill="#BE185D">Voice AI Gateway</text>
+    <rect x="488" y="226" width="78" height="26" rx="13" fill="#FFE4E6"/>
+    <text x="509" y="244" fill="#BE123C">Rasa</text>
   </g>
 </svg>

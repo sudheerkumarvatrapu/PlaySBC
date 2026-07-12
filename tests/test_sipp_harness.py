@@ -1854,8 +1854,12 @@ Content-Length: 0
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
             (bundle / "log.sip").write_text(
+                "2026-07-05 09:59:59 | CALLEE REGISTRATION LADDER\n"
+                "REGISTRATION LADDER\nuser=registered-b\n"
                 "2026-07-05 10:00:00 | B2BUA SIP LADDER | call_id=call-1\n"
                 "SIP LADDER\nStep       SIPp A       B2BUA       SIPp B\n"
+                "2026-07-05 10:00:00 | AI VOICE CALL LADDER | call_id=call-ai\n"
+                "AI VOICE CALL LADDER\nStep       SIPp A       PlaySBC       Rasa Bot\n"
                 "2026-07-05 10:00:01 | SIP RX REQUEST\n",
                 encoding="utf-8",
             )
@@ -1868,7 +1872,9 @@ Content-Length: 0
             report = run_regression_suite.render_html([row], "2026-07-05", "ladder-report")
 
             self.assertIn("SIP LADDER", ladder)
-            self.assertIn("<h2>SIP Ladder</h2>", report)
+            self.assertIn("CALLEE REGISTRATION LADDER", ladder)
+            self.assertIn("AI VOICE CALL LADDER", ladder)
+            self.assertIn("<h2>SIP Ladders</h2>", report)
             self.assertIn("SIPp A", report)
 
     def test_regression_report_reads_measured_robot_phases_from_platform_log(self):

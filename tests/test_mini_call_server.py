@@ -803,6 +803,34 @@ class B2BUAFlowLogTests(unittest.TestCase):
             self.assertIn("B2BUA SIP LADDER", sip_log)
             self.assertIn("SIP LADDER", sip_log)
 
+    def test_ladder_renderer_can_include_rtpengine_participant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            route = server.RouteResult(
+                target=server.SipUri("callee", "127.0.0.1", 25082),
+                policy_name="registered",
+                source="registrar",
+            )
+            logger = server.SbcLogger(Path(tmp))
+            flow = server.B2BUAFlowLog(
+                Path(tmp),
+                "call-rtpengine",
+                "callee",
+                route,
+                logger=logger,
+                participants=("SIPp A", "B2BUA", "SIPp B", "RTPengine"),
+            )
+            flow.sip("SIPp A", "B2BUA", "INVITE")
+            flow.sip("B2BUA", "RTPengine", "OFFER")
+            flow.sip("RTPengine", "B2BUA", "ok OFFER")
+            flow.sip("B2BUA", "SIPp B", "INVITE")
+            flow.render_ladder()
+
+            ladder = (Path(tmp) / "log.sip").read_text(encoding="utf-8")
+
+        self.assertIn("RTPengine", ladder)
+        self.assertIn("OFFER", ladder)
+        self.assertIn("ok OFFER", ladder)
+
     def test_disabled_ladder_still_logs_rtpengine_media_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             route = server.RouteResult(

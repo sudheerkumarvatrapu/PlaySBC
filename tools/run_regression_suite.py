@@ -397,16 +397,26 @@ def read_sip_ladder(log_path: Path) -> str:
     if not sip_log.exists():
         return ""
     lines = sip_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    titles = (
+        "B2BUA SIP LADDER",
+        "CALLEE REGISTRATION LADDER",
+        "CALLER REGISTRATION LADDER",
+        "AI VOICE CALL LADDER",
+    )
+    sections = []
     for index, line in enumerate(lines):
-        if " | B2BUA SIP LADDER" not in line:
+        if not any(f" | {title}" in line for title in titles):
             continue
+        title = line.split("|", 2)[1].strip() if "|" in line else "SIP LADDER"
         ladder = []
         for candidate in lines[index + 1 :]:
             if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| ", candidate):
                 break
             ladder.append(candidate.rstrip())
-        return "\n".join(ladder).strip()
-    return ""
+        body = "\n".join(ladder).strip()
+        if body:
+            sections.append(f"{title}\n{body}")
+    return "\n\n".join(sections)
 
 
 def parse_sipp_smoke_summary(summary_path: Path, fallback_command: str) -> List[ReportRow]:
@@ -510,7 +520,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
         ladder_html = ""
         if row.sip_ladder:
             ladder_html = (
-                "<section class=\"ladder\"><h2>SIP Ladder</h2>"
+                "<section class=\"ladder\"><h2>SIP Ladders</h2>"
                 f"<pre>{html.escape(row.sip_ladder)}</pre></section>"
             )
         row_html.append(

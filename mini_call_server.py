@@ -635,7 +635,7 @@ class SbcLogger:
 
 
 class B2BUAFlowLog:
-    LADDER_PARTICIPANTS = ("SIPp A", "B2BUA", "SIPp B")
+    DEFAULT_LADDER_PARTICIPANTS = ("SIPp A", "B2BUA", "SIPp B")
     LADDER_STEP_WIDTH = 6
     LADDER_COLUMN_WIDTH = 28
 
@@ -647,10 +647,12 @@ class B2BUAFlowLog:
         route: RouteResult,
         enabled: bool = True,
         logger: Optional[SbcLogger] = None,
+        participants: Optional[Tuple[str, ...]] = None,
     ):
         self.enabled = enabled
         self.logger = logger
         self.inbound_call_id = inbound_call_id
+        self.participants = participants or self.DEFAULT_LADDER_PARTICIPANTS
         self.events: List[Tuple[str, str, str, str]] = []
         self.path = log_dir / "log.call" if enabled and log_dir else None
         if self.path:
@@ -717,11 +719,11 @@ class B2BUAFlowLog:
         return "\n".join(lines)
 
     def _ladder_header(self) -> str:
-        columns = [f"{participant:^{self.LADDER_COLUMN_WIDTH}}" for participant in self.LADDER_PARTICIPANTS]
+        columns = [f"{participant:^{self.LADDER_COLUMN_WIDTH}}" for participant in self.participants]
         return f"{'Step':<{self.LADDER_STEP_WIDTH}}" + "".join(columns).rstrip()
 
     def _ladder_separator(self) -> str:
-        return "-" * (self.LADDER_STEP_WIDTH + (self.LADDER_COLUMN_WIDTH * len(self.LADDER_PARTICIPANTS)))
+        return "-" * (self.LADDER_STEP_WIDTH + (self.LADDER_COLUMN_WIDTH * len(self.participants)))
 
     def _ladder_lifeline(self, step: str = "") -> str:
         row = self._blank_ladder_row(step)
@@ -730,13 +732,11 @@ class B2BUAFlowLog:
         return "".join(row).rstrip()
 
     def _ladder_event(self, index: int, sender: str, receiver: str, label: str) -> List[str]:
-        if sender not in self.LADDER_PARTICIPANTS or receiver not in self.LADDER_PARTICIPANTS:
+        if sender not in self.participants or receiver not in self.participants:
             return [f"{index:02d} {sender} -> {receiver}: {label}"]
 
-        sender_index = self.LADDER_PARTICIPANTS.index(sender)
-        receiver_index = self.LADDER_PARTICIPANTS.index(receiver)
-        if abs(sender_index - receiver_index) != 1:
-            return [f"{index:02d} {sender} -> {receiver}: {label}"]
+        sender_index = self.participants.index(sender)
+        receiver_index = self.participants.index(receiver)
 
         return [
             self._ladder_label_line(index, sender_index, receiver_index, label),
@@ -776,7 +776,7 @@ class B2BUAFlowLog:
         return "".join(row).rstrip()
 
     def _blank_ladder_row(self, step: str) -> List[str]:
-        width = self.LADDER_STEP_WIDTH + (self.LADDER_COLUMN_WIDTH * len(self.LADDER_PARTICIPANTS))
+        width = self.LADDER_STEP_WIDTH + (self.LADDER_COLUMN_WIDTH * len(self.participants))
         row = list(" " * width)
         self._put_text(row, 0, f"{step:<{self.LADDER_STEP_WIDTH}}")
         return row
@@ -784,7 +784,7 @@ class B2BUAFlowLog:
     def _ladder_positions(self) -> List[int]:
         return [
             self.LADDER_STEP_WIDTH + (index * self.LADDER_COLUMN_WIDTH) + (self.LADDER_COLUMN_WIDTH // 2)
-            for index, _ in enumerate(self.LADDER_PARTICIPANTS)
+            for index, _ in enumerate(self.participants)
         ]
 
     def _put_text(self, row: List[str], start: int, text: str) -> None:
@@ -2147,6 +2147,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             route,
             enabled=self.b2bua_ladder_logs,
             logger=self.logger,
+            participants=("SIPp A", "B2BUA", "SIPp B", "RTPengine"),
         )
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
@@ -2375,6 +2376,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 call_id=inbound_call_id,
             )
         try:
+            flow_log.sip("B2BUA", "RTPengine", "OFFER")
             offer_response = await retry_rtpengine_control(
                 "OFFER",
                 lambda: self.rtpengine_client.offer(
@@ -2399,8 +2401,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     f"from_tag={from_tag} rewritten_sdp_bytes={len(outbound_body.encode('utf-8'))}"
                 ),
             )
+            flow_log.sip("RTPengine", "B2BUA", f"{offer_response.get('result', 'ok')} OFFER")
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
             flow_log.write("RTPENGINE OFFER FAILED", str(exc))
+            flow_log.sip("RTPengine", "B2BUA", "OFFER failed")
             flow_log.sip("B2BUA", "SIPp A", "488 Not Acceptable Here")
             self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
             flow_log.render_ladder()
@@ -2469,6 +2473,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         to_tag = extract_header_tag(final_response.header("to")) or secrets.token_hex(6)
         b2bua_call.rtpengine_to_tag = to_tag
         try:
+            flow_log.sip("B2BUA", "RTPengine", "ANSWER")
             answer_response = await retry_rtpengine_control(
                 "ANSWER",
                 lambda: self.rtpengine_client.answer(
@@ -2493,8 +2498,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     f"from_tag={from_tag} to_tag={to_tag} rewritten_sdp_bytes={len(answer_sdp.encode('utf-8'))}"
                 ),
             )
+            flow_log.sip("RTPengine", "B2BUA", f"{answer_response.get('result', 'ok')} ANSWER")
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
             flow_log.write("RTPENGINE ANSWER FAILED", str(exc))
+            flow_log.sip("RTPengine", "B2BUA", "ANSWER failed")
             self.send_outbound_ack(b2bua_call)
             self.send_outbound_bye(b2bua_call)
             self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
@@ -2775,6 +2782,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.routing_engine.release(b2bua_call.route_result)
             b2bua_call.admission_released = True
             self.log_policy_metrics("CALL RELEASED", b2bua_call.route_result, b2bua_call.inbound_call_id)
+        if b2bua_call.media_backend == "rtpengine":
+            b2bua_call.flow_log.sip("B2BUA", "RTPengine", "DELETE")
         b2bua_call.flow_log.write("CALL END", f"reason={reason}")
         b2bua_call.flow_log.render_ladder()
         self.schedule_rtpengine_delete(b2bua_call)
