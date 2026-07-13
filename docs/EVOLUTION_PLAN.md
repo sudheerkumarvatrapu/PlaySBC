@@ -11,6 +11,7 @@ PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-cer
 - Trunk groups, primary/secondary selection, hunt groups, route policies, E.164/header normalization, CAC, health state, and counters
 - Active SIP OPTIONS trunk probing with failure thresholds and timed health recovery
 - HA shared registrar/dialog state using a SQLite lab store, plus node-to-RTPengine pairing for active-active experiments
+- HA node model with external-LB policy, per-node weights, drain state, and `503 Node Draining` rejection for new calls
 
 ### Media
 
@@ -37,14 +38,17 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Dual-realm Docker topology: core `172.28.0.0/24`, peer `192.168.28.0/24`
 - Dual-homed PlaySBC and RTPengine with Docker-based SIPp agents
 - Helm-rendered configuration for every regression profile
+- Every dual-realm regression profile runs with HA enabled by default
 - SBC category logs, combined live PCAP, and Robot-style HTML report with single-call ladders
 - Signalling, media, auth, routing, negative, soak, and 5 cps / 60-second CHT profiles
 - Kubernetes Helm lab with health probes, Secret-backed SIP users, RTPengine pairing, kind/minikube values, and a dialog-affinity experiment
-- HA regression profiles: `ha-shared-state-rtpengine` and `ha-options-health-recovery`
+- HA regression profiles: `ha-shared-state-rtpengine`, `ha-options-health-recovery`, and `ha-node-draining`
 
 ## Next
 
-- Multi-node chaos/failover regression that kills one PlaySBC/RTPengine pair during an active dialog
+- Full B2BUA mid-call failover: checkpoint outbound leg state, restore ACK/BYE/CANCEL/re-INVITE handling on a sibling node, and prove it by killing `playsbc-a` during an active dialog.
+- RTPengine media-session migration or continuity design: either shared RTPengine pair ownership, session re-homing, or deterministic media teardown/re-establish after a PlaySBC/RTPengine pair loss.
+- Multi-node chaos/failover regression that kills one PlaySBC/RTPengine pair during active SIP/RTP traffic.
 - External shared state backend option such as Redis/PostgreSQL after the SQLite lab store proves the behavior
 
 ### AI Real Speech Pipeline

@@ -46,7 +46,7 @@ Core: SIPp A 172.28.0.10 -> PlaySBC 172.28.0.20 -> RTPengine 172.28.0.40
 Peer: RTPengine 192.168.28.40 <- PlaySBC 192.168.28.20 <- SIPp B 192.168.28.30
 ```
 
-Helm renders each profile config. Coverage includes trunk failover, active OPTIONS health recovery, shared registrar/dialog state, PlaySBC-to-RTPengine node pairing, normalization, hunt/CAC metrics, UDP/TCP/TLS, TLS/SRTP-to-RTP interworking, RTPengine faults, RTCP quality, auth, media, AI-to-Rasa REST, AI media via RTPengine, and load. Every testcase produces one combined SBC log bundle and live PCAP. Single-call ladders are shown directly in the Robot-style HTML report.
+Helm renders every profile with HA enabled: shared registrar/dialog state, node identity, external-LB policy, node draining hooks, and PlaySBC-to-RTPengine pairing. Coverage also includes trunk failover, active OPTIONS recovery, normalization, hunt/CAC metrics, UDP/TCP/TLS, TLS/SRTP-to-RTP interworking, RTPengine faults, RTCP quality, auth, media, AI-to-Rasa REST, AI media via RTPengine, and load. Every testcase produces one combined SBC log bundle and live PCAP.
 
 ```text
 logs/reports/latest.html

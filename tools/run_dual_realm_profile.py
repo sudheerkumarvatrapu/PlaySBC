@@ -192,6 +192,56 @@ def execution_detail(args: SimpleNamespace) -> str:
     )
 
 
+def deep_merge_dict(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def default_ha_config(run_id: str) -> dict:
+    return {
+        "enabled": True,
+        "cluster_id": "playsbc-aa-lab",
+        "node_id": "playsbc-a",
+        "shared_state_path": f"/tmp/playsbc-{run_id}-shared-state.sqlite3",
+        "nodes": [
+            {"node_id": "playsbc-a", "state": "active", "weight": 100},
+            {"node_id": "playsbc-b", "state": "active", "weight": 100},
+        ],
+        "load_balancing": {
+            "enabled": True,
+            "policy": "external-lb",
+            "drain_new_calls": True,
+        },
+        "failover": {
+            "dialog_restore": True,
+            "mid_call_failover": "dialog-restore-only",
+            "rtpengine_session_migration": "planned",
+        },
+        "rtpengine_pairs": [
+            {
+                "name": "core-pair-a",
+                "node_id": "playsbc-a",
+                "rtpengine_url": "{rtpengine_url}",
+            },
+            {
+                "name": "peer-pair-b",
+                "node_id": "playsbc-b",
+                "rtpengine_url": f"udp://{PEER_RTPENGINE_IP}:2223",
+            },
+        ],
+    }
+
+
+def profile_ha_config(values: dict, run_id: str) -> dict:
+    override = values.get("ha") if isinstance(values.get("ha"), dict) else {}
+    return deep_merge_dict(default_ha_config(run_id), override)
+
+
 def profile_args(profile: str, run_id: str, log_folder: str) -> SimpleNamespace:
     values = dict(BASE_DEFAULTS)
     if profile == REAL_TOPOLOGY_PROFILE:
@@ -229,6 +279,7 @@ def profile_args(profile: str, run_id: str, log_folder: str) -> SimpleNamespace:
     )
     if values.get("rtpengine_url") == BASE_DEFAULTS["rtpengine_url"]:
         values["rtpengine_url"] = f"udp://{CORE_RTPENGINE_IP}:2223"
+    values["ha"] = profile_ha_config(values, run_id)
     args = SimpleNamespace(**values)
     transports = [value.strip() for value in str(args.sip_transport).split(",") if value.strip()]
     args.uac_transport = args.uac_transport or (transports[0] if len(transports) == 1 else "udp")

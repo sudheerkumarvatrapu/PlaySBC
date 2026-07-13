@@ -35,6 +35,21 @@ ha:
   cluster_id: playsbc-aa-lab
   node_id: playsbc-a
   shared_state_path: /var/lib/playsbc/ha-state.sqlite3
+  nodes:
+    - node_id: playsbc-a
+      state: active
+      weight: 100
+    - node_id: playsbc-b
+      state: active
+      weight: 100
+  load_balancing:
+    enabled: true
+    policy: external-lb
+    drain_new_calls: true
+  failover:
+    dialog_restore: true
+    mid_call_failover: dialog-restore-only
+    rtpengine_session_migration: planned
   rtpengine_pairs:
     - node_id: playsbc-a
       rtpengine_url: udp://rtpengine-a:2223
@@ -42,7 +57,7 @@ ha:
       rtpengine_url: udp://rtpengine-b:2223
 ```
 
-Each PlaySBC node selects its paired RTPengine from `ha.rtpengine_pairs`. Registrar contacts and dialog checkpoints are written to the shared SQLite lab store, so sibling nodes can resolve shared registrations and restore dialog state for HA experiments.
+Every dual-realm regression profile renders HA enabled. Each PlaySBC node selects its paired RTPengine from `ha.rtpengine_pairs`. Registrar contacts and dialog checkpoints are written to the shared SQLite lab store, so sibling nodes can resolve shared registrations and restore dialog state for HA experiments. A node marked `draining` rejects new INVITEs with `503 Node Draining`; existing dialog cleanup remains allowed.
 
 ## Focused Topology Call
 

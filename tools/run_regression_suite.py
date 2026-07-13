@@ -60,6 +60,7 @@ ALL_B2BUA_PROFILES = (
     "esbc-trunk-metrics",
     "ha-shared-state-rtpengine",
     "ha-options-health-recovery",
+    "ha-node-draining",
     "tls-transport-policy",
     "tcp-connection-reuse",
     "tcp-connection-failure",

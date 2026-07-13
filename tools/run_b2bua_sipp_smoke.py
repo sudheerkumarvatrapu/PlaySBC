@@ -642,6 +642,28 @@ B2BUA_PROFILES = {
             "log.call": ["TRUNK OPTIONS PROBE", "trunk=recovering-peer", "health=up"],
         },
     },
+    "ha-node-draining": {
+        "caller": "ha-drain-a",
+        "callee": "ha-drain-b",
+        "register_callee": False,
+        "start_uas": False,
+        "uac_scenario": "b2bua_uac_failed_outbound.xml",
+        "ha": {
+            "enabled": True,
+            "cluster_id": "playsbc-aa-lab",
+            "node_id": "playsbc-a",
+            "shared_state_path": "/tmp/playsbc-{run_id}-drain-state.sqlite3",
+            "nodes": [
+                {"node_id": "playsbc-a", "state": "draining", "weight": 0, "draining": True},
+                {"node_id": "playsbc-b", "state": "active", "weight": 100},
+            ],
+            "load_balancing": {"enabled": True, "policy": "external-lb", "drain_new_calls": True},
+        },
+        "expected_log_markers": {
+            "log.platform": ["HA NODE STARTED", "HA LOAD BALANCING MODEL", "HA NODE DRAINING"],
+            "log.call": ["HA NODE DRAINING REJECT", "reason=draining"],
+        },
+    },
     "tls-transport-policy": {
         "caller": "tls-a",
         "callee": "tls-b",
@@ -821,6 +843,7 @@ PROFILE_DESCRIPTIONS = {
     "esbc-trunk-metrics": "Complete one trunk-group call and verify per-trunk attempt and success counters.",
     "ha-shared-state-rtpengine": "Run an RTPengine-backed B2BUA call with HA shared registrar/dialog state and node-to-RTPengine pairing enabled.",
     "ha-options-health-recovery": "Start active OPTIONS probing against a down trunk and verify timed health recovery marks it up.",
+    "ha-node-draining": "Mark the local PlaySBC node as draining and verify new INVITEs are rejected with 503 while the node stays alive.",
     "tls-transport-policy": "Register and complete a B2BUA call over TLS on both realms using a transport policy.",
     "tcp-connection-reuse": "Complete a TCP B2BUA call and verify PlaySBC reuses its peer transport connection.",
     "tcp-connection-failure": "Route to an unreachable TCP peer and verify transport failure plus 480 propagation.",

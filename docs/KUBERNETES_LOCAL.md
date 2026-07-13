@@ -43,7 +43,7 @@ kubectl scale deployment/playsbc-playsbc --replicas=2
 kubectl get pods -l app.kubernetes.io/name=playsbc -o wide
 ```
 
-`ClientIP` affinity keeps one SIP source on one PlaySBC pod and one RTPengine control endpoint. The HA lab mode can also use SQLite-backed shared registrar/dialog state plus node-to-RTPengine pairing. This is useful for active-active experiments, but it is still a lab store; a production-style backend such as PostgreSQL or Redis is a later hardening phase.
+`ClientIP` affinity keeps one SIP source on one PlaySBC pod and one RTPengine control endpoint. The HA lab mode can also use SQLite-backed shared registrar/dialog state, node-to-RTPengine pairing, external-LB policy metadata, and per-node draining. This is useful for active-active experiments, but it is still a lab store; a production-style backend such as PostgreSQL or Redis is a later hardening phase.
 
 ## Media Model
 

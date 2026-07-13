@@ -636,6 +636,8 @@ class ConfigTests(unittest.TestCase):
                     '{"media_backend": "rtpengine", '
                     '"ha": {"enabled": true, "cluster_id": "playsbc-aa", "node_id": "playsbc-b", '
                     f'"shared_state_path": "{Path(tmp) / "ha.sqlite3"}", '
+                    '"nodes": [{"node_id": "playsbc-a", "state": "active"}, {"node_id": "playsbc-b", "state": "draining"}], '
+                    '"load_balancing": {"policy": "external-lb"}, '
                     '"rtpengine_pairs": ['
                     '{"node_id": "playsbc-a", "rtpengine_url": "udp://127.0.0.1:2223"}, '
                     '{"node_id": "playsbc-b", "rtpengine_url": "udp://127.0.0.2:2223"}'
@@ -649,6 +651,23 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("playsbc-b", json_text)
         self.assertTrue(config.ha["enabled"])
         self.assertEqual(server.select_ha_rtpengine_url(config.ha, config.rtpengine_url)[0], "udp://127.0.0.2:2223")
+        self.assertEqual(server.ha_load_balancing_policy(config.ha), "external-lb")
+        self.assertTrue(server.ha_node_draining(config.ha))
+
+    def test_ha_node_draining_helper_uses_local_node_state(self):
+        ha = {
+            "enabled": True,
+            "node_id": "playsbc-a",
+            "shared_state_path": "/tmp/playsbc-ha.sqlite3",
+            "nodes": [
+                {"node_id": "playsbc-a", "state": "draining", "weight": 0},
+                {"node_id": "playsbc-b", "state": "active", "weight": 100},
+            ],
+            "failover": {"rtpengine_session_migration": "planned"},
+        }
+
+        self.assertTrue(server.ha_node_draining(ha))
+        self.assertEqual(server.ha_rtpengine_session_migration(ha), "planned")
 
     def test_rtpengine_codec_policy_masks_source_and_transcodes_target(self):
         policy = server.rtpengine_codec_policy((server.PCMU,), server.PCMA)

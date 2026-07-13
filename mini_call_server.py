@@ -1899,6 +1899,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.ha_config = dict(ha or {})
         self.node_id = ha_node_id(self.ha_config) if ha_enabled(self.ha_config) else "standalone"
         self.cluster_id = str(self.ha_config.get("cluster_id") or "playsbc-lab")
+        self.ha_nodes = ha_nodes(self.ha_config)
+        self.ha_load_balancing_policy = ha_load_balancing_policy(self.ha_config)
+        self.ha_node_draining = ha_node_draining(self.ha_config)
+        self.ha_dialog_restores = 0
         shared_path = ha_shared_state_path(self.ha_config)
         self.shared_state = SharedStateStore(shared_path, self.node_id, logger) if ha_enabled(self.ha_config) else None
         self.background_tasks: List[asyncio.Task] = []
@@ -1911,6 +1915,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     f"shared_state={shared_path} restored_registrations={len(self.registrations)}"
                 ),
             )
+            self.logger.platform(
+                "HA LOAD BALANCING MODEL",
+                (
+                    f"cluster={self.cluster_id} node={self.node_id} "
+                    f"policy={self.ha_load_balancing_policy} nodes={len(self.ha_nodes)} "
+                    f"draining={str(self.ha_node_draining).lower()} "
+                    f"rtpengine_session_migration={ha_rtpengine_session_migration(self.ha_config)}"
+                ),
+            )
+            if self.ha_node_draining:
+                self.logger.platform("HA NODE DRAINING", f"node={self.node_id} action=reject_new_invites")
         self.tls_client_context = tls_client_context
         self.tls_port = tls_port
 
@@ -2175,6 +2190,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
         if method == "INVITE":
             call_id = message.header("call-id", make_call_id())
+            if self.ha_node_draining:
+                self.logger.call(
+                    "HA NODE DRAINING REJECT",
+                    f"node={self.node_id} action=reject_new_invite reason=draining",
+                    call_id=call_id,
+                )
+                self.send_response(message, 503, "Node Draining", to_header=message.header("to"))
+                return
             try:
                 dialog = self.dialogs.create_invite(
                     call_id,
@@ -3574,9 +3597,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if not dialog:
             return None
         self.dialogs.dialogs[call_id] = dialog
+        self.ha_dialog_restores += 1
         self.logger.platform(
             "HA DIALOG RESTORED",
-            f"node={self.node_id} call_id={call_id} state={dialog.state.name}",
+            f"node={self.node_id} call_id={call_id} state={dialog.state.name} restore_count={self.ha_dialog_restores}",
         )
         return dialog
 
@@ -4527,6 +4551,35 @@ def ha_rtpengine_pairs(ha: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [dict(item) for item in raw if isinstance(item, dict)]
 
 
+def ha_nodes(ha: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = ha.get("nodes") or ha.get("playsbc_nodes") or []
+    return [dict(item) for item in raw if isinstance(item, dict)]
+
+
+def ha_local_node(ha: Dict[str, Any]) -> Dict[str, Any]:
+    node_id = ha_node_id(ha)
+    for node in ha_nodes(ha):
+        if str(node.get("node_id") or node.get("id") or "") == node_id:
+            return node
+    return {}
+
+
+def ha_node_draining(ha: Dict[str, Any]) -> bool:
+    node = ha_local_node(ha)
+    state = str(node.get("state") or ha.get("node_state") or "active").lower()
+    return bool(node.get("draining", ha.get("draining", False))) or state == "draining"
+
+
+def ha_load_balancing_policy(ha: Dict[str, Any]) -> str:
+    load_balancing = ha.get("load_balancing") if isinstance(ha.get("load_balancing"), dict) else {}
+    return str(load_balancing.get("policy") or ha.get("load_balancing_policy") or "local-preferred")
+
+
+def ha_rtpengine_session_migration(ha: Dict[str, Any]) -> str:
+    failover = ha.get("failover") if isinstance(ha.get("failover"), dict) else {}
+    return str(failover.get("rtpengine_session_migration") or ha.get("rtpengine_session_migration") or "planned")
+
+
 def select_ha_rtpengine_url(ha: Dict[str, Any], default_url: str) -> Tuple[str, str]:
     if not ha_enabled(ha):
         return default_url, ""
@@ -4587,6 +4640,15 @@ def validate_config(config: ServerConfig) -> None:
         shared_path = ha_shared_state_path(config.ha)
         if not shared_path:
             raise ValueError("ha.shared_state_path is required when HA is enabled")
+        for node in ha_nodes(config.ha):
+            node_name = str(node.get("node_id") or node.get("id") or "")
+            node_state = str(node.get("state") or "active").lower()
+            if not node_name:
+                raise ValueError("each ha.nodes entry requires node_id")
+            if node_state not in {"active", "standby", "draining", "down"}:
+                raise ValueError("ha.nodes state must be active, standby, draining, or down")
+        if ha_load_balancing_policy(config.ha) not in {"local-preferred", "round-robin", "least-calls", "external-lb"}:
+            raise ValueError("ha.load_balancing.policy must be local-preferred, round-robin, least-calls, or external-lb")
         for pair in ha_rtpengine_pairs(config.ha):
             pair_node = str(pair.get("node_id") or pair.get("playsbc_node") or "")
             pair_url = str(pair.get("rtpengine_url") or pair.get("url") or "")
@@ -4701,6 +4763,9 @@ async def handle_health_request(
                     "playsbc_stream_reuses_total": protocol.stream_reuses,
                     "playsbc_stream_failures_total": protocol.stream_failures,
                     "playsbc_ha_enabled": int(protocol.shared_state is not None),
+                    "playsbc_ha_configured_nodes": len(protocol.ha_nodes),
+                    "playsbc_ha_node_draining": int(protocol.ha_node_draining),
+                    "playsbc_ha_dialog_restores_total": protocol.ha_dialog_restores,
                 }
             )
             if protocol.shared_state:

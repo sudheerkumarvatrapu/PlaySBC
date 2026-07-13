@@ -82,6 +82,21 @@ playsbc:
       cluster_id: playsbc-aa-lab
       node_id: playsbc-a
       shared_state_path: /var/lib/playsbc/ha-state.sqlite3
+      nodes:
+        - node_id: playsbc-a
+          state: active
+          weight: 100
+        - node_id: playsbc-b
+          state: active
+          weight: 100
+      load_balancing:
+        enabled: true
+        policy: external-lb
+        drain_new_calls: true
+      failover:
+        dialog_restore: true
+        mid_call_failover: dialog-restore-only
+        rtpengine_session_migration: planned
       rtpengine_pairs: []
     ai_voice_gateway:
       enabled: false

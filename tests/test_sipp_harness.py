@@ -2191,6 +2191,7 @@ Content-Length: 0
         self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-options-health-recovery", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ha-node-draining", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tls-transport-policy", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-port-exhaustion", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtcp-receiver-quality", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2598,6 +2599,12 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
 
     def test_dual_realm_ha_profiles_render_shared_state_and_pairing(self):
+        basic = run_dual_realm_profile.profile_args("basic-signalling", "ha-all-basic", "b2bua-Regression")
+        self.assertTrue(basic.ha["enabled"])
+        self.assertEqual(basic.ha["node_id"], "playsbc-a")
+        self.assertEqual(basic.ha["load_balancing"]["policy"], "external-lb")
+        self.assertEqual(len(basic.ha["nodes"]), 2)
+
         args = run_dual_realm_profile.profile_args("ha-shared-state-rtpengine", "ha-call", "b2bua-Regression")
 
         self.assertEqual(args.media_backend, "rtpengine")
@@ -2614,6 +2621,20 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(probe.trunk_groups[0]["members"][0]["options_probe"]["recovery_successes"], 1)
         rendered_trunks = run_b2bua_sipp_smoke.render_harness_config_templates(probe.trunk_groups, probe)
         self.assertEqual(rendered_trunks[0]["members"][0]["uri"], "sip:options@172.28.0.20:5060")
+
+        draining = run_dual_realm_profile.profile_args("ha-node-draining", "ha-drain", "b2bua-Regression")
+        self.assertTrue(draining.ha["enabled"])
+        self.assertEqual(draining.ha["nodes"][0]["state"], "draining")
+        self.assertEqual(draining.uac_scenario, "b2bua_uac_failed_outbound.xml")
+
+    def test_all_dual_realm_regression_profiles_render_ha_enabled(self):
+        for profile in run_regression_suite.ALL_B2BUA_PROFILES:
+            with self.subTest(profile=profile):
+                args = run_dual_realm_profile.profile_args(profile, f"ha-all-{profile}", "b2bua-Regression")
+                self.assertTrue(args.ha["enabled"])
+                self.assertEqual(args.ha["cluster_id"], "playsbc-aa-lab")
+                self.assertGreaterEqual(len(args.ha["nodes"]), 2)
+                self.assertIn("load_balancing", args.ha)
 
     def test_dual_realm_mixed_tls_srtp_profile_uses_independent_leg_transports(self):
         args = run_dual_realm_profile.profile_args("tls-srtp-to-tcp-rtp", "secure-call", "b2bua-Regression")
