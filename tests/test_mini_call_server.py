@@ -907,6 +907,84 @@ class B2BUAFlowLogTests(unittest.TestCase):
         self.assertIn("RTPengine", sip_log)
         self.assertIn("RTPengine RTP/RTCP input", sip_log)
 
+    def test_ai_rtpengine_ack_schedules_voice_turn_without_internal_media_session(self):
+        class NoInternalMedia:
+            def get_session(self, call_id):
+                return None
+
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                logger = server.SbcLogger(Path(tmp))
+                protocol = server.SipServerProtocol(
+                    "127.0.0.1",
+                    25060,
+                    media=NoInternalMedia(),
+                    logger=logger,
+                    default_payload=server.PCMU,
+                    auth_realm="playsbc",
+                    users={},
+                    bridge_rooms=(),
+                    b2bua_routes={},
+                    route_policies=(),
+                    b2bua_ladder_logs=True,
+                    media_backend="rtpengine",
+                    ai_voice_gateway={"enabled": True, "provider": "rasa"},
+                )
+                call_id = "ai-rtpengine-ack-call"
+                from_header = "<sip:caller@127.0.0.1>;tag=a-tag"
+                to_header = "<sip:ai-bot@127.0.0.1>;tag=playsbc"
+                via_header = "SIP/2.0/UDP 127.0.0.1:25060;branch=z9hG4bK-ai-ack"
+                dialog = protocol.dialogs.create_invite(call_id, from_header, via_header, "1 INVITE")
+                dialog.mark_ringing()
+                dialog.mark_answered()
+                route = server.RouteResult(
+                    target=server.SipUri("rasa-support", "ai-gateway.local", 5060),
+                    policy_name="ai-rasa",
+                    source="ai-gateway",
+                    group_name="rasa-support",
+                )
+                flow = server.AIVoiceFlowLog(
+                    logger,
+                    call_id,
+                    participants=("SIPp A", "PlaySBC", "RTPengine", "STT Adapter", "Rasa Bot", "TTS Adapter"),
+                )
+                ai_call = server.AIVoiceCall(
+                    call_id=call_id,
+                    target_user="ai-bot",
+                    route_result=route,
+                    flow_log=flow,
+                    media_backend="rtpengine",
+                )
+                protocol.ai_voice_calls_by_inbound[call_id] = ai_call
+                called = False
+
+                async def fake_run_ai_voice_turn(**kwargs):
+                    nonlocal called
+                    called = True
+                    self.assertIs(kwargs["ai_call"], ai_call)
+
+                protocol.run_ai_voice_turn = fake_run_ai_voice_turn
+                ack = server.SipMessage(
+                    "ACK sip:ai-bot@127.0.0.1:25060 SIP/2.0",
+                    {
+                        "call-id": call_id,
+                        "cseq": "1 ACK",
+                        "from": from_header,
+                        "to": to_header,
+                        "via": via_header,
+                    },
+                    "",
+                    ("127.0.0.1", 25060),
+                )
+
+                await protocol.handle_message(ack)
+                self.assertIsNotNone(ai_call.task)
+                assert ai_call.task is not None
+                await ai_call.task
+                self.assertTrue(called)
+
+        asyncio.run(scenario())
+
     def test_disabled_ladder_still_logs_rtpengine_media_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             route = server.RouteResult(

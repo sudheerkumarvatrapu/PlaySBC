@@ -1978,7 +1978,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             call_id = message.header("call-id")
             session = self.media.get_session(call_id)
             b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
-            if session or b2bua_call:
+            ai_call = self.ai_voice_calls_by_inbound.get(call_id)
+            if session or b2bua_call or ai_call:
                 try:
                     dialog = self.dialogs.acknowledge(call_id, message.header("cseq"))
                 except DialogError as exc:
@@ -1992,7 +1993,6 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 if b2bua_call:
                     b2bua_call.flow_log.sip("SIPp A", "B2BUA", "ACK")
                     self.send_outbound_ack(b2bua_call)
-                ai_call = self.ai_voice_calls_by_inbound.get(call_id)
                 if ai_call:
                     ai_call.flow_log.flow("SIPp A", "PlaySBC", "ACK")
                     if not ai_call.task:
