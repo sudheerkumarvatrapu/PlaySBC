@@ -305,7 +305,16 @@ B2BUA_PROFILES = {
             "fallback_text": "Rasa lab bot is unavailable",
         },
         "expected_log_markers": {
-            "log.ai": ["AI VOICE CALL START", "RASA REST REQUEST", "RASA REST RESPONSE", "AI TTS OUTPUT"],
+            "log.ai": [
+                "AI VOICE CALL START",
+                "AI STT INPUT",
+                "audio_decoded=false",
+                "RASA REST REQUEST",
+                "RASA REST RESPONSE",
+                "AI TTS OUTPUT",
+                "rtp_prompt_generated=false",
+            ],
+            "log.media": ["AI RTP INPUT ONLY"],
             "log.sip": ["AI VOICE CALL LADDER"],
         },
     },
@@ -2012,6 +2021,20 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
         (media_codec, media_anchor_ip, a_anchor_port, uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
         (server_codec, media_anchor_ip, b_anchor_port, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), 0xD10D0004, 7000, 112000),
     ]
+    if str(getattr(args, "profile", "")) == "ai-rasa-lab":
+        endpoint_streams = [
+            (
+                media_codec,
+                uac_ip,
+                int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])),
+                media_anchor_ip,
+                a_anchor_port,
+                0xA10A0001,
+                1000,
+                16000,
+            )
+        ]
+        server_streams = []
 
     base_time = sip_ack_media_start_timestamp(work_dir)
     if base_time is None:
@@ -2885,6 +2908,33 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
 
     packets = total_logged_rtp_packets(log_dir)
     summary = media_summary_stats(log_dir)
+    if str(getattr(args, "profile", "")) == "ai-rasa-lab":
+        status = "ai_input_observed" if packets > 0 else "no_ai_rtp_input_observed"
+        append_log_section(
+            log_dir,
+            "log.media",
+            "MEDIA OBSERVATION",
+            "\n".join(
+                [
+                    f"expected_rtp=True status={status}",
+                    "media_mode=ai-gateway",
+                    "ai_media_direction=input-only",
+                    "stt_adapter=lab-scripted",
+                    "tts_adapter=text-only",
+                    "tts_audio_generated=false",
+                    "rtp_prompt_generated=false",
+                    f"media_driver={args.media_driver}",
+                    f"media_codec={args.media_codec}",
+                    f"media_pcap={args.media_pcap_resolved}",
+                    f"hold_ms={args.hold_ms}",
+                    f"server_rtp_received_packets_total={packets}",
+                    f"server_rtcp_received_packets_total={summary['rtcp_packets_received_total']}",
+                    f"server_rtcp_sent_packets_total={summary['rtcp_packets_sent_total']}",
+                    "note=AI gateway currently verifies RTP input and Rasa REST; real TTS RTP prompts are a future adapter.",
+                ]
+            ),
+        )
+        return
     status = "rtp_observed" if packets > 0 else "no_rtp_observed"
     append_log_section(
         log_dir,

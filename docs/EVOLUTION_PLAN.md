@@ -20,11 +20,11 @@ PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-cer
 ### AI Voice Gateway
 
 ```text
-SIP caller -> PlaySBC AI route -> RTP media session -> STT/intent adapter -> Rasa REST -> TTS adapter/log prompt
+SIP caller -> PlaySBC AI route -> RTP input session -> STT/intent adapter -> Rasa REST -> text-only TTS adapter
 ```
 
 - Route policies can target `ai-gateway:<bot-name>`.
-- Phase 1 uses a lab adapter: SIP/RTP is real, Rasa is called through its REST channel, and STT/TTS are logged adapter stages.
+- Phase 1 uses a lab adapter: SIP/RTP input is real, Rasa is called through its REST channel, STT is scripted, and TTS is text-only.
 - Regression includes `ai-rasa-lab`: SIPp A calls `ai-bot`, PlaySBC answers, sends a Rasa REST turn, logs `log.ai`, and captures SIP/RTP/HTTP evidence.
 - Real Rasa can replace the mock by changing `ai_voice_gateway.rasa_webhook_url`.
 

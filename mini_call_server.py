@@ -760,6 +760,7 @@ class B2BUAFlowLog:
     def _ladder_arrow_line(self, sender_index: int, receiver_index: int) -> str:
         row = self._blank_ladder_row("")
         positions = self._ladder_positions()
+        position_set = set(positions)
         for position in positions:
             row[position] = "|"
 
@@ -767,12 +768,12 @@ class B2BUAFlowLog:
         receiver = positions[receiver_index]
         if sender < receiver:
             for position in range(sender + 1, receiver - 1):
-                row[position] = "-"
+                row[position] = "+" if position in position_set else "-"
             row[receiver - 1] = ">"
         else:
             row[receiver + 1] = "<"
             for position in range(receiver + 2, sender):
-                row[position] = "-"
+                row[position] = "+" if position in position_set else "-"
         return "".join(row).rstrip()
 
     def _blank_ladder_row(self, step: str) -> List[str]:
@@ -799,9 +800,9 @@ class B2BUAFlowLog:
 
 
 class AIVoiceFlowLog:
-    PARTICIPANTS = ("SIPp A", "PlaySBC", "Rasa Bot")
+    PARTICIPANTS = ("SIPp A", "PlaySBC", "STT Adapter", "Rasa Bot", "TTS Adapter")
     STEP_WIDTH = 6
-    COLUMN_WIDTH = 28
+    COLUMN_WIDTH = 24
 
     def __init__(self, logger: SbcLogger, call_id: str):
         self.logger = logger
@@ -886,18 +887,19 @@ class AIVoiceFlowLog:
     def _arrow_line(self, sender_index: int, receiver_index: int) -> str:
         row = self._blank()
         positions = self._positions()
+        position_set = set(positions)
         for position in positions:
             row[position] = "|"
         sender = positions[sender_index]
         receiver = positions[receiver_index]
         if sender < receiver:
             for position in range(sender + 1, receiver - 1):
-                row[position] = "-"
+                row[position] = "+" if position in position_set else "-"
             row[receiver - 1] = ">"
         else:
             row[receiver + 1] = "<"
             for position in range(receiver + 2, sender):
-                row[position] = "-"
+                row[position] = "+" if position in position_set else "-"
         return "".join(row).rstrip()
 
     def _put(self, row: List[str], start: int, text: str) -> None:
@@ -938,6 +940,8 @@ class AIVoiceCall:
     target_user: str
     route_result: RouteResult
     flow_log: AIVoiceFlowLog
+    selected_payload: int = PCMU
+    dtmf_payload_type: Optional[int] = None
     task: Optional[asyncio.Task] = None
     finalized: bool = False
 
@@ -1008,6 +1012,7 @@ class RtpSession:
     quality_loss_warn_percent: float = 1.0
     quality_jitter_warn_ms: float = 30.0
     relay_wait_logged: bool = False
+    ai_input_only_logged: bool = False
     closed: bool = False
 
     def log(self, event: str, detail: str = "", category: Optional[str] = None) -> None:
@@ -1225,6 +1230,16 @@ class RtpProtocol(asyncio.DatagramProtocol):
             self.session.handle_dtmf_payload(packet.payload)
             if self.session.media_mode in {"bridge", "b2bua"}:
                 self._relay_packet(packet)
+            return
+
+        if self.session.media_mode == "ai-gateway":
+            if not self.session.ai_input_only_logged:
+                self.session.log(
+                    "AI RTP INPUT ONLY",
+                    "reason=real_tts_not_configured action=record_without_echo rtp_prompt_generated=false",
+                    category="media",
+                )
+                self.session.ai_input_only_logged = True
             return
 
         if self.session.media_mode in {"bridge", "b2bua"}:
@@ -1974,6 +1989,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ai_call = self.ai_voice_calls_by_inbound.get(call_id)
                 if ai_call:
                     ai_call.flow_log.flow("SIPp A", "PlaySBC", "ACK")
+                    if not ai_call.task:
+                        ai_call.task = asyncio.create_task(
+                            self.run_ai_voice_turn(
+                                ai_call=ai_call,
+                                message=message,
+                                selected_payload=ai_call.selected_payload,
+                                dtmf_payload_type=ai_call.dtmf_payload_type,
+                            )
+                        )
             return
 
         if method == "CANCEL":
@@ -2047,7 +2071,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         dtmf_payload_type: Optional[int],
     ) -> None:
         flow_log = AIVoiceFlowLog(self.logger, inbound_call_id)
-        ai_call = AIVoiceCall(inbound_call_id, target_user, route, flow_log)
+        ai_call = AIVoiceCall(
+            inbound_call_id,
+            target_user,
+            route,
+            flow_log,
+            selected_payload=preferred_payload,
+            dtmf_payload_type=dtmf_payload_type,
+        )
         self.ai_voice_calls_by_inbound[inbound_call_id] = ai_call
         flow_log.flow("SIPp A", "PlaySBC", "INVITE")
         flow_log.flow("PlaySBC", "SIPp A", "100 Trying")
@@ -2114,17 +2145,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             (
                 f"provider={self.ai_voice_config.provider} bot={route.group_name or self.ai_voice_config.bot_name} "
                 f"target_user={target_user} input_mode={self.ai_voice_config.input_mode} "
+                f"stt=lab-scripted tts=text-only rtp_prompt_generated=false "
                 f"rasa_webhook={self.ai_voice_config.rasa_webhook_url}"
             ),
             call_id=inbound_call_id,
-        )
-        ai_call.task = asyncio.create_task(
-            self.run_ai_voice_turn(
-                ai_call=ai_call,
-                message=message,
-                selected_payload=preferred_payload,
-                dtmf_payload_type=dtmf_payload_type,
-            )
         )
 
     async def handle_b2bua_invite(
@@ -2147,7 +2171,6 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             route,
             enabled=self.b2bua_ladder_logs,
             logger=self.logger,
-            participants=("SIPp A", "B2BUA", "SIPp B", "RTPengine"),
         )
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
@@ -2316,6 +2339,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             route,
             enabled=self.b2bua_ladder_logs,
             logger=self.logger,
+            participants=("SIPp A", "B2BUA", "SIPp B", "RTPengine"),
         )
         flow_log.sip("SIPp A", "B2BUA", "INVITE", f"call_id={inbound_call_id} target_user={target_user}")
         flow_log.sip("B2BUA", "SIPp A", "100 Trying")
@@ -2713,9 +2737,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         }
         sender = f"playsbc-{safe_filename(ai_call.call_id)}"
         user_text = self.ai_voice_gateway.initial_user_text()
+        ai_call.flow_log.flow("PlaySBC", "STT Adapter", "RTP/media input")
+        ai_call.flow_log.flow("STT Adapter", "PlaySBC", "scripted text")
         self.logger.ai(
             "AI STT INPUT",
-            f"mode={self.ai_voice_config.input_mode} text={json.dumps(user_text)} sender={sender}",
+            (
+                f"adapter=lab-scripted audio_decoded=false mode={self.ai_voice_config.input_mode} "
+                f"text={json.dumps(user_text)} sender={sender}"
+            ),
             call_id=ai_call.call_id,
         )
         self.logger.ai(
@@ -2740,9 +2769,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             call_id=ai_call.call_id,
         )
         ai_call.flow_log.flow("Rasa Bot", "PlaySBC", "Rasa REST 200")
+        ai_call.flow_log.flow("PlaySBC", "TTS Adapter", "bot text")
+        ai_call.flow_log.flow("TTS Adapter", "PlaySBC", "text only")
         self.logger.ai(
             "AI TTS OUTPUT",
-            f"renderer=lab-log-only text={json.dumps(result.rendered_text)}",
+            (
+                "renderer=text-only audio_generated=false rtp_prompt_generated=false "
+                f"text={json.dumps(result.rendered_text)}"
+            ),
             call_id=ai_call.call_id,
         )
 

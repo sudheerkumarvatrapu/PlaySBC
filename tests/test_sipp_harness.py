@@ -1859,7 +1859,7 @@ Content-Length: 0
                 "2026-07-05 10:00:00 | B2BUA SIP LADDER | call_id=call-1\n"
                 "SIP LADDER\nStep       SIPp A       B2BUA       SIPp B\n"
                 "2026-07-05 10:00:00 | AI VOICE CALL LADDER | call_id=call-ai\n"
-                "AI VOICE CALL LADDER\nStep       SIPp A       PlaySBC       Rasa Bot\n"
+                "AI VOICE CALL LADDER\nStep       SIPp A       PlaySBC       STT Adapter       Rasa Bot       TTS Adapter\n"
                 "2026-07-05 10:00:01 | SIP RX REQUEST\n",
                 encoding="utf-8",
             )

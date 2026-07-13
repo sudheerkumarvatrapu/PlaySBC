@@ -268,6 +268,41 @@ class RtcpTests(unittest.TestCase):
         _payload, destination = session.rtcp_transport.sent[0]
         self.assertEqual(destination, ("127.0.0.1", 6001))
 
+    def test_ai_gateway_rtp_is_input_only_until_tts_is_configured(self):
+        class DummyTransport:
+            def __init__(self):
+                self.sent = []
+
+            def sendto(self, packet, destination):
+                self.sent.append((packet, destination))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = server.SbcLogger(Path(tmp))
+            session = server.RtpSession(
+                "ai-call",
+                "127.0.0.1",
+                30000,
+                media_mode="ai-gateway",
+                logger=logger,
+            )
+            session.transport = DummyTransport()
+            packet = server.RtpPacket.build(
+                payload_type=server.PCMU,
+                sequence=1,
+                timestamp=160,
+                ssrc=0xA10A0001,
+                payload=b"\xff" * 160,
+            )
+
+            server.RtpProtocol(session, server.G711Transcoder(logger)).datagram_received(packet, ("127.0.0.1", 6000))
+
+            media_log = (Path(tmp) / "log.media").read_text(encoding="utf-8")
+
+        self.assertEqual(session.packets_received, 1)
+        self.assertEqual(session.packets_sent, 0)
+        self.assertEqual(session.transport.sent, [])
+        self.assertIn("AI RTP INPUT ONLY", media_log)
+
 
 class ResponseTests(unittest.TestCase):
     def test_send_response_can_preserve_untagged_to_header_for_trying(self):
@@ -830,6 +865,28 @@ class B2BUAFlowLogTests(unittest.TestCase):
         self.assertIn("RTPengine", ladder)
         self.assertIn("OFFER", ladder)
         self.assertIn("ok OFFER", ladder)
+        self.assertNotIn("02 B2BUA -> RTPengine: OFFER", ladder)
+
+    def test_ai_voice_ladder_shows_stt_rasa_and_tts_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = server.SbcLogger(Path(tmp))
+            flow = server.AIVoiceFlowLog(logger, "ai-call")
+            flow.flow("SIPp A", "PlaySBC", "INVITE")
+            flow.flow("SIPp A", "PlaySBC", "ACK")
+            flow.flow("PlaySBC", "STT Adapter", "RTP/media input")
+            flow.flow("STT Adapter", "PlaySBC", "scripted text")
+            flow.flow("PlaySBC", "Rasa Bot", "Rasa REST POST")
+            flow.flow("Rasa Bot", "PlaySBC", "Rasa REST 200")
+            flow.flow("PlaySBC", "TTS Adapter", "bot text")
+            flow.flow("TTS Adapter", "PlaySBC", "text only")
+            flow.render()
+
+            sip_log = (Path(tmp) / "log.sip").read_text(encoding="utf-8")
+
+        self.assertIn("STT Adapter", sip_log)
+        self.assertIn("Rasa Bot", sip_log)
+        self.assertIn("TTS Adapter", sip_log)
+        self.assertIn("text only", sip_log)
 
     def test_disabled_ladder_still_logs_rtpengine_media_events(self):
         with tempfile.TemporaryDirectory() as tmp:

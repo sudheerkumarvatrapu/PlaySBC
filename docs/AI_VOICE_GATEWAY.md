@@ -16,10 +16,12 @@ SIPp A / caller
 
 - **SIP termination:** PlaySBC terminates the inbound SIP call as an AI endpoint.
 - **Routing:** `route_policies[].target` can use `ai-gateway:<bot-name>`.
-- **Media:** RTP is accepted by PlaySBC. Phase 1 logs the AI media pipeline and keeps the existing G.711 RTP evidence path.
+- **Media:** RTP is accepted by PlaySBC as caller input. The current lab profile does not synthesize voice back to the caller.
 - **Rasa integration:** PlaySBC posts `sender`, `message`, and call metadata to the Rasa REST webhook.
-- **STT/TTS boundary:** STT and TTS are adapter stages today. They are intentionally isolated so Whisper/Vosk/Piper/Coqui can be added without disturbing SIP/B2BUA routing.
+- **STT/TTS boundary:** STT is `lab-scripted` and TTS is `text-only` today. This is why the AI regression should not be treated as an audible voicebot yet.
 - **Logging:** `log.ai` records AI call start/end, STT input, Rasa request/response, TTS output, and the AI call ladder.
+
+The SIPp media PCAP used by the test is only G.711 lab audio. Earlier builds echoed that tone back, which sounded like a continuous beep. The AI gateway now records/analyzes input RTP without echoing fake TTS audio.
 
 ## Config Shape
 
@@ -53,6 +55,6 @@ ai_voice_gateway:
 ## Next Test Cases
 
 - DTMF-driven bot menu: RFC 4733 digit -> intent text -> Rasa REST.
-- Real STT lab: RTP audio -> STT transcript -> Rasa REST.
-- Real TTS lab: Rasa text -> G.711 prompt RTP.
+- Real STT lab: RTP audio -> Whisper/Vosk transcript -> Rasa REST.
+- Real TTS lab: Rasa text -> Piper/Coqui prompt -> G.711 RTP back to caller.
 - Bot-assisted B2BUA: AI joins a normal A/B call for transfer, release, or announcement.
