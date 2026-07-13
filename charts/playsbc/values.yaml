@@ -1,6 +1,8 @@
 replicaCount: 1
 
 image:
+  # For direct deployments after image publishing, use:
+  # repository: ghcr.io/sudheerkumarvatrapu/playsbc
   repository: playsbc
   tag: "1.0.0"
   pullPolicy: IfNotPresent
@@ -28,6 +30,8 @@ tls:
 rtpengine:
   enabled: false
   image:
+    # For direct deployments after image publishing, use:
+    # repository: ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine
     repository: drachtio/rtpengine
     tag: latest
     pullPolicy: IfNotPresent

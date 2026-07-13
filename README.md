@@ -29,6 +29,32 @@ License: MIT
 
 Helm package: `release/helm/playsbc-1.0.0.tgz`
 
+The Helm package contains Kubernetes manifests and PlaySBC configuration defaults. It does not embed container image layers. Kubernetes pulls the PlaySBC and RTPengine images at deploy time.
+
+Published-image deploy, after the GHCR images are available:
+
+```bash
+helm upgrade --install playsbc release/helm/playsbc-1.0.0.tgz \
+  --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
+  --set image.tag=1.0.0 \
+  --set rtpengine.enabled=true \
+  --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
+  --set rtpengine.image.tag=1.0.0
+```
+
+Local-image deploy for kind/minikube labs:
+
+```bash
+docker build -f docker/playsbc.Dockerfile -t playsbc:1.0.0 .
+docker build -f docker/rtpengine.Dockerfile -t playsbc-rtpengine:1.0.0 .
+helm upgrade --install playsbc release/helm/playsbc-1.0.0.tgz \
+  --set image.repository=playsbc \
+  --set image.tag=1.0.0 \
+  --set rtpengine.enabled=true \
+  --set rtpengine.image.repository=playsbc-rtpengine \
+  --set rtpengine.image.tag=1.0.0
+```
+
 ## Setup
 
 Install Docker Desktop on macOS/Windows, or Docker Engine with Compose on Linux. Install [Helm](https://helm.sh/docs/intro/install/), then:
