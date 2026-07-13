@@ -1,4 +1,4 @@
-<svg width="960" height="280" viewBox="0 0 960 280" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+<svg width="960" height="300" viewBox="0 0 960 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">PlaySBC logo</title>
   <desc id="desc">A colorful PlaySBC logo for a playful Session Border Controller lab with SIP, RTP, RTPengine, Voice AI Gateway, and Rasa regression.</desc>
   <defs>
@@ -17,12 +17,12 @@
       <stop offset="0.5" stop-color="#FACC15"/>
       <stop offset="1" stop-color="#34D399"/>
     </linearGradient>
-    <filter id="softShadow" x="0" y="0" width="960" height="280" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+    <filter id="softShadow" x="0" y="0" width="960" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
       <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#0F172A" flood-opacity="0.22"/>
     </filter>
   </defs>
 
-  <rect x="32" y="28" width="896" height="224" rx="34" fill="url(#bg)" filter="url(#softShadow)"/>
+  <rect x="32" y="28" width="896" height="244" rx="34" fill="url(#bg)" filter="url(#softShadow)"/>
   <path d="M790 62C840 62 880 102 880 152C880 202 840 242 790 242" stroke="#67E8F9" stroke-width="2" stroke-dasharray="8 12" opacity="0.42"/>
   <path d="M724 38C784 72 822 111 840 158C856 199 854 229 836 250" stroke="#A7F3D0" stroke-width="2" stroke-dasharray="7 13" opacity="0.36"/>
 
@@ -40,23 +40,24 @@
 
   <g fill="#F8FAFC">
     <text x="312" y="126" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="68" font-weight="800" letter-spacing="0">PlaySBC</text>
-    <text x="316" y="169" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" font-weight="600" opacity="0.88">Playful Session Border Controller: break SIP here, not in production</text>
+    <text x="316" y="169" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="16" font-weight="600" opacity="0.88">Playful Session Border Controller: break SIP here, not prod</text>
   </g>
 
-  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="16" font-weight="700">
-    <rect x="316" y="190" width="72" height="30" rx="15" fill="#DBEAFE"/>
-    <text x="337" y="210" fill="#1E40AF">SIPp</text>
-    <rect x="402" y="190" width="104" height="30" rx="15" fill="#DCFCE7"/>
-    <text x="427" y="210" fill="#166534">B2BUA</text>
-    <rect x="520" y="190" width="112" height="30" rx="15" fill="#FEF3C7"/>
-    <text x="538" y="210" fill="#92400E">RTPengine</text>
-    <rect x="646" y="190" width="136" height="30" rx="15" fill="#EDE9FE"/>
-    <text x="666" y="210" fill="#6D28D9">Transcoding</text>
-    <rect x="796" y="190" width="112" height="30" rx="15" fill="#CCFBF1"/>
-    <text x="812" y="210" fill="#0F766E">Regression</text>
-    <rect x="316" y="226" width="158" height="26" rx="13" fill="#FCE7F3"/>
-    <text x="334" y="244" fill="#BE185D">Voice AI Gateway</text>
-    <rect x="488" y="226" width="78" height="26" rx="13" fill="#FFE4E6"/>
-    <text x="509" y="244" fill="#BE123C">Rasa</text>
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" font-weight="800" text-anchor="middle">
+    <rect x="316" y="188" width="82" height="32" rx="16" fill="#DBEAFE"/>
+    <text x="357" y="209" fill="#1E40AF">SIPp</text>
+    <rect x="412" y="188" width="92" height="32" rx="16" fill="#DCFCE7"/>
+    <text x="458" y="209" fill="#166534">B2BUA</text>
+    <rect x="518" y="188" width="112" height="32" rx="16" fill="#FEF3C7"/>
+    <text x="574" y="209" fill="#92400E">RTPengine</text>
+    <rect x="644" y="188" width="112" height="32" rx="16" fill="#EDE9FE"/>
+    <text x="700" y="209" fill="#6D28D9">Transcode</text>
+
+    <rect x="316" y="230" width="174" height="32" rx="16" fill="#FCE7F3"/>
+    <text x="403" y="251" fill="#BE185D">Voice AI Gateway</text>
+    <rect x="506" y="230" width="118" height="32" rx="16" fill="#FFE4E6"/>
+    <text x="565" y="251" fill="#BE123C">Rasa REST</text>
+    <rect x="640" y="230" width="128" height="32" rx="16" fill="#CCFBF1"/>
+    <text x="704" y="251" fill="#0F766E">Regression</text>
   </g>
 </svg>
