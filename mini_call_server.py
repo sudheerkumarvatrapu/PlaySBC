@@ -50,6 +50,7 @@ except Exception:  # pragma: no cover - audioop is unavailable in newer Python b
 
 
 CRLF = "\r\n"
+PLAYSBC_VERSION = "1.0.0"
 PCMU = 0
 PCMA = 8
 SUPPORTED_CODECS = (PCMU, PCMA)
@@ -3699,7 +3700,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "To": to_header or ensure_tag(request.header("to")),
             "Call-ID": request.header("call-id"),
             "CSeq": request.header("cseq"),
-            "Server": "PlaySBC/0.1",
+            "Server": f"PlaySBC/{PLAYSBC_VERSION}",
             "Content-Length": str(len(body.encode("utf-8"))),
         }
         if extra_headers:

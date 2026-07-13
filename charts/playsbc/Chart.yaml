@@ -2,5 +2,20 @@ apiVersion: v2
 name: playsbc
 description: PlaySBC SIP, RTP, B2BUA, transcoding and regression lab server
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 1.0.0
+appVersion: "1.0.0"
+home: https://github.com/sudheerkumarvatrapu/PlaySBC
+sources:
+  - https://github.com/sudheerkumarvatrapu/PlaySBC
+maintainers:
+  - name: Sudheer Kumar Vatrapu
+    url: https://github.com/sudheerkumarvatrapu
+keywords:
+  - sip
+  - rtp
+  - b2bua
+  - sbc
+  - rtpengine
+  - sipp
+annotations:
+  artifacthub.io/license: MIT
