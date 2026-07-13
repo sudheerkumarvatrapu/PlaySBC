@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from ai_gateway import AiTurnResult, AiVoiceConfig, AiVoiceGateway
+from ai_gateway import AiTurnResult, AiVoiceConfig, AiVoiceGateway, BotAction
 from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
 from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp, parse_receiver_reports
@@ -804,9 +804,10 @@ class AIVoiceFlowLog:
     STEP_WIDTH = 6
     COLUMN_WIDTH = 24
 
-    def __init__(self, logger: SbcLogger, call_id: str):
+    def __init__(self, logger: SbcLogger, call_id: str, participants: Optional[Tuple[str, ...]] = None):
         self.logger = logger
         self.call_id = call_id
+        self.participants = participants or self.PARTICIPANTS
         self.events: List[Tuple[str, str, str]] = []
 
     def flow(self, sender: str, receiver: str, message: str) -> None:
@@ -838,20 +839,20 @@ class AIVoiceFlowLog:
         return "\n".join(lines)
 
     def _header(self) -> str:
-        columns = [f"{participant:^{self.COLUMN_WIDTH}}" for participant in self.PARTICIPANTS]
+        columns = [f"{participant:^{self.COLUMN_WIDTH}}" for participant in self.participants]
         return f"{'Step':<{self.STEP_WIDTH}}" + "".join(columns).rstrip()
 
     def _separator(self) -> str:
-        return "-" * (self.STEP_WIDTH + (self.COLUMN_WIDTH * len(self.PARTICIPANTS)))
+        return "-" * (self.STEP_WIDTH + (self.COLUMN_WIDTH * len(self.participants)))
 
     def _positions(self) -> List[int]:
         return [
             self.STEP_WIDTH + (index * self.COLUMN_WIDTH) + (self.COLUMN_WIDTH // 2)
-            for index, _participant in enumerate(self.PARTICIPANTS)
+            for index, _participant in enumerate(self.participants)
         ]
 
     def _blank(self, step: str = "") -> List[str]:
-        row = list(" " * (self.STEP_WIDTH + self.COLUMN_WIDTH * len(self.PARTICIPANTS)))
+        row = list(" " * (self.STEP_WIDTH + self.COLUMN_WIDTH * len(self.participants)))
         self._put(row, 0, f"{step:<{self.STEP_WIDTH}}")
         return row
 
@@ -862,10 +863,10 @@ class AIVoiceFlowLog:
         return "".join(row).rstrip()
 
     def _event(self, index: int, sender: str, receiver: str, label: str) -> List[str]:
-        if sender not in self.PARTICIPANTS or receiver not in self.PARTICIPANTS:
+        if sender not in self.participants or receiver not in self.participants:
             return [f"{index:02d} {sender} -> {receiver}: {label}"]
-        sender_index = self.PARTICIPANTS.index(sender)
-        receiver_index = self.PARTICIPANTS.index(receiver)
+        sender_index = self.participants.index(sender)
+        receiver_index = self.participants.index(receiver)
         return [
             self._label_line(index, sender_index, receiver_index, label),
             self._arrow_line(sender_index, receiver_index),
@@ -942,6 +943,11 @@ class AIVoiceCall:
     flow_log: AIVoiceFlowLog
     selected_payload: int = PCMU
     dtmf_payload_type: Optional[int] = None
+    media_backend: str = "internal"
+    rtpengine_call_id: str = ""
+    rtpengine_from_tag: str = ""
+    rtpengine_to_tag: str = ""
+    bot_actions: List[BotAction] = field(default_factory=list)
     task: Optional[asyncio.Task] = None
     finalized: bool = False
 
@@ -2070,7 +2076,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         remote_payloads: Tuple[int, ...],
         dtmf_payload_type: Optional[int],
     ) -> None:
-        flow_log = AIVoiceFlowLog(self.logger, inbound_call_id)
+        flow_log = AIVoiceFlowLog(
+            self.logger,
+            inbound_call_id,
+            participants=(
+                ("SIPp A", "PlaySBC", "RTPengine", "STT Adapter", "Rasa Bot", "TTS Adapter")
+                if self.media_backend == "rtpengine"
+                else None
+            ),
+        )
         ai_call = AIVoiceCall(
             inbound_call_id,
             target_user,
@@ -2078,6 +2092,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             flow_log,
             selected_payload=preferred_payload,
             dtmf_payload_type=dtmf_payload_type,
+            media_backend=self.media_backend,
         )
         self.ai_voice_calls_by_inbound[inbound_call_id] = ai_call
         flow_log.flow("SIPp A", "PlaySBC", "INVITE")
@@ -2091,6 +2106,18 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             flow_log.flow("PlaySBC", "SIPp A", "503 Service Unavailable")
             self.send_response(message, 503, "AI Gateway Disabled", to_header=to_header)
             self.finalize_ai_voice_call(ai_call, "disabled")
+            return
+
+        if self.media_backend == "rtpengine":
+            await self.handle_ai_gateway_invite_rtpengine(
+                message=message,
+                dialog=dialog,
+                to_header=to_header,
+                ai_call=ai_call,
+                remote_payloads=remote_payloads,
+                preferred_payload=preferred_payload,
+                dtmf_payload_type=dtmf_payload_type,
+            )
             return
 
         self.send_response(message, 180, "Ringing", to_header=to_header)
@@ -2145,10 +2172,151 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             (
                 f"provider={self.ai_voice_config.provider} bot={route.group_name or self.ai_voice_config.bot_name} "
                 f"target_user={target_user} input_mode={self.ai_voice_config.input_mode} "
-                f"stt=lab-scripted tts=text-only rtp_prompt_generated=false "
+                f"stt={self.ai_voice_config.stt_provider} tts={self.ai_voice_config.tts_provider} "
+                f"response_mode={self.ai_voice_config.response_mode} rtp_prompt_generated=false "
                 f"rasa_webhook={self.ai_voice_config.rasa_webhook_url}"
             ),
             call_id=inbound_call_id,
+        )
+
+    async def handle_ai_gateway_invite_rtpengine(
+        self,
+        message: SipMessage,
+        dialog: Any,
+        to_header: str,
+        ai_call: AIVoiceCall,
+        remote_payloads: Tuple[int, ...],
+        preferred_payload: int,
+        dtmf_payload_type: Optional[int],
+    ) -> None:
+        if not self.rtpengine_client:
+            ai_call.flow_log.flow("PlaySBC", "SIPp A", "500 RTPengine Not Configured")
+            self.send_response(message, 500, "RTPengine Not Configured", to_header=to_header)
+            self.finalize_ai_voice_call(ai_call, "rtpengine-not-configured")
+            return
+
+        self.send_response(message, 180, "Ringing", to_header=to_header)
+        ai_call.flow_log.flow("PlaySBC", "SIPp A", "180 Ringing")
+        unavailable_interfaces = [
+            direction
+            for direction in self.rtpengine_directions
+            if self.rtpengine_interfaces and direction not in self.rtpengine_interfaces
+        ]
+        if unavailable_interfaces:
+            detail = (
+                f"requested={','.join(self.rtpengine_directions)} "
+                f"available={','.join(sorted(self.rtpengine_interfaces))} "
+                f"unavailable={','.join(unavailable_interfaces)}"
+            )
+            self.logger.media("AI RTPENGINE INTERFACE UNAVAILABLE", detail, call_id=ai_call.call_id)
+            ai_call.flow_log.flow("PlaySBC", "SIPp A", "488 Not Acceptable Here")
+            self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
+            self.finalize_ai_voice_call(ai_call, "rtpengine-interface-unavailable")
+            return
+
+        from_tag = extract_header_tag(message.header("from")) or dialog.remote_tag or secrets.token_hex(6)
+        to_tag = dialog.local_tag or secrets.token_hex(6)
+        ai_call.rtpengine_call_id = ai_call.call_id
+        ai_call.rtpengine_from_tag = from_tag
+        ai_call.rtpengine_to_tag = to_tag
+        codec_policy = rtpengine_codec_policy(remote_payloads, preferred_payload)
+        self.logger.media(
+            "AI RTPENGINE MEDIA",
+            (
+                f"backend=rtpengine offered={format_payloads(remote_payloads)} "
+                f"selected={CODEC_NAMES.get(preferred_payload, preferred_payload)} "
+                f"dtmf_payload={dtmf_payload_type if dtmf_payload_type is not None else 'none'} "
+                f"direction={','.join(self.rtpengine_directions) or 'default'}"
+            ),
+            call_id=ai_call.call_id,
+        )
+        try:
+            ai_call.flow_log.flow("PlaySBC", "RTPengine", "OFFER")
+            offer_response = await retry_rtpengine_control(
+                "AI OFFER",
+                lambda: self.rtpengine_client.offer(
+                    call_id=ai_call.call_id,
+                    from_tag=from_tag,
+                    sdp=message.body,
+                    codec=codec_policy,
+                    direction=self.rtpengine_directions,
+                    transport_protocol=self.rtpengine_offer_transport_protocol,
+                    sdes=self.rtpengine_sdes,
+                    dtls=self.rtpengine_dtls,
+                ),
+                B2BUAFlowLog(self.media.log_dir, ai_call.call_id, ai_call.target_user, ai_call.route_result, enabled=False, logger=self.logger),
+            )
+            ai_call.flow_log.flow("RTPengine", "PlaySBC", f"{offer_response.get('result', 'ok')} OFFER")
+            ai_sink_port = self.media.port_max + 2 if self.media.port_max <= 65532 else self.media.port_min
+            ai_side_sdp = make_sdp(
+                self.b2bua_advertised_ip,
+                ai_sink_port,
+                preferred_payload,
+                dtmf_payload_type=dtmf_payload_type,
+            )
+            self.logger.media(
+                "AI RTPENGINE SINK SDP",
+                f"local={self.b2bua_advertised_ip}:{ai_sink_port} purpose=rtpengine_anchor_without_internal_rtp_listener",
+                call_id=ai_call.call_id,
+            )
+            ai_call.flow_log.flow("PlaySBC", "RTPengine", "ANSWER")
+            answer_response = await retry_rtpengine_control(
+                "AI ANSWER",
+                lambda: self.rtpengine_client.answer(
+                    call_id=ai_call.call_id,
+                    from_tag=from_tag,
+                    to_tag=to_tag,
+                    sdp=ai_side_sdp,
+                    codec=codec_policy,
+                    transport_protocol=self.rtpengine_answer_transport_protocol,
+                    sdes=self.rtpengine_sdes,
+                    dtls=self.rtpengine_dtls,
+                ),
+                B2BUAFlowLog(self.media.log_dir, ai_call.call_id, ai_call.target_user, ai_call.route_result, enabled=False, logger=self.logger),
+            )
+            answer_sdp = str(answer_response.get("sdp") or "")
+            if not answer_sdp:
+                raise RtpengineError("RTPengine answer response did not include SDP")
+            ai_call.flow_log.flow("RTPengine", "PlaySBC", f"{answer_response.get('result', 'ok')} ANSWER")
+            self.logger.media(
+                "AI RTPENGINE ANSWER",
+                (
+                    f"status={answer_response.get('result', 'unknown')} "
+                    f"rewritten_sdp_bytes={len(answer_sdp.encode('utf-8'))}"
+                ),
+                call_id=ai_call.call_id,
+            )
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.logger.media("AI RTPENGINE FAILED", str(exc), call_id=ai_call.call_id)
+            ai_call.flow_log.flow("RTPengine", "PlaySBC", "failed")
+            ai_call.flow_log.flow("PlaySBC", "SIPp A", "488 Not Acceptable Here")
+            self.send_response(message, 488, "Not Acceptable Here", to_header=to_header)
+            self.finalize_ai_voice_call(ai_call, "rtpengine-failed")
+            return
+
+        self.send_response(
+            message,
+            200,
+            "OK",
+            body=answer_sdp,
+            to_header=to_header,
+            extra_headers={
+                "Contact": f"<{self.inbound_contact_uri(ai_call.target_user, message.transport)}>",
+                "Content-Type": "application/sdp",
+            },
+        )
+        dialog.mark_answered()
+        ai_call.flow_log.flow("PlaySBC", "SIPp A", "200 OK")
+        self.logger.ai(
+            "AI VOICE CALL START",
+            (
+                f"provider={self.ai_voice_config.provider} bot={ai_call.route_result.group_name or self.ai_voice_config.bot_name} "
+                f"target_user={ai_call.target_user} input_mode={self.ai_voice_config.input_mode} "
+                f"stt={self.ai_voice_config.stt_provider} tts={self.ai_voice_config.tts_provider} "
+                f"response_mode={self.ai_voice_config.response_mode} media_backend=rtpengine "
+                f"rasa_webhook={self.ai_voice_config.rasa_webhook_url}"
+            ),
+            call_id=ai_call.call_id,
         )
 
     async def handle_b2bua_invite(
@@ -2737,12 +2905,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         }
         sender = f"playsbc-{safe_filename(ai_call.call_id)}"
         user_text = self.ai_voice_gateway.initial_user_text()
-        ai_call.flow_log.flow("PlaySBC", "STT Adapter", "RTP/media input")
-        ai_call.flow_log.flow("STT Adapter", "PlaySBC", "scripted text")
+        media_input_label = "RTPengine RTP/RTCP input" if ai_call.media_backend == "rtpengine" else "RTP/media input"
+        ai_call.flow_log.flow("PlaySBC", "STT Adapter", media_input_label)
+        ai_call.flow_log.flow("STT Adapter", "PlaySBC", self.ai_voice_config.stt_provider)
         self.logger.ai(
             "AI STT INPUT",
             (
-                f"adapter=lab-scripted audio_decoded=false mode={self.ai_voice_config.input_mode} "
+                f"adapter={self.ai_voice_config.stt_provider} audio_decoded=false mode={self.ai_voice_config.input_mode} "
                 f"text={json.dumps(user_text)} sender={sender}"
             ),
             call_id=ai_call.call_id,
@@ -2754,6 +2923,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         )
         ai_call.flow_log.flow("PlaySBC", "Rasa Bot", "Rasa REST POST")
         result: AiTurnResult = await self.ai_voice_gateway.start_turn(sender, metadata)
+        stt = result.stt
+        if stt:
+            self.logger.ai(
+                "AI STT RESULT",
+                (
+                    f"provider={stt.provider} engine_ready={str(stt.engine_ready).lower()} "
+                    f"audio_decoded={str(stt.audio_decoded).lower()} duration_seconds={stt.duration_seconds:.3f} "
+                    f"error={json.dumps(stt.error)} text={json.dumps(stt.text)}"
+                ),
+                call_id=ai_call.call_id,
+            )
         if result.error:
             self.logger.ai(
                 "RASA REST ERROR",
@@ -2764,21 +2944,62 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "RASA REST RESPONSE",
             (
                 f"response_count={len(result.bot_responses)} fallback_used={str(result.fallback_used).lower()} "
-                f"duration_seconds={result.duration_seconds:.3f} text={json.dumps(result.rendered_text)}"
-            ),
-            call_id=ai_call.call_id,
-        )
-        ai_call.flow_log.flow("Rasa Bot", "PlaySBC", "Rasa REST 200")
-        ai_call.flow_log.flow("PlaySBC", "TTS Adapter", "bot text")
-        ai_call.flow_log.flow("TTS Adapter", "PlaySBC", "text only")
-        self.logger.ai(
-            "AI TTS OUTPUT",
-            (
-                "renderer=text-only audio_generated=false rtp_prompt_generated=false "
+                f"duration_seconds={result.duration_seconds:.3f} response_mode={result.response_mode} "
                 f"text={json.dumps(result.rendered_text)}"
             ),
             call_id=ai_call.call_id,
         )
+        ai_call.flow_log.flow("Rasa Bot", "PlaySBC", "Rasa REST 200")
+        for index, response in enumerate(result.bot_responses, start=1):
+            if index > 1:
+                ai_call.flow_log.flow("Rasa Bot", "PlaySBC", f"response chunk {index}")
+        ai_call.flow_log.flow("PlaySBC", "TTS Adapter", "bot text")
+        ai_call.flow_log.flow("TTS Adapter", "PlaySBC", self.ai_voice_config.tts_provider)
+        tts = result.tts
+        audio_generated = str(tts.audio_generated).lower() if tts else "false"
+        rtp_prompt_generated = str(tts.rtp_prompt_generated).lower() if tts else "false"
+        tts_provider = tts.provider if tts else self.ai_voice_config.tts_provider
+        tts_error = tts.error if tts else ""
+        self.logger.ai(
+            "AI TTS OUTPUT",
+            (
+                f"renderer={tts_provider} audio_generated={audio_generated} "
+                f"rtp_prompt_generated={rtp_prompt_generated} error={json.dumps(tts_error)} "
+                f"text={json.dumps(result.rendered_text)}"
+            ),
+            call_id=ai_call.call_id,
+        )
+        for action in result.bot_actions:
+            self.apply_ai_bot_action(ai_call, action)
+
+    def apply_ai_bot_action(self, ai_call: AIVoiceCall, action: BotAction) -> None:
+        ai_call.bot_actions.append(action)
+        self.logger.ai(
+            "AI BOT ACTION",
+            (
+                f"action={action.action} target={action.target or 'none'} reason={action.reason or 'none'} "
+                "status=accepted control_plane_only=true"
+            ),
+            call_id=ai_call.call_id,
+        )
+        if action.action == "release":
+            self.logger.ai("AI BOT RELEASE", "status=queued reason=bot_requested_release", call_id=ai_call.call_id)
+            return
+        if action.action == "transfer":
+            self.logger.ai(
+                "AI BOT TRANSFER",
+                f"status=queued target={action.target or 'missing'} note=refer_or_reinvite_future_step",
+                call_id=ai_call.call_id,
+            )
+            return
+        if action.action == "join":
+            self.logger.ai(
+                "AI BOT JOIN",
+                f"status=queued target={action.target or 'b2bua-call'} note=conference_bridge_future_step",
+                call_id=ai_call.call_id,
+            )
+            return
+        self.logger.ai("AI BOT ACTION IGNORED", f"action={action.action}", call_id=ai_call.call_id)
 
     def finalize_ai_voice_call(self, ai_call: AIVoiceCall, reason: str) -> None:
         if ai_call.finalized:
@@ -2791,11 +3012,69 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             task_status = "done" if ai_call.task.done() else "running"
         self.logger.ai(
             "AI VOICE CALL END",
-            f"reason={reason} task_status={task_status}",
+            f"reason={reason} task_status={task_status} media_backend={ai_call.media_backend}",
             call_id=ai_call.call_id,
         )
+        if ai_call.media_backend == "rtpengine":
+            ai_call.flow_log.flow("PlaySBC", "RTPengine", "DELETE")
         ai_call.flow_log.render()
+        self.schedule_ai_rtpengine_delete(ai_call)
         self.ai_voice_calls_by_inbound.pop(ai_call.call_id, None)
+
+    def schedule_ai_rtpengine_delete(self, ai_call: AIVoiceCall) -> None:
+        if ai_call.media_backend != "rtpengine" or not self.rtpengine_client:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._delete_ai_rtpengine_call(ai_call))
+
+    async def _delete_ai_rtpengine_call(self, ai_call: AIVoiceCall) -> None:
+        assert self.rtpengine_client is not None
+        try:
+            query_timeout = min(max(self.rtpengine_client.timeout, 0.050), 1.0)
+            query_response, packet_samples, retry_count = await query_rtpengine_until_stable(
+                lambda: asyncio.wait_for(
+                    self.rtpengine_client.query(
+                        call_id=ai_call.rtpengine_call_id or ai_call.call_id,
+                        from_tag=ai_call.rtpengine_from_tag,
+                        to_tag=ai_call.rtpengine_to_tag,
+                    ),
+                    timeout=query_timeout,
+                )
+            )
+            summary = {
+                key: query_response[key]
+                for key in sorted(query_response)
+                if key in {"result", "created", "last signal", "totals", "tags"}
+            }
+            detail = json.dumps(summary, sort_keys=True)
+            self.logger.media(
+                "B2BUA RTPENGINE QUERY",
+                detail,
+                call_id=ai_call.call_id,
+            )
+            self.logger.media(
+                "AI RTPENGINE QUERY SUMMARY",
+                f"query_packet_samples={','.join(str(value) for value in packet_samples)} query_retry_count={retry_count}",
+                call_id=ai_call.call_id,
+            )
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.logger.media(
+                "B2BUA RTPENGINE QUERY FAILED",
+                f"error_type={type(exc).__name__} error={str(exc) or 'no additional detail'}",
+                call_id=ai_call.call_id,
+            )
+        try:
+            await self.rtpengine_client.delete(
+                call_id=ai_call.rtpengine_call_id or ai_call.call_id,
+                from_tag=ai_call.rtpengine_from_tag,
+                to_tag=ai_call.rtpengine_to_tag,
+            )
+            self.logger.media("B2BUA RTPENGINE DELETE", "status=ok", call_id=ai_call.call_id)
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.logger.media("B2BUA RTPENGINE DELETE FAILED", str(exc), call_id=ai_call.call_id)
 
     def schedule_b2bua_finalizer(self, b2bua_call: B2BUACall, delay: float = 2.0) -> None:
         try:
@@ -3836,6 +4115,12 @@ def validate_config(config: ServerConfig) -> None:
             raise ValueError("ai_voice_gateway.rasa_webhook_url must be an HTTP or HTTPS URL")
         if ai_config.rasa_timeout <= 0:
             raise ValueError("ai_voice_gateway.rasa_timeout must be greater than zero")
+        if ai_config.stt_provider not in {"lab-scripted", "scripted", "whisper", "vosk"}:
+            raise ValueError("ai_voice_gateway.stt_provider must be lab-scripted, whisper, or vosk")
+        if ai_config.tts_provider not in {"text-only", "lab-text", "piper", "coqui"}:
+            raise ValueError("ai_voice_gateway.tts_provider must be text-only, piper, or coqui")
+        if ai_config.response_mode not in {"rest", "callback", "streaming"}:
+            raise ValueError("ai_voice_gateway.response_mode must be rest, callback, or streaming")
     if len(config.rtpengine_directions) not in {0, 2}:
         raise ValueError("rtpengine_directions must contain exactly two interface names")
     if any(not direction.strip() for direction in config.rtpengine_directions):

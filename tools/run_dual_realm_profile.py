@@ -42,6 +42,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
     effective_route_policies,
     extract_helm_server_yaml,
     initialize_log_dir,
+    is_ai_gateway_profile,
     is_load_like_run,
     prepare_media_scenarios,
     prepare_registration_scenario,
@@ -600,6 +601,7 @@ def rtcp_command(
     duration: float,
     cname: str,
     receiver_report: bool,
+    expect_reply: bool = True,
 ) -> list[str]:
     command = [
         "python3",
@@ -620,8 +622,9 @@ def rtcp_command(
         f"{duration:.3f}",
         "--interval-seconds",
         "5",
-        "--expect-reply",
     ]
+    if expect_reply:
+        command.append("--expect-reply")
     if receiver_report:
         command.append("--receiver-report")
     return exec_command(
@@ -642,12 +645,13 @@ def start_rtcp_processes(
     core_target = CORE_RTPENGINE_IP if args.media_backend == "rtpengine" else CORE_SBC_IP
     peer_target = PEER_RTPENGINE_IP if args.media_backend == "rtpengine" else PEER_SBC_IP
     duration = max(1.0, (args.hold_ms / 1000.0) - args.media_start_delay)
+    expect_reply = not (is_ai_gateway_profile(args) and args.media_backend == "rtpengine")
     commands = [
         (
             "rtcp-a",
             rtcp_command(
                 "core-tools", CORE_UA_IP, UA_RTP_MIN + 1, core_target, core_port, duration,
-                "core-a@playsbc", args.rtcp_receiver_reports,
+                "core-a@playsbc", args.rtcp_receiver_reports, expect_reply,
             ),
         )
     ]
@@ -657,7 +661,7 @@ def start_rtcp_processes(
                 "rtcp-b",
                 rtcp_command(
                     "peer-tools", PEER_UA_IP, UA_RTP_MIN + 1, peer_target, peer_port, duration,
-                    "peer-b@playsbc", args.rtcp_receiver_reports,
+                    "peer-b@playsbc", args.rtcp_receiver_reports, expect_reply,
                 ),
             )
         )
@@ -923,6 +927,9 @@ def main() -> int:
         profile.hold_ms = args_cli.hold_ms
     env = os.environ.copy()
     env["PLAYSBC_TOPOLOGY_OUTPUT"] = str(bundle.resolve())
+    env["PLAYSBC_RASA_MOCK_RESPONSE_COUNT"] = str(getattr(profile, "rasa_mock_response_count", 1))
+    env["PLAYSBC_RASA_MOCK_ACTION"] = str(getattr(profile, "rasa_mock_action", ""))
+    env["PLAYSBC_RASA_MOCK_ACTION_TARGET"] = str(getattr(profile, "rasa_mock_action_target", ""))
     uac_scenario = uas_scenario = registration_scenario = ""
     results: list[SmokeResult] = []
     commands: list[tuple[str, list[str]]] = []

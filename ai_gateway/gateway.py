@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .adapters import SpeechToTextAdapter, SttResult, TextToSpeechAdapter, TtsResult
 from .rasa import RasaBotResponse, RasaRestClient, RasaRestConfig, RasaRestError
 
 
@@ -34,6 +35,12 @@ class AiVoiceConfig:
     initial_message: str = "hello"
     fallback_text: str = "AI assistant is not available right now."
     input_mode: str = "scripted"
+    stt_provider: str = "lab-scripted"
+    stt_command: str = ""
+    tts_provider: str = "text-only"
+    tts_command: str = ""
+    response_mode: str = "rest"
+    bot_actions_enabled: bool = True
     dtmf_intents: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_DTMF_INTENTS))
 
     @classmethod
@@ -51,6 +58,12 @@ class AiVoiceConfig:
             initial_message=str(raw.get("initial_message", "hello")),
             fallback_text=str(raw.get("fallback_text", "AI assistant is not available right now.")),
             input_mode=str(raw.get("input_mode", "scripted")).lower(),
+            stt_provider=str(raw.get("stt_provider", raw.get("stt_adapter", "lab-scripted"))).lower(),
+            stt_command=str(raw.get("stt_command", "")),
+            tts_provider=str(raw.get("tts_provider", raw.get("tts_adapter", "text-only"))).lower(),
+            tts_command=str(raw.get("tts_command", "")),
+            response_mode=str(raw.get("response_mode", "rest")).lower(),
+            bot_actions_enabled=bool(raw.get("bot_actions_enabled", True)),
             dtmf_intents={str(key): str(text) for key, text in (intents or DEFAULT_DTMF_INTENTS).items()},
         )
 
@@ -64,8 +77,22 @@ class AiVoiceConfig:
             "initial_message": self.initial_message,
             "fallback_text": self.fallback_text,
             "input_mode": self.input_mode,
+            "stt_provider": self.stt_provider,
+            "stt_command": self.stt_command,
+            "tts_provider": self.tts_provider,
+            "tts_command": self.tts_command,
+            "response_mode": self.response_mode,
+            "bot_actions_enabled": self.bot_actions_enabled,
             "dtmf_intents": dict(self.dtmf_intents),
         }
+
+
+@dataclass(frozen=True)
+class BotAction:
+    action: str
+    target: str = ""
+    reason: str = ""
+    raw: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,6 +103,10 @@ class AiTurnResult:
     fallback_used: bool
     error: str
     duration_seconds: float
+    stt: Optional[SttResult] = None
+    tts: Optional[TtsResult] = None
+    bot_actions: List[BotAction] = field(default_factory=list)
+    response_mode: str = "rest"
 
     @property
     def rendered_text(self) -> str:
@@ -108,6 +139,8 @@ class AiVoiceGateway:
             )
         )
         self.dtmf_mapper = DtmfIntentMapper(config.dtmf_intents)
+        self.stt = SpeechToTextAdapter(config.stt_provider, config.stt_command)
+        self.tts = TextToSpeechAdapter(config.tts_provider, config.tts_command)
 
     def initial_user_text(self, dtmf_digits: str = "") -> str:
         if self.config.input_mode == "dtmf":
@@ -120,11 +153,15 @@ class AiVoiceGateway:
         sender: str,
         metadata: Optional[Dict[str, Any]] = None,
         dtmf_digits: str = "",
+        audio_path: str = "",
     ) -> AiTurnResult:
         started = time.monotonic()
-        user_text = self.initial_user_text(dtmf_digits)
+        stt_result = await self.stt.transcribe(self.initial_user_text(dtmf_digits), audio_path)
+        user_text = stt_result.text
         try:
             responses = await self.rasa.send_message_async(sender, user_text, metadata or {})
+            rendered_text = " ".join(response.text for response in responses if response.text)
+            tts_result = await self.tts.synthesize(rendered_text)
             return AiTurnResult(
                 sender=sender,
                 user_text=user_text,
@@ -132,9 +169,14 @@ class AiVoiceGateway:
                 fallback_used=False,
                 error="",
                 duration_seconds=time.monotonic() - started,
+                stt=stt_result,
+                tts=tts_result,
+                bot_actions=self.extract_bot_actions(responses),
+                response_mode=self.config.response_mode,
             )
         except RasaRestError as exc:
             fallback = RasaBotResponse(text=self.config.fallback_text)
+            tts_result = await self.tts.synthesize(fallback.text)
             return AiTurnResult(
                 sender=sender,
                 user_text=user_text,
@@ -142,4 +184,27 @@ class AiVoiceGateway:
                 fallback_used=True,
                 error=str(exc),
                 duration_seconds=time.monotonic() - started,
+                stt=stt_result,
+                tts=tts_result,
+                bot_actions=[],
+                response_mode=self.config.response_mode,
             )
+
+    def extract_bot_actions(self, responses: List[RasaBotResponse]) -> List[BotAction]:
+        if not self.config.bot_actions_enabled:
+            return []
+        actions: List[BotAction] = []
+        for response in responses:
+            custom = response.custom or {}
+            action = custom.get("playsbc_action") or custom.get("action")
+            if not action:
+                continue
+            actions.append(
+                BotAction(
+                    action=str(action).lower(),
+                    target=str(custom.get("target") or custom.get("destination") or ""),
+                    reason=str(custom.get("reason") or ""),
+                    raw=dict(custom),
+                )
+            )
+        return actions

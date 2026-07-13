@@ -164,6 +164,9 @@ BASE_DEFAULTS = {
     "call_admission": {},
     "media_quality": {},
     "ai_voice_gateway": {},
+    "rasa_mock_response_count": 1,
+    "rasa_mock_action": "",
+    "rasa_mock_action_target": "",
     "rtcp_receiver_reports": False,
     "rtcp_enabled": True,
     "expected_log_markers": {},
@@ -316,6 +319,53 @@ B2BUA_PROFILES = {
             ],
             "log.media": ["AI RTP INPUT ONLY"],
             "log.sip": ["AI VOICE CALL LADDER"],
+        },
+    },
+    "ai-rasa-rtpengine": {
+        "caller": "ai-core-a",
+        "callee": "ai-bot",
+        "register_callee": False,
+        "start_uas": False,
+        "media_backend": "rtpengine",
+        "media_codec": "PCMU",
+        "media_driver": "sipp-pcap",
+        "hold_ms": 10000,
+        "route_policies": [
+            {
+                "name": "ai-rasa-rtpengine-gateway",
+                "match": "ai-bot",
+                "target": "ai-gateway:rasa-support",
+                "priority": 5,
+            }
+        ],
+        "ai_voice_gateway": {
+            "enabled": True,
+            "provider": "rasa",
+            "bot_name": "rasa-support",
+            "rasa_webhook_url": "http://172.28.0.60:5005/webhooks/rest/webhook",
+            "rasa_timeout": 3.0,
+            "input_mode": "scripted",
+            "initial_message": "hello from playsbc rtpengine voice",
+            "fallback_text": "Rasa lab bot is unavailable",
+            "stt_provider": "lab-scripted",
+            "tts_provider": "text-only",
+            "response_mode": "streaming",
+            "bot_actions_enabled": True,
+        },
+        "rasa_mock_response_count": 2,
+        "rasa_mock_action": "transfer",
+        "rasa_mock_action_target": "sip:agent@peer.example",
+        "expected_log_markers": {
+            "log.ai": [
+                "AI VOICE CALL START",
+                "media_backend=rtpengine",
+                "AI STT RESULT",
+                "response_mode=streaming",
+                "AI BOT ACTION",
+                "AI BOT TRANSFER",
+            ],
+            "log.media": ["AI RTPENGINE MEDIA", "AI RTPENGINE ANSWER", "B2BUA RTPENGINE QUERY"],
+            "log.sip": ["AI VOICE CALL LADDER", "RTPengine"],
         },
     },
     "invalid-bye": {
@@ -681,6 +731,7 @@ PROFILE_DESCRIPTIONS = {
     "register-auth-failure": "Attempt REGISTER digest authentication with a wrong password and require a second 401 response.",
     "dtmf-rfc4733": "Send and relay an RFC 4733 telephone-event during an established B2BUA media call.",
     "ai-rasa-lab": "Terminate one SIPp media call into the PlaySBC AI Voice Gateway and verify a Rasa REST turn.",
+    "ai-rasa-rtpengine": "Terminate one SIPp media call into the PlaySBC AI Voice Gateway while RTPengine anchors RTP/RTCP and Rasa returns a bot action.",
     "invalid-bye": "Send a BYE outside any dialog and expect PlaySBC to reject it.",
     "unknown-route": "Call an unregistered user with unknown-route rejection enabled and expect 404.",
     "failed-outbound": "Register SIPp B, have the outbound leg reject INVITE, and verify PlaySBC propagates failure.",
@@ -841,6 +892,11 @@ def check_rtpengine_preflight(url: str, timeout: float) -> Tuple[bool, str]:
 
 def is_load_like_run(args: argparse.Namespace) -> bool:
     return int(getattr(args, "calls", BASE_DEFAULTS["calls"])) > 1 or int(getattr(args, "rate", BASE_DEFAULTS["rate"])) > 1
+
+
+def is_ai_gateway_profile(args: argparse.Namespace) -> bool:
+    config = getattr(args, "ai_voice_gateway", {}) or {}
+    return isinstance(config, dict) and bool(config.get("enabled"))
 
 
 def sipp_trace_args(args: argparse.Namespace) -> List[str]:
@@ -1384,6 +1440,10 @@ def should_run_rtcp(args: argparse.Namespace) -> bool:
     )
 
 
+def should_expect_rtcp_reply(args: argparse.Namespace) -> bool:
+    return not (is_ai_gateway_profile(args) and getattr(args, "media_backend", "") == "rtpengine")
+
+
 def rtcp_expected_sender_names(args: argparse.Namespace) -> Tuple[str, ...]:
     if not bool(getattr(args, "start_uas", True)):
         return ("rtcp-a",)
@@ -1396,6 +1456,8 @@ def wait_for_rtcp_anchor_ports(work_dir: Path, args: argparse.Namespace, timeout
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         a_rtp, b_rtp = rtpengine_anchor_ports(work_dir)
+        if a_rtp and "rtcp-b" not in rtcp_expected_sender_names(args):
+            return a_rtp + 1, a_rtp + 1
         if a_rtp and b_rtp:
             return a_rtp + 1, b_rtp + 1
         time.sleep(0.050)
@@ -1410,7 +1472,7 @@ def build_rtcp_sender_commands(args: argparse.Namespace, work_dir: Path) -> List
     sender = str(ROOT / "tools" / "send_rtcp_reports.py")
 
     def command(source_port: int, target_port: int, ssrc: str, cname: str) -> List[str]:
-        return [
+        values = [
             sys.executable,
             sender,
             "--local-ip",
@@ -1429,8 +1491,10 @@ def build_rtcp_sender_commands(args: argparse.Namespace, work_dir: Path) -> List
             f"{duration:.3f}",
             "--interval-seconds",
             "5",
-            "--expect-reply",
         ]
+        if should_expect_rtcp_reply(args):
+            values.append("--expect-reply")
+        return values
 
     commands = [("rtcp-a", command(args.uac_rtp_min + 1, a_target_port, "0xC0DEC0DE", "sipp-a@playsbc"))]
     if "rtcp-b" in rtcp_expected_sender_names(args):
@@ -2021,7 +2085,7 @@ def rtp_media_packets(log_dir: Path, work_dir: Path, args: argparse.Namespace) -
         (media_codec, media_anchor_ip, a_anchor_port, uac_ip, int(getattr(args, "uac_rtp_min", BASE_DEFAULTS["uac_rtp_min"])), 0xC10C0003, 5000, 80000),
         (server_codec, media_anchor_ip, b_anchor_port, uas_ip, int(getattr(args, "uas_rtp_min", BASE_DEFAULTS["uas_rtp_min"])), 0xD10D0004, 7000, 112000),
     ]
-    if str(getattr(args, "profile", "")) == "ai-rasa-lab":
+    if is_ai_gateway_profile(args):
         endpoint_streams = [
             (
                 media_codec,
@@ -2874,35 +2938,44 @@ def append_media_observation(log_dir: Path, args: argparse.Namespace) -> None:
         query_stats = rtpengine_query_stats(log_dir)
         rtpengine_answered = "RTPENGINE ANSWER" in media_text
         status = "rtpengine_media_anchored" if rtpengine_answered or query_stats["rtp_packets_total"] > 0 else "rtpengine_media_not_confirmed"
+        ai_config = getattr(args, "ai_voice_gateway", {}) if is_ai_gateway_profile(args) else {}
+        lines = [
+            f"expected_rtp=True status={status}",
+            "media_backend=rtpengine",
+            f"media_driver={args.media_driver}",
+            f"media_codec={args.media_codec}",
+            f"media_pcap={args.media_pcap_resolved}",
+            f"hold_ms={args.hold_ms}",
+            f"media_delivery_threshold_percent={getattr(args, 'media_delivery_threshold_percent', 100.0)}",
+            f"media_per_call_threshold_percent={getattr(args, 'media_per_call_threshold_percent', 100.0)}",
+            f"rtpengine_query_count={query_stats['query_count']}",
+            f"rtpengine_query_failures={query_stats['query_failures']}",
+            f"rtpengine_query_retries={query_stats['query_retries']}",
+            f"rtpengine_rtp_packets_total={query_stats['rtp_packets_total']}",
+            f"rtpengine_rtp_packets_min={query_stats['rtp_packets_min']}",
+            f"rtpengine_rtp_packets_max={query_stats['rtp_packets_max']}",
+            f"rtpengine_rtp_bytes_total={query_stats['rtp_bytes_total']}",
+            f"rtpengine_rtp_errors_total={query_stats['rtp_errors_total']}",
+            f"rtpengine_rtcp_packets_total={query_stats['rtcp_packets_total']}",
+            f"rtpengine_rtcp_bytes_total={query_stats['rtcp_bytes_total']}",
+            f"rtpengine_rtcp_errors_total={query_stats['rtcp_errors_total']}",
+            "server_rtp_received_packets_total=0",
+        ]
+        if isinstance(ai_config, dict) and ai_config:
+            lines.extend(
+                [
+                    "media_mode=ai-gateway",
+                    f"stt_adapter={ai_config.get('stt_provider', '')}",
+                    f"tts_adapter={ai_config.get('tts_provider', '')}",
+                    "ai_media_direction=rtpengine-anchored-input",
+                ]
+            )
+        lines.append("note=RTPengine anchors RTP externally, so PlaySBC internal RTP counters remain zero")
         append_log_section(
             log_dir,
             "log.media",
             "MEDIA OBSERVATION",
-            "\n".join(
-                [
-                    f"expected_rtp=True status={status}",
-                    "media_backend=rtpengine",
-                    f"media_driver={args.media_driver}",
-                    f"media_codec={args.media_codec}",
-                    f"media_pcap={args.media_pcap_resolved}",
-                    f"hold_ms={args.hold_ms}",
-                    f"media_delivery_threshold_percent={getattr(args, 'media_delivery_threshold_percent', 100.0)}",
-                    f"media_per_call_threshold_percent={getattr(args, 'media_per_call_threshold_percent', 100.0)}",
-                    f"rtpengine_query_count={query_stats['query_count']}",
-                    f"rtpengine_query_failures={query_stats['query_failures']}",
-                    f"rtpengine_query_retries={query_stats['query_retries']}",
-                    f"rtpengine_rtp_packets_total={query_stats['rtp_packets_total']}",
-                    f"rtpengine_rtp_packets_min={query_stats['rtp_packets_min']}",
-                    f"rtpengine_rtp_packets_max={query_stats['rtp_packets_max']}",
-                    f"rtpengine_rtp_bytes_total={query_stats['rtp_bytes_total']}",
-                    f"rtpengine_rtp_errors_total={query_stats['rtp_errors_total']}",
-                    f"rtpengine_rtcp_packets_total={query_stats['rtcp_packets_total']}",
-                    f"rtpengine_rtcp_bytes_total={query_stats['rtcp_bytes_total']}",
-                    f"rtpengine_rtcp_errors_total={query_stats['rtcp_errors_total']}",
-                    "server_rtp_received_packets_total=0",
-                    "note=RTPengine anchors RTP externally, so PlaySBC internal RTP counters remain zero",
-                ]
-            ),
+            "\n".join(lines),
         )
         return
 

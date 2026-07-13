@@ -888,6 +888,25 @@ class B2BUAFlowLogTests(unittest.TestCase):
         self.assertIn("TTS Adapter", sip_log)
         self.assertIn("text only", sip_log)
 
+    def test_ai_voice_ladder_can_include_rtpengine_media_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = server.SbcLogger(Path(tmp))
+            flow = server.AIVoiceFlowLog(
+                logger,
+                "ai-call",
+                participants=("SIPp A", "PlaySBC", "RTPengine", "STT Adapter", "Rasa Bot", "TTS Adapter"),
+            )
+            flow.flow("SIPp A", "PlaySBC", "INVITE")
+            flow.flow("PlaySBC", "RTPengine", "OFFER")
+            flow.flow("RTPengine", "PlaySBC", "ok ANSWER")
+            flow.flow("PlaySBC", "STT Adapter", "RTPengine RTP/RTCP input")
+            flow.render()
+
+            sip_log = (Path(tmp) / "log.sip").read_text(encoding="utf-8")
+
+        self.assertIn("RTPengine", sip_log)
+        self.assertIn("RTPengine RTP/RTCP input", sip_log)
+
     def test_disabled_ladder_still_logs_rtpengine_media_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             route = server.RouteResult(

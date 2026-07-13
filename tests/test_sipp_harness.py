@@ -2173,6 +2173,7 @@ Content-Length: 0
         self.assertIn("register-auth-failure", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("dtmf-rfc4733", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-lab", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("unknown-route", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("failed-outbound", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("cancel", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2185,6 +2186,7 @@ Content-Length: 0
         self.assertIn("soak-1cps-30s", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tls-transport-policy", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2580,6 +2582,16 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(uac[1], "172.28.0.20:5060")
         self.assertIn("log.ai", run_regression_suite.B2BUA_LOG_FILES)
         self.assertIn("log.ai", run_b2bua_sipp_smoke.LOG_FILES)
+        self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
+
+    def test_dual_realm_ai_rtpengine_profile_anchors_media_with_rtpengine(self):
+        args = run_dual_realm_profile.profile_args("ai-rasa-rtpengine", "ai-rtpengine", "b2bua-Regression")
+
+        self.assertTrue(run_dual_realm_profile.needs_ai_mock(args))
+        self.assertEqual(args.media_backend, "rtpengine")
+        self.assertFalse(args.start_uas)
+        self.assertEqual(args.rasa_mock_response_count, 2)
+        self.assertEqual(args.rasa_mock_action, "transfer")
         self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
 
     def test_dual_realm_mixed_tls_srtp_profile_uses_independent_leg_transports(self):

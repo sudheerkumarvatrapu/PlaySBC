@@ -13,6 +13,9 @@ from typing import Any, Dict
 class MockRasaHandler(BaseHTTPRequestHandler):
     reply_template = "PlaySBC Rasa mock heard: {message}"
     delay_seconds = 0.0
+    response_count = 1
+    action = ""
+    action_target = ""
 
     def log_message(self, format: str, *args: object) -> None:
         print(f"{self.log_date_time_string()} {format % args}", flush=True)
@@ -39,14 +42,25 @@ class MockRasaHandler(BaseHTTPRequestHandler):
         message = str(payload.get("message") or "")
         sender = str(payload.get("sender") or "unknown")
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        text = self.reply_template.format(
-            sender=sender,
-            message=message,
-            caller=metadata.get("caller", ""),
-            callee=metadata.get("callee", ""),
-            call_id=metadata.get("call_id", ""),
-        )
-        self._write_json([{"recipient_id": sender, "text": text}])
+        responses = []
+        for index in range(max(1, self.response_count)):
+            text = self.reply_template.format(
+                sender=sender,
+                message=message,
+                caller=metadata.get("caller", ""),
+                callee=metadata.get("callee", ""),
+                call_id=metadata.get("call_id", ""),
+                index=index + 1,
+            )
+            item: Dict[str, Any] = {"recipient_id": sender, "text": text}
+            if index == 0 and self.action:
+                item["custom"] = {
+                    "playsbc_action": self.action,
+                    "target": self.action_target,
+                    "reason": "mock-rasa-regression",
+                }
+            responses.append(item)
+        self._write_json(responses)
 
     def _write_json(self, payload: object) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -63,10 +77,16 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=5005)
     parser.add_argument("--reply", default=MockRasaHandler.reply_template)
     parser.add_argument("--delay-seconds", type=float, default=0.0)
+    parser.add_argument("--response-count", type=int, default=1)
+    parser.add_argument("--action", default="")
+    parser.add_argument("--action-target", default="")
     args = parser.parse_args()
 
     MockRasaHandler.reply_template = args.reply
     MockRasaHandler.delay_seconds = max(0.0, args.delay_seconds)
+    MockRasaHandler.response_count = max(1, args.response_count)
+    MockRasaHandler.action = args.action
+    MockRasaHandler.action_target = args.action_target
     server = ThreadingHTTPServer((args.host, args.port), MockRasaHandler)
     print(f"Mock Rasa REST server listening on {args.host}:{args.port}", flush=True)
     server.serve_forever()

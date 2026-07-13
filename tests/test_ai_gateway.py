@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest import mock
 
-from ai_gateway import AiVoiceConfig, AiVoiceGateway, DtmfIntentMapper, RasaRestClient, RasaRestConfig
+from ai_gateway import AiVoiceConfig, AiVoiceGateway, DtmfIntentMapper, RasaRestClient, RasaRestConfig, TextToSpeechAdapter
 
 
 class FakeHttpResponse:
@@ -71,6 +71,37 @@ class RasaRestClientTests(unittest.TestCase):
         self.assertFalse(result.fallback_used)
         self.assertEqual(result.user_text, "hello from voice")
         self.assertEqual(result.rendered_text, "reply to hello from voice")
+        self.assertEqual(result.stt.provider, "lab-scripted")
+        self.assertEqual(result.tts.provider, "text-only")
+
+    def test_ai_voice_gateway_extracts_bot_actions_from_rasa_custom_payload(self):
+        async def fake_send(_client, _sender, _message, _metadata):
+            return [
+                FakeBotResponse(
+                    "I can transfer you",
+                    custom={
+                        "playsbc_action": "transfer",
+                        "target": "sip:agent@peer.example",
+                        "reason": "caller asked for agent",
+                    },
+                )
+            ]
+
+        with mock.patch.object(RasaRestClient, "send_message_async", fake_send):
+            gateway = AiVoiceGateway(AiVoiceConfig(enabled=True, response_mode="streaming"))
+            result = asyncio.run(gateway.start_turn("call-3", {}))
+
+        self.assertEqual(result.response_mode, "streaming")
+        self.assertEqual(len(result.bot_actions), 1)
+        self.assertEqual(result.bot_actions[0].action, "transfer")
+        self.assertEqual(result.bot_actions[0].target, "sip:agent@peer.example")
+
+    def test_tts_adapter_reports_unconfigured_real_engine_without_failing_lab(self):
+        result = asyncio.run(TextToSpeechAdapter("piper").synthesize("hello"))
+
+        self.assertFalse(result.engine_ready)
+        self.assertFalse(result.audio_generated)
+        self.assertEqual(result.error, "tts_command_not_configured")
 
     def test_dtmf_mapper_translates_digits_to_text(self):
         mapper = DtmfIntentMapper({"1": "balance", "2": "support"})
@@ -80,8 +111,9 @@ class RasaRestClientTests(unittest.TestCase):
 
 
 class FakeBotResponse:
-    def __init__(self, text):
+    def __init__(self, text, custom=None):
         self.text = text
+        self.custom = custom
 
 
 if __name__ == "__main__":

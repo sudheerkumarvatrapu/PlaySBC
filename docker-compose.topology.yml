@@ -58,7 +58,13 @@ services:
       - --port
       - "5005"
       - --reply
-      - "PlaySBC AI bot accepted {message} from {caller} to {callee}"
+      - "${PLAYSBC_RASA_MOCK_REPLY:-PlaySBC AI bot accepted {message} from {caller} to {callee}}"
+      - --response-count
+      - "${PLAYSBC_RASA_MOCK_RESPONSE_COUNT:-1}"
+      - --action
+      - "${PLAYSBC_RASA_MOCK_ACTION:-}"
+      - --action-target
+      - "${PLAYSBC_RASA_MOCK_ACTION_TARGET:-}"
     depends_on:
       - playsbc
     networks:

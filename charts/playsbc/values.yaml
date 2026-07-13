@@ -84,6 +84,12 @@ playsbc:
       rasa_webhook_url: http://rasa:5005/webhooks/rest/webhook
       rasa_timeout: 3.0
       input_mode: scripted
+      stt_provider: lab-scripted
+      stt_command: ""
+      tts_provider: text-only
+      tts_command: ""
+      response_mode: rest
+      bot_actions_enabled: true
       initial_message: hello
       fallback_text: AI assistant is not available right now.
       dtmf_intents:

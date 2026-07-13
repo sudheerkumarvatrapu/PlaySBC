@@ -20,12 +20,14 @@ PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-cer
 ### AI Voice Gateway
 
 ```text
-SIP caller -> PlaySBC AI route -> RTP input session -> STT/intent adapter -> Rasa REST -> text-only TTS adapter
+SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapter -> Rasa REST -> TTS adapter
 ```
 
 - Route policies can target `ai-gateway:<bot-name>`.
-- Phase 1 uses a lab adapter: SIP/RTP input is real, Rasa is called through its REST channel, STT is scripted, and TTS is text-only.
+- STT/TTS provider boundaries exist for lab-scripted, Whisper, Vosk, text-only, Piper, and Coqui modes.
+- Rasa REST supports multi-message responses; custom bot actions can request join, transfer, or release and are logged as control-plane actions.
 - Regression includes `ai-rasa-lab`: SIPp A calls `ai-bot`, PlaySBC answers, sends a Rasa REST turn, logs `log.ai`, and captures SIP/RTP/HTTP evidence.
+- Regression includes `ai-rasa-rtpengine`: RTP/RTCP is anchored by RTPengine while PlaySBC handles SIP/control and the Rasa turn.
 - Real Rasa can replace the mock by changing `ai_voice_gateway.rasa_webhook_url`.
 
 ### Lab Platform
@@ -42,6 +44,23 @@ SIP caller -> PlaySBC AI route -> RTP input session -> STT/intent adapter -> Ras
 - Multi-node RTPengine/PlaySBC node pairing and shared registrar/dialog state
 - Active SIP OPTIONS trunk probing and timed health recovery
 
+### AI Real Speech Pipeline
+
+Track this in a separate branch/PR, recommended branch:
+
+```text
+codex/ai-voice-real-speech-stt-tts
+```
+
+Target PR scope:
+
+- Speech PCAP playback: add real G.711u/G.711a speech PCAP assets and an `ai-rasa-rtpengine-speech` regression profile.
+- RTP audio extraction: assemble inbound RTP, decode G.711 to PCM/WAV, and feed Whisper/Vosk through the current STT adapter boundary.
+- TTS back to RTP: generate Piper/Coqui WAV, convert to G.711 RTP, and send the prompt back through RTPengine.
+- E2E validation: prove speech input, STT transcript, Rasa response, TTS RTP output, RTPengine query evidence, PCAP evidence, and AI ladder/report output.
+
+Estimated lab-quality timeline: 4 to 8 working days.
+
 ## Later
 
 ### WebRTC Gateway
@@ -50,9 +69,7 @@ SIP caller -> PlaySBC AI route -> RTP input session -> STT/intent adapter -> Ras
 
 ### AI Voice Gateway
 
-- Real STT/TTS engines such as Whisper/Vosk/Piper/Coqui behind the current adapter boundary
-- Rasa callback or streaming channel support for longer bot responses
-- Bot-assisted B2BUA calls where the AI can join, transfer, or release calls
+- Executed bot-assisted B2BUA actions: REFER/re-INVITE transfer, conference join, and release
 
 ## Delivery Rule
 
