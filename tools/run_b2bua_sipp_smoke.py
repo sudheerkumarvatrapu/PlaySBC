@@ -113,6 +113,7 @@ SIPP_PCAP_SUDO_BLOCKED_DETAIL = (
 )
 BASE_DEFAULTS = {
     "host": "127.0.0.1",
+    "server_host": "",
     "server_port": 25062,
     "sip_transport": "udp",
     "uac_transport": "",
@@ -164,6 +165,7 @@ BASE_DEFAULTS = {
     "call_admission": {},
     "media_quality": {},
     "ai_voice_gateway": {},
+    "ha": {},
     "rasa_mock_response_count": 1,
     "rasa_mock_action": "",
     "rasa_mock_action_target": "",
@@ -574,6 +576,72 @@ B2BUA_PROFILES = {
             "log.call": ["playsbc_trunk_carrier_a_attempts_total=1", "playsbc_trunk_carrier_a_successes_total=1"]
         },
     },
+    "ha-shared-state-rtpengine": {
+        "caller": "ha-core-a",
+        "callee": "ha-peer-b",
+        "media_backend": "rtpengine",
+        "ha": {
+            "enabled": True,
+            "cluster_id": "playsbc-aa-lab",
+            "node_id": "playsbc-a",
+            "shared_state_path": "/tmp/playsbc-{run_id}-shared-state.sqlite3",
+            "rtpengine_pairs": [
+                {
+                    "name": "core-pair-a",
+                    "node_id": "playsbc-a",
+                    "rtpengine_url": "{rtpengine_url}",
+                },
+                {
+                    "name": "core-pair-b",
+                    "node_id": "playsbc-b",
+                    "rtpengine_url": "{rtpengine_url}",
+                },
+            ],
+        },
+        "expected_log_markers": {
+            "log.platform": ["HA RTPENGINE PAIR SELECTED", "HA NODE STARTED", "HA REGISTRATION SYNC", "HA DIALOG SYNC"],
+            "log.media": ["RTPENGINE OFFER", "RTPENGINE ANSWER"],
+        },
+    },
+    "ha-options-health-recovery": {
+        "caller": "ha-probe-a",
+        "callee": "ha-probe-b",
+        "register_callee": False,
+        "start_uas": False,
+        "run_call": False,
+        "route_policies": [
+            {"name": "ha-probed-trunk", "match": "*", "target": "trunk-group:ha-probe", "priority": 10}
+        ],
+        "trunk_groups": [
+            {
+                "name": "ha-probe",
+                "members": [
+                    {
+                        "name": "recovering-peer",
+                        "uri": "sip:options@{server_host}:{server_port}",
+                        "state": "down",
+                        "options_probe": {
+                            "enabled": True,
+                            "interval_seconds": 0.2,
+                            "timeout_seconds": 0.5,
+                            "failure_threshold": 1,
+                            "recovery_successes": 1,
+                        },
+                    }
+                ],
+            }
+        ],
+        "ha": {
+            "enabled": True,
+            "cluster_id": "playsbc-aa-lab",
+            "node_id": "playsbc-a",
+            "shared_state_path": "/tmp/playsbc-{run_id}-probe-state.sqlite3",
+        },
+        "expected_log_markers": {
+            "log.platform": ["TRUNK OPTIONS PROBING STARTED", "HA NODE STARTED"],
+            "log.call": ["TRUNK OPTIONS PROBE", "trunk=recovering-peer", "health=up"],
+        },
+    },
     "tls-transport-policy": {
         "caller": "tls-a",
         "callee": "tls-b",
@@ -751,6 +819,8 @@ PROFILE_DESCRIPTIONS = {
     "esbc-hunt-group": "Distribute two calls across a round-robin hunt group and verify member counters.",
     "esbc-call-admission": "Reject a call with 503 when the configured concurrent-call admission limit is exhausted.",
     "esbc-trunk-metrics": "Complete one trunk-group call and verify per-trunk attempt and success counters.",
+    "ha-shared-state-rtpengine": "Run an RTPengine-backed B2BUA call with HA shared registrar/dialog state and node-to-RTPengine pairing enabled.",
+    "ha-options-health-recovery": "Start active OPTIONS probing against a down trunk and verify timed health recovery marks it up.",
     "tls-transport-policy": "Register and complete a B2BUA call over TLS on both realms using a transport policy.",
     "tcp-connection-reuse": "Complete a TCP B2BUA call and verify PlaySBC reuses its peer transport connection.",
     "tcp-connection-failure": "Route to an unreachable TCP peer and verify transport failure plus 480 propagation.",
@@ -1123,11 +1193,15 @@ def render_harness_config_templates(value: object, args: argparse.Namespace) -> 
     if isinstance(value, list):
         return [render_harness_config_templates(item, args) for item in value]
     if isinstance(value, str):
+        server_host = str(getattr(args, "server_host", "") or getattr(args, "host", BASE_DEFAULTS["host"]))
         return (
             value.replace("{host}", str(getattr(args, "host", BASE_DEFAULTS["host"])))
+            .replace("{server_host}", server_host)
             .replace("{server_port}", str(getattr(args, "server_port", BASE_DEFAULTS["server_port"])))
             .replace("{uas_port}", str(getattr(args, "uas_port", BASE_DEFAULTS["uas_port"])))
             .replace("{uac_port}", str(getattr(args, "uac_port", BASE_DEFAULTS["uac_port"])))
+            .replace("{rtpengine_url}", str(getattr(args, "rtpengine_url", BASE_DEFAULTS["rtpengine_url"])))
+            .replace("{run_id}", str(getattr(args, "resolved_run_id", getattr(args, "run_id", ""))))
         )
     return value
 
@@ -1178,6 +1252,7 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "rtpengine_dtls": getattr(args, "rtpengine_dtls", ""),
         "media_quality": getattr(args, "media_quality", {}),
         "ai_voice_gateway": getattr(args, "ai_voice_gateway", {}),
+        "ha": render_harness_config_templates(getattr(args, "ha", {}), args),
         "reject_unknown_routes": args.reject_unknown_routes,
         "tls_certfile": getattr(args, "tls_certfile", ""),
         "tls_keyfile": getattr(args, "tls_keyfile", ""),

@@ -9,6 +9,8 @@ PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-cer
 - SIP over UDP/TCP/TLS; REGISTER, OPTIONS, INVITE, ACK, CANCEL, and BYE
 - Digest registration, dialog/transaction state, registrar-backed routing
 - Trunk groups, primary/secondary selection, hunt groups, route policies, E.164/header normalization, CAC, health state, and counters
+- Active SIP OPTIONS trunk probing with failure thresholds and timed health recovery
+- HA shared registrar/dialog state using a SQLite lab store, plus node-to-RTPengine pairing for active-active experiments
 
 ### Media
 
@@ -38,11 +40,12 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - SBC category logs, combined live PCAP, and Robot-style HTML report with single-call ladders
 - Signalling, media, auth, routing, negative, soak, and 5 cps / 60-second CHT profiles
 - Kubernetes Helm lab with health probes, Secret-backed SIP users, RTPengine pairing, kind/minikube values, and a dialog-affinity experiment
+- HA regression profiles: `ha-shared-state-rtpengine` and `ha-options-health-recovery`
 
 ## Next
 
-- Multi-node RTPengine/PlaySBC node pairing and shared registrar/dialog state
-- Active SIP OPTIONS trunk probing and timed health recovery
+- Multi-node chaos/failover regression that kills one PlaySBC/RTPengine pair during an active dialog
+- External shared state backend option such as Redis/PostgreSQL after the SQLite lab store proves the behavior
 
 ### AI Real Speech Pipeline
 

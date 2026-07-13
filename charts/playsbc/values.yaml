@@ -77,6 +77,12 @@ playsbc:
     rtpengine_sdes: []
     rtpengine_dtls: ""
     media_quality: {}
+    ha:
+      enabled: false
+      cluster_id: playsbc-aa-lab
+      node_id: playsbc-a
+      shared_state_path: /var/lib/playsbc/ha-state.sqlite3
+      rtpengine_pairs: []
     ai_voice_gateway:
       enabled: false
       provider: rasa

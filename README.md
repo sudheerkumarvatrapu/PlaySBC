@@ -15,7 +15,7 @@
   <img alt="AI Rasa" src="https://img.shields.io/badge/-AI%20Rasa%20Gateway-BE185D?style=flat-square">
 </p>
 
-Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, AI voice gateway, and SIPp regression across real core and peer realms.
+Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, HA state experiments, AI voice gateway, and SIPp regression across real core and peer realms.
 
 [Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md) | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) | [Kubernetes lab](docs/KUBERNETES_LOCAL.md)
 
@@ -46,7 +46,7 @@ Core: SIPp A 172.28.0.10 -> PlaySBC 172.28.0.20 -> RTPengine 172.28.0.40
 Peer: RTPengine 192.168.28.40 <- PlaySBC 192.168.28.20 <- SIPp B 192.168.28.30
 ```
 
-Helm renders each profile config. Coverage includes trunk failover, normalization, hunt/CAC metrics, UDP/TCP/TLS, TLS/SRTP-to-RTP interworking, RTPengine faults, RTCP quality, auth, media, AI-to-Rasa REST, AI media via RTPengine, and load. Every testcase produces one combined SBC log bundle and live PCAP. Single-call ladders are shown directly in the Robot-style HTML report.
+Helm renders each profile config. Coverage includes trunk failover, active OPTIONS health recovery, shared registrar/dialog state, PlaySBC-to-RTPengine node pairing, normalization, hunt/CAC metrics, UDP/TCP/TLS, TLS/SRTP-to-RTP interworking, RTPengine faults, RTCP quality, auth, media, AI-to-Rasa REST, AI media via RTPengine, and load. Every testcase produces one combined SBC log bundle and live PCAP. Single-call ladders are shown directly in the Robot-style HTML report.
 
 ```text
 logs/reports/latest.html

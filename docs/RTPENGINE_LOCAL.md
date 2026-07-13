@@ -25,6 +25,25 @@ env PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_regressio
 
 Helm renders the configuration for each profile. RTPengine uses `direction=[core, peer]`; SIPp A and SIPp B never share a Docker network. Fault profiles cover control loss, session exhaustion, and invalid interfaces. Mixed secure profiles exercise TLS plus `RTP/SAVP` on one leg and UDP/TCP plus `RTP/AVP` on the other.
 
+## Active-Active HA Lab Model
+
+PlaySBC can run as a named HA node:
+
+```yaml
+ha:
+  enabled: true
+  cluster_id: playsbc-aa-lab
+  node_id: playsbc-a
+  shared_state_path: /var/lib/playsbc/ha-state.sqlite3
+  rtpengine_pairs:
+    - node_id: playsbc-a
+      rtpengine_url: udp://rtpengine-a:2223
+    - node_id: playsbc-b
+      rtpengine_url: udp://rtpengine-b:2223
+```
+
+Each PlaySBC node selects its paired RTPengine from `ha.rtpengine_pairs`. Registrar contacts and dialog checkpoints are written to the shared SQLite lab store, so sibling nodes can resolve shared registrations and restore dialog state for HA experiments.
+
 ## Focused Topology Call
 
 ```bash

@@ -28,6 +28,7 @@ import re
 import secrets
 import socket
 import ssl
+import sqlite3
 import struct
 import time
 from dataclasses import dataclass, field
@@ -39,7 +40,7 @@ from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
 from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp, parse_receiver_reports
 from rtp.rtpengine import RtpengineClient, RtpengineError, parse_rtpengine_url
-from sip.dialog import DialogError, DialogManager
+from sip.dialog import CallState, DialogError, DialogManager, SipDialog
 from sip.transaction import TransactionManager
 
 try:
@@ -98,6 +99,7 @@ class ServerConfig:
     rtpengine_dtls: str = ""
     media_quality: Dict[str, Any] = field(default_factory=dict)
     ai_voice_gateway: Dict[str, Any] = field(default_factory=dict)
+    ha: Dict[str, Any] = field(default_factory=dict)
     reject_unknown_routes: bool = False
     tls_certfile: str = ""
     tls_keyfile: str = ""
@@ -148,6 +150,7 @@ SERVER_CONFIG_KEYS = {
     "rtpengine_dtls",
     "media_quality",
     "ai_voice_gateway",
+    "ha",
     "reject_unknown_routes",
     "tls_certfile",
     "tls_keyfile",
@@ -299,9 +302,23 @@ class TrunkRuntime:
     successes: int = 0
     failures: int = 0
     consecutive_failures: int = 0
+    options_probe_enabled: bool = False
+    options_probe_interval: float = 30.0
+    options_probe_timeout: float = 2.0
+    options_probe_failure_threshold: int = 3
+    options_probe_recovery_threshold: int = 2
+    options_probe_successes: int = 0
+    options_probe_failures: int = 0
+    options_probe_consecutive_successes: int = 0
+    options_probe_consecutive_failures: int = 0
+    last_probe_at: float = 0.0
+    last_probe_status: str = "never"
 
     @classmethod
     def from_config(cls, value: Dict[str, Any], index: int) -> "TrunkRuntime":
+        probe = value.get("options_probe") or value.get("options_ping") or {}
+        if not isinstance(probe, dict):
+            probe = {}
         return cls(
             name=str(value.get("name") or f"trunk-{index + 1}"),
             uri=str(value.get("uri") or value.get("target") or ""),
@@ -309,6 +326,17 @@ class TrunkRuntime:
             enabled=bool(value.get("enabled", True)),
             healthy=str(value.get("state", "up")).lower() not in {"down", "failed", "disabled"},
             max_calls=max(0, int(value.get("max_calls", 0))),
+            options_probe_enabled=bool(probe.get("enabled", value.get("probe_enabled", False))),
+            options_probe_interval=max(0.1, float(probe.get("interval_seconds", value.get("probe_interval", 30.0)))),
+            options_probe_timeout=max(0.05, float(probe.get("timeout_seconds", value.get("probe_timeout", 2.0)))),
+            options_probe_failure_threshold=max(
+                1,
+                int(probe.get("failure_threshold", value.get("probe_failure_threshold", 3))),
+            ),
+            options_probe_recovery_threshold=max(
+                1,
+                int(probe.get("recovery_successes", value.get("probe_recovery_successes", 2))),
+            ),
         )
 
 
@@ -532,6 +560,28 @@ class RoutingEngine:
         if trunk.consecutive_failures >= failure_threshold:
             trunk.healthy = False
 
+    def record_probe_result(self, trunk_name: str, success: bool, status: str) -> Optional[TrunkRuntime]:
+        trunk = self.trunks.get(trunk_name)
+        if not trunk:
+            return None
+        trunk.last_probe_at = time.time()
+        trunk.last_probe_status = status
+        if success:
+            trunk.options_probe_successes += 1
+            trunk.options_probe_consecutive_successes += 1
+            trunk.options_probe_consecutive_failures = 0
+            if not trunk.healthy and trunk.options_probe_consecutive_successes >= trunk.options_probe_recovery_threshold:
+                trunk.healthy = True
+                trunk.consecutive_failures = 0
+            return trunk
+
+        trunk.options_probe_failures += 1
+        trunk.options_probe_consecutive_failures += 1
+        trunk.options_probe_consecutive_successes = 0
+        if trunk.options_probe_consecutive_failures >= trunk.options_probe_failure_threshold:
+            trunk.healthy = False
+        return trunk
+
     def metrics(self) -> Dict[str, int]:
         values = {
             "playsbc_active_calls": self.active_calls,
@@ -544,6 +594,9 @@ class RoutingEngine:
             values[f"{prefix}_attempts_total"] = trunk.attempts
             values[f"{prefix}_successes_total"] = trunk.successes
             values[f"{prefix}_failures_total"] = trunk.failures
+            values[f"{prefix}_options_probe_successes_total"] = trunk.options_probe_successes
+            values[f"{prefix}_options_probe_failures_total"] = trunk.options_probe_failures
+            values[f"{prefix}_options_probe_consecutive_failures"] = trunk.options_probe_consecutive_failures
         return values
 
 
@@ -632,6 +685,195 @@ class SbcLogger:
         with path.open("a", encoding="utf-8") as log_file:
             log_file.write(header + "\n")
             log_file.write(block.rstrip() + "\n")
+
+
+class SharedStateStore:
+    def __init__(self, path: str, node_id: str, logger: SbcLogger):
+        self.path = path
+        self.node_id = node_id
+        self.logger = logger
+        if path != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(path, timeout=2.0, isolation_level=None)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA busy_timeout=2000")
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS registrations (
+                user TEXT PRIMARY KEY,
+                contact_uri TEXT NOT NULL,
+                source_host TEXT NOT NULL,
+                source_port INTEGER NOT NULL,
+                expires_at REAL NOT NULL,
+                registered_at REAL NOT NULL,
+                owner_node TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dialogs (
+                call_id TEXT PRIMARY KEY,
+                local_tag TEXT NOT NULL,
+                remote_tag TEXT NOT NULL,
+                invite_branch TEXT NOT NULL,
+                remote_cseq INTEGER NOT NULL,
+                local_cseq INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                ringing_at REAL,
+                answered_at REAL,
+                acknowledged_at REAL,
+                terminated_at REAL,
+                owner_node TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
+
+    def load_registrations(self, now: Optional[float] = None) -> Dict[str, Registration]:
+        timestamp = time.time() if now is None else now
+        rows = self.connection.execute(
+            "SELECT * FROM registrations WHERE expires_at > ?",
+            (timestamp,),
+        ).fetchall()
+        return {
+            str(row["user"]): Registration(
+                user=str(row["user"]),
+                contact_uri=str(row["contact_uri"]),
+                source=(str(row["source_host"]), int(row["source_port"])),
+                expires_at=float(row["expires_at"]),
+                registered_at=float(row["registered_at"]),
+            )
+            for row in rows
+        }
+
+    def save_registration(self, registration: Registration) -> None:
+        now = time.time()
+        self.connection.execute(
+            """
+            INSERT INTO registrations (
+                user, contact_uri, source_host, source_port, expires_at, registered_at, owner_node, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user) DO UPDATE SET
+                contact_uri=excluded.contact_uri,
+                source_host=excluded.source_host,
+                source_port=excluded.source_port,
+                expires_at=excluded.expires_at,
+                registered_at=excluded.registered_at,
+                owner_node=excluded.owner_node,
+                updated_at=excluded.updated_at
+            """,
+            (
+                registration.user,
+                registration.contact_uri,
+                registration.source[0],
+                registration.source[1],
+                registration.expires_at,
+                registration.registered_at,
+                self.node_id,
+                now,
+            ),
+        )
+        self.logger.platform(
+            "HA REGISTRATION SYNC",
+            f"node={self.node_id} user={registration.user} contact={registration.contact_uri}",
+        )
+
+    def delete_registration(self, user: str) -> None:
+        self.connection.execute("DELETE FROM registrations WHERE user = ?", (user,))
+        self.logger.platform("HA REGISTRATION DELETE", f"node={self.node_id} user={user}")
+
+    def delete_expired_registrations(self, now: Optional[float] = None) -> int:
+        timestamp = time.time() if now is None else now
+        cursor = self.connection.execute("DELETE FROM registrations WHERE expires_at <= ?", (timestamp,))
+        return int(cursor.rowcount or 0)
+
+    def counts(self) -> Dict[str, int]:
+        registrations = self.connection.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
+        dialogs = self.connection.execute("SELECT COUNT(*) FROM dialogs").fetchone()[0]
+        answered_dialogs = self.connection.execute("SELECT COUNT(*) FROM dialogs WHERE state = 'ANSWERED'").fetchone()[0]
+        return {
+            "playsbc_ha_shared_registrations": int(registrations),
+            "playsbc_ha_shared_dialogs": int(dialogs),
+            "playsbc_ha_shared_answered_dialogs": int(answered_dialogs),
+        }
+
+    def dialog_owner(self, call_id: str) -> str:
+        row = self.connection.execute("SELECT owner_node FROM dialogs WHERE call_id = ?", (call_id,)).fetchone()
+        return str(row["owner_node"]) if row else ""
+
+    def save_dialog(self, dialog: SipDialog) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO dialogs (
+                call_id, local_tag, remote_tag, invite_branch, remote_cseq, local_cseq, state,
+                created_at, ringing_at, answered_at, acknowledged_at, terminated_at, owner_node, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(call_id) DO UPDATE SET
+                local_tag=excluded.local_tag,
+                remote_tag=excluded.remote_tag,
+                invite_branch=excluded.invite_branch,
+                remote_cseq=excluded.remote_cseq,
+                local_cseq=excluded.local_cseq,
+                state=excluded.state,
+                ringing_at=excluded.ringing_at,
+                answered_at=excluded.answered_at,
+                acknowledged_at=excluded.acknowledged_at,
+                terminated_at=excluded.terminated_at,
+                owner_node=excluded.owner_node,
+                updated_at=excluded.updated_at
+            """,
+            (
+                dialog.call_id,
+                dialog.local_tag,
+                dialog.remote_tag,
+                dialog.invite_branch,
+                dialog.remote_cseq,
+                dialog.local_cseq,
+                dialog.state.name,
+                dialog.created_at,
+                dialog.ringing_at,
+                dialog.answered_at,
+                dialog.acknowledged_at,
+                dialog.terminated_at,
+                self.node_id,
+                time.time(),
+            ),
+        )
+        self.logger.platform(
+            "HA DIALOG SYNC",
+            f"node={self.node_id} call_id={dialog.call_id} state={dialog.state.name}",
+        )
+
+    def load_dialog(self, call_id: str) -> Optional[SipDialog]:
+        row = self.connection.execute("SELECT * FROM dialogs WHERE call_id = ?", (call_id,)).fetchone()
+        if not row:
+            return None
+        try:
+            state = CallState[str(row["state"])]
+        except KeyError:
+            state = CallState.INIT
+        return SipDialog(
+            call_id=str(row["call_id"]),
+            local_tag=str(row["local_tag"]),
+            remote_tag=str(row["remote_tag"]),
+            invite_branch=str(row["invite_branch"]),
+            remote_cseq=int(row["remote_cseq"]),
+            local_cseq=int(row["local_cseq"]),
+            state=state,
+            created_at=float(row["created_at"]),
+            ringing_at=float(row["ringing_at"]) if row["ringing_at"] is not None else None,
+            answered_at=float(row["answered_at"]) if row["answered_at"] is not None else None,
+            acknowledged_at=float(row["acknowledged_at"]) if row["acknowledged_at"] is not None else None,
+            terminated_at=float(row["terminated_at"]) if row["terminated_at"] is not None else None,
+        )
+
+    def close(self) -> None:
+        self.connection.close()
 
 
 class B2BUAFlowLog:
@@ -1601,6 +1843,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         rtpengine_sdes: Tuple[str, ...] = (),
         rtpengine_dtls: str = "",
         ai_voice_gateway: Optional[Dict[str, Any]] = None,
+        ha: Optional[Dict[str, Any]] = None,
         tls_client_context: Optional[ssl.SSLContext] = None,
         tls_port: int = 5061,
     ):
@@ -1638,6 +1881,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.dialogs = DialogManager()
         self.transactions = TransactionManager(self._send_packet)
         self.pending_outbound_responses: Dict[str, asyncio.Queue] = {}
+        self.pending_options_probes: Dict[str, asyncio.Future] = {}
         self.b2bua_calls_by_inbound: Dict[str, B2BUACall] = {}
         self.b2bua_calls_by_outbound: Dict[str, B2BUACall] = {}
         self.stream_connections: Dict[Tuple[str, str, int], SipTcpConnectionProtocol] = {}
@@ -1652,6 +1896,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.ai_voice_config = AiVoiceConfig.from_dict(ai_voice_gateway)
         self.ai_voice_gateway = AiVoiceGateway(self.ai_voice_config) if self.ai_voice_config.enabled else None
         self.ai_voice_calls_by_inbound: Dict[str, AIVoiceCall] = {}
+        self.ha_config = dict(ha or {})
+        self.node_id = ha_node_id(self.ha_config) if ha_enabled(self.ha_config) else "standalone"
+        self.cluster_id = str(self.ha_config.get("cluster_id") or "playsbc-lab")
+        shared_path = ha_shared_state_path(self.ha_config)
+        self.shared_state = SharedStateStore(shared_path, self.node_id, logger) if ha_enabled(self.ha_config) else None
+        self.background_tasks: List[asyncio.Task] = []
+        if self.shared_state:
+            self.registrations.update(self.shared_state.load_registrations())
+            self.logger.platform(
+                "HA NODE STARTED",
+                (
+                    f"cluster={self.cluster_id} node={self.node_id} "
+                    f"shared_state={shared_path} restored_registrations={len(self.registrations)}"
+                ),
+            )
         self.tls_client_context = tls_client_context
         self.tls_port = tls_port
 
@@ -1670,6 +1929,96 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         logging.info("SIP listening on tls:%s:%s", self.local_ip, self.tls_port)
         self.logger.platform("SIP SERVER STARTED", f"transport=tls local={self.local_ip}:{self.tls_port}")
         self.logger.tls("TLS LISTENING", f"protocol=sip local={self.local_ip}:{self.tls_port}")
+
+    def start_background_tasks(self) -> None:
+        probed_trunks = [
+            trunk.name
+            for trunk in self.routing_engine.trunks.values()
+            if trunk.options_probe_enabled and trunk.enabled
+        ]
+        if probed_trunks:
+            self.logger.platform(
+                "TRUNK OPTIONS PROBING STARTED",
+                f"node={self.node_id} trunks={','.join(sorted(probed_trunks))}",
+            )
+        for trunk_name in probed_trunks:
+            self.background_tasks.append(asyncio.create_task(self._trunk_options_probe_loop(trunk_name)))
+
+    async def _trunk_options_probe_loop(self, trunk_name: str) -> None:
+        jitter = random.uniform(0, 0.050)
+        await asyncio.sleep(jitter)
+        while True:
+            trunk = self.routing_engine.trunks.get(trunk_name)
+            if not trunk:
+                return
+            try:
+                await self.send_trunk_options_probe(trunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive logging for background probes.
+                self.logger.networking(
+                    "TRUNK OPTIONS PROBE ERROR",
+                    f"trunk={trunk_name} error_type={type(exc).__name__} error={exc}",
+                )
+            await asyncio.sleep(trunk.options_probe_interval)
+
+    async def send_trunk_options_probe(self, trunk: TrunkRuntime) -> bool:
+        target = parse_sip_uri(format_route_target(trunk.uri, "options"))
+        transport_name = target.transport
+        call_id = make_call_id()
+        headers = {
+            "Via": self.make_via_header(transport_name),
+            "From": f"PlaySBC Probe <sip:options@{self.b2bua_advertised_ip}:{self.local_port}>;tag={secrets.token_hex(6)}",
+            "To": f"<{target.uri}>",
+            "Call-ID": call_id,
+            "CSeq": "1 OPTIONS",
+            "Contact": f"<{self.local_contact_uri(transport_name)}>",
+            "Max-Forwards": "70",
+            "Accept": "application/sdp",
+        }
+        packet = build_sip_request("OPTIONS", target.uri, headers)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self.pending_options_probes[call_id] = future
+        self.logger.sip(
+            "TRUNK OPTIONS PROBE TX",
+            f"node={self.node_id} trunk={trunk.name} target={target.uri} timeout={trunk.options_probe_timeout:.3f}",
+            call_id=call_id,
+        )
+        self._send_packet(packet, target.address, transport_name=transport_name)
+        try:
+            response = await asyncio.wait_for(future, timeout=trunk.options_probe_timeout)
+            status = int(getattr(response, "status_code", 0))
+            success = 200 <= status < 300
+            state = self.routing_engine.record_probe_result(trunk.name, success, str(status))
+            self.log_trunk_probe_result(trunk.name, success, f"status={status}", state, call_id)
+            return success
+        except asyncio.TimeoutError:
+            state = self.routing_engine.record_probe_result(trunk.name, False, "timeout")
+            self.log_trunk_probe_result(trunk.name, False, "status=timeout", state, call_id)
+            return False
+        finally:
+            self.pending_options_probes.pop(call_id, None)
+
+    def log_trunk_probe_result(
+        self,
+        trunk_name: str,
+        success: bool,
+        detail: str,
+        trunk: Optional[TrunkRuntime],
+        call_id: str,
+    ) -> None:
+        if not trunk:
+            return
+        status = "up" if trunk.healthy else "down"
+        result = "success" if success else "failure"
+        payload = (
+            f"node={self.node_id} trunk={trunk_name} result={result} {detail} health={status} "
+            f"successes={trunk.options_probe_successes} failures={trunk.options_probe_failures} "
+            f"consecutive_successes={trunk.options_probe_consecutive_successes} "
+            f"consecutive_failures={trunk.options_probe_consecutive_failures}"
+        )
+        self.logger.call("TRUNK OPTIONS PROBE", payload, call_id=call_id)
 
     def register_stream_connection(
         self,
@@ -1729,6 +2078,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     def handle_response(self, message: SipMessage) -> None:
         call_id = message.header("call-id")
         cseq_method = parse_cseq_method(message.header("cseq"))
+        if cseq_method == "OPTIONS":
+            future = self.pending_options_probes.get(call_id)
+            if future and not future.done():
+                future.set_result(message)
+                return
         queue = self.pending_outbound_responses.get(call_id)
         if queue and cseq_method == "INVITE":
             queue.put_nowait(message)
@@ -1783,7 +2137,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
             expires = parse_register_expires(message.header("expires"), message.header("contact"))
             if expires <= 0:
-                self.registrations.pop(user, None)
+                self.delete_registration_state(user)
                 self.send_response(message, 200, "OK")
                 logging.info("Unregistered %s", user)
                 return
@@ -1796,12 +2150,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 logging.info("Rejected REGISTER for %s with invalid contact %s", user, contact_uri)
                 return
 
-            self.registrations[user] = Registration(
+            registration = Registration(
                 user=user,
                 contact_uri=contact_uri,
                 source=message.source,
                 expires_at=time.time() + expires,
             )
+            self.save_registration_state(registration)
             self.send_response(message, 200, "OK")
             logging.info("Registered %s -> %s expires=%s", user, contact_uri, expires)
             return
@@ -1833,6 +2188,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 return
 
             dialog.mark_ringing()
+            self.save_dialog_state(dialog)
             to_header = dialog.to_header(message.header("to"))
             self.send_response(message, 100, "Trying", to_header=message.header("to"))
 
@@ -1963,6 +2319,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 },
             )
             dialog.mark_answered()
+            self.save_dialog_state(dialog)
             rtp.log(
                 "DIALOG STATE",
                 (
@@ -1981,7 +2338,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             ai_call = self.ai_voice_calls_by_inbound.get(call_id)
             if session or b2bua_call or ai_call:
                 try:
-                    dialog = self.dialogs.acknowledge(call_id, message.header("cseq"))
+                    dialog = self.acknowledge_dialog(call_id, message.header("cseq"))
                 except DialogError as exc:
                     logging.info("Ignored invalid ACK for %s: %s", call_id, exc)
                     return
@@ -2022,7 +2379,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             call_id = message.header("call-id")
             session = self.media.get_session(call_id)
             try:
-                dialog = self.dialogs.terminate(
+                dialog = self.terminate_dialog(
                     call_id,
                     message.header("from"),
                     message.header("to"),
@@ -2158,6 +2515,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             },
         )
         dialog.mark_answered()
+        self.save_dialog_state(dialog)
         flow_log.flow("PlaySBC", "SIPp A", "200 OK")
         rtp.log(
             "DIALOG STATE",
@@ -2306,6 +2664,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             },
         )
         dialog.mark_answered()
+        self.save_dialog_state(dialog)
         ai_call.flow_log.flow("PlaySBC", "SIPp A", "200 OK")
         self.logger.ai(
             "AI VOICE CALL START",
@@ -2472,6 +2831,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         )
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
+        self.save_dialog_state(dialog)
         inbound_rtp.log(
             "DIALOG STATE",
             (
@@ -2713,6 +3073,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         )
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
+        self.save_dialog_state(dialog)
 
     async def wait_for_outbound_invite(
         self,
@@ -3181,10 +3542,70 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     def cleanup_registrations(self) -> None:
         now = time.time()
+        if self.shared_state:
+            expired = self.shared_state.delete_expired_registrations(now)
+            if expired:
+                self.logger.platform("HA REGISTRATION EXPIRE", f"node={self.node_id} expired={expired}")
+            self.registrations = self.shared_state.load_registrations(now)
+            return
         expired = [user for user, registration in self.registrations.items() if registration.is_expired(now)]
         for user in expired:
             self.registrations.pop(user, None)
             logging.info("Expired registration for %s", user)
+
+    def save_registration_state(self, registration: Registration) -> None:
+        self.registrations[registration.user] = registration
+        if self.shared_state:
+            self.shared_state.save_registration(registration)
+
+    def delete_registration_state(self, user: str) -> None:
+        self.registrations.pop(user, None)
+        if self.shared_state:
+            self.shared_state.delete_registration(user)
+
+    def save_dialog_state(self, dialog: SipDialog) -> None:
+        if self.shared_state:
+            self.shared_state.save_dialog(dialog)
+
+    def restore_dialog_state(self, call_id: str) -> Optional[SipDialog]:
+        if not self.shared_state:
+            return None
+        dialog = self.shared_state.load_dialog(call_id)
+        if not dialog:
+            return None
+        self.dialogs.dialogs[call_id] = dialog
+        self.logger.platform(
+            "HA DIALOG RESTORED",
+            f"node={self.node_id} call_id={call_id} state={dialog.state.name}",
+        )
+        return dialog
+
+    def acknowledge_dialog(self, call_id: str, cseq_header: str) -> SipDialog:
+        try:
+            dialog = self.dialogs.acknowledge(call_id, cseq_header)
+        except DialogError:
+            if not self.restore_dialog_state(call_id):
+                raise
+            dialog = self.dialogs.acknowledge(call_id, cseq_header)
+        self.save_dialog_state(dialog)
+        return dialog
+
+    def terminate_dialog(
+        self,
+        call_id: str,
+        from_header: str,
+        to_header: str,
+        via_header: str,
+        cseq_header: str,
+    ) -> SipDialog:
+        try:
+            dialog = self.dialogs.terminate(call_id, from_header, to_header, via_header, cseq_header)
+        except DialogError:
+            if not self.restore_dialog_state(call_id):
+                raise
+            dialog = self.dialogs.terminate(call_id, from_header, to_header, via_header, cseq_header)
+        self.save_dialog_state(dialog)
+        return dialog
 
     def make_via_header(self, transport_name: str = "udp") -> str:
         transport_name = normalize_sip_transport(transport_name)
@@ -3354,6 +3775,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.transactions.close()
+        for task in self.background_tasks:
+            task.cancel()
+        if self.shared_state:
+            self.shared_state.close()
 
 
 def parse_sip_message(
@@ -4022,7 +4447,7 @@ def coerce_config_value(key: str, value: Any) -> Any:
                 raise ValueError(f"each {key} entry must be a JSON object")
             policies.append(dict(item))
         return tuple(policies)
-    if key in {"header_normalization", "call_admission", "media_quality", "ai_voice_gateway"}:
+    if key in {"header_normalization", "call_admission", "media_quality", "ai_voice_gateway", "ha"}:
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a JSON object")
         return dict(value)
@@ -4085,6 +4510,38 @@ def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> Serve
     return config
 
 
+def ha_enabled(ha: Dict[str, Any]) -> bool:
+    return bool(ha.get("enabled", False))
+
+
+def ha_node_id(ha: Dict[str, Any]) -> str:
+    return str(ha.get("node_id") or "playsbc-a")
+
+
+def ha_shared_state_path(ha: Dict[str, Any]) -> str:
+    return str(ha.get("shared_state_path") or ha.get("state_db") or "")
+
+
+def ha_rtpengine_pairs(ha: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = ha.get("rtpengine_pairs") or ha.get("rtpengine_nodes") or []
+    return [dict(item) for item in raw if isinstance(item, dict)]
+
+
+def select_ha_rtpengine_url(ha: Dict[str, Any], default_url: str) -> Tuple[str, str]:
+    if not ha_enabled(ha):
+        return default_url, ""
+    node_id = ha_node_id(ha)
+    pairs = ha_rtpengine_pairs(ha)
+    for pair in pairs:
+        pair_node = str(pair.get("node_id") or pair.get("playsbc_node") or "")
+        if pair_node == node_id:
+            return str(pair.get("rtpengine_url") or pair.get("url") or default_url), str(pair.get("name") or pair_node)
+    if pairs:
+        first = pairs[0]
+        return str(first.get("rtpengine_url") or first.get("url") or default_url), str(first.get("name") or "default")
+    return default_url, ""
+
+
 def validate_config(config: ServerConfig) -> None:
     config.default_codec = config.default_codec.upper()
     codec_payload(config.default_codec)
@@ -4121,6 +4578,22 @@ def validate_config(config: ServerConfig) -> None:
             raise ValueError("ai_voice_gateway.tts_provider must be text-only, piper, or coqui")
         if ai_config.response_mode not in {"rest", "callback", "streaming"}:
             raise ValueError("ai_voice_gateway.response_mode must be rest, callback, or streaming")
+    if config.ha:
+        config.ha = dict(config.ha)
+    if ha_enabled(config.ha):
+        node_id = ha_node_id(config.ha)
+        if not node_id:
+            raise ValueError("ha.node_id must not be empty when HA is enabled")
+        shared_path = ha_shared_state_path(config.ha)
+        if not shared_path:
+            raise ValueError("ha.shared_state_path is required when HA is enabled")
+        for pair in ha_rtpengine_pairs(config.ha):
+            pair_node = str(pair.get("node_id") or pair.get("playsbc_node") or "")
+            pair_url = str(pair.get("rtpengine_url") or pair.get("url") or "")
+            if not pair_node:
+                raise ValueError("each ha.rtpengine_pairs entry requires node_id")
+            if pair_url:
+                parse_rtpengine_url(pair_url)
     if len(config.rtpengine_directions) not in {0, 2}:
         raise ValueError("rtpengine_directions must contain exactly two interface names")
     if any(not direction.strip() for direction in config.rtpengine_directions):
@@ -4227,8 +4700,11 @@ async def handle_health_request(
                     "playsbc_stream_connects_total": protocol.stream_connects,
                     "playsbc_stream_reuses_total": protocol.stream_reuses,
                     "playsbc_stream_failures_total": protocol.stream_failures,
+                    "playsbc_ha_enabled": int(protocol.shared_state is not None),
                 }
             )
+            if protocol.shared_state:
+                metrics.update(protocol.shared_state.counts())
             body = "\n".join(f"{name} {value}" for name, value in sorted(metrics.items())) + "\n"
         else:
             body = "ready\n" if path == "/readyz" else "ok\n"
@@ -4310,6 +4786,14 @@ async def main() -> None:
     )
     rtpengine_client = None
     if config.media_backend == "rtpengine":
+        selected_url, selected_pair = select_ha_rtpengine_url(config.ha, config.rtpengine_url)
+        if selected_url != config.rtpengine_url:
+            config.rtpengine_url = selected_url
+        if selected_pair:
+            sbc_logger.platform(
+                "HA RTPENGINE PAIR SELECTED",
+                f"cluster={config.ha.get('cluster_id', 'playsbc-lab')} node={ha_node_id(config.ha)} pair={selected_pair} url={config.rtpengine_url}",
+            )
         rtpengine_client = RtpengineClient(config.rtpengine_url, timeout=config.rtpengine_timeout)
         logging.info("Using RTPengine media backend at %s", config.rtpengine_url)
         sbc_logger.platform("RTPENGINE BACKEND ENABLED", f"url={config.rtpengine_url} timeout={config.rtpengine_timeout}")
@@ -4355,6 +4839,7 @@ async def main() -> None:
         rtpengine_sdes=config.rtpengine_sdes,
         rtpengine_dtls=config.rtpengine_dtls,
         ai_voice_gateway=config.ai_voice_gateway,
+        ha=config.ha,
         tls_client_context=tls_client_context,
         tls_port=config.tls_port,
     )
@@ -4393,6 +4878,7 @@ async def main() -> None:
     )
     sip_listeners.append(health_server)
     sbc_logger.platform("HEALTH SERVER STARTED", f"local={config.health_ip}:{config.health_port}")
+    sip_protocol.start_background_tasks()
 
     await asyncio.Future()
 

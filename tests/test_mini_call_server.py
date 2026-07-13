@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -627,6 +628,28 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 server.load_config_file(str(config_path))
 
+    def test_ha_config_accepts_shared_state_and_rtpengine_pairing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json_text := (
+                    '{"media_backend": "rtpengine", '
+                    '"ha": {"enabled": true, "cluster_id": "playsbc-aa", "node_id": "playsbc-b", '
+                    f'"shared_state_path": "{Path(tmp) / "ha.sqlite3"}", '
+                    '"rtpengine_pairs": ['
+                    '{"node_id": "playsbc-a", "rtpengine_url": "udp://127.0.0.1:2223"}, '
+                    '{"node_id": "playsbc-b", "rtpengine_url": "udp://127.0.0.2:2223"}'
+                    ']}}'
+                ),
+                encoding="utf-8",
+            )
+
+            config = server.load_config_file(str(config_path))
+
+        self.assertIn("playsbc-b", json_text)
+        self.assertTrue(config.ha["enabled"])
+        self.assertEqual(server.select_ha_rtpengine_url(config.ha, config.rtpengine_url)[0], "udp://127.0.0.2:2223")
+
     def test_rtpengine_codec_policy_masks_source_and_transcodes_target(self):
         policy = server.rtpengine_codec_policy((server.PCMU,), server.PCMA)
 
@@ -644,6 +667,39 @@ class ConfigTests(unittest.TestCase):
 
     def test_resolve_log_dir_is_disabled_by_default(self):
         self.assertIsNone(server.resolve_log_dir(server.ServerConfig()))
+
+    def test_shared_state_store_replays_registration_and_dialog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = str(Path(tmp) / "ha.sqlite3")
+            first = server.SharedStateStore(state_path, "playsbc-a", server.SbcLogger(None))
+            registration = server.Registration(
+                user="1002",
+                contact_uri="sip:1002@192.0.2.20:5060",
+                source=("192.0.2.20", 5060),
+                expires_at=time.time() + 60,
+            )
+            dialog = server.SipDialog(
+                call_id="ha-call",
+                local_tag="local",
+                remote_tag="remote",
+                invite_branch="z9hG4bK-ha",
+                remote_cseq=1,
+                state=server.CallState.ANSWERED,
+            )
+            first.save_registration(registration)
+            first.save_dialog(dialog)
+            first.close()
+
+            second = server.SharedStateStore(state_path, "playsbc-b", server.SbcLogger(None))
+            registrations = second.load_registrations()
+            restored_dialog = second.load_dialog("ha-call")
+            second.close()
+
+        self.assertEqual(registrations["1002"].target.address, ("192.0.2.20", 5060))
+        self.assertIsNotNone(restored_dialog)
+        assert restored_dialog is not None
+        self.assertEqual(restored_dialog.state, server.CallState.ANSWERED)
+        self.assertEqual(restored_dialog.remote_cseq, 1)
 
 
 class RoutingEngineTests(unittest.TestCase):
@@ -712,6 +768,39 @@ class RoutingEngineTests(unittest.TestCase):
         metrics = engine.metrics()
         self.assertEqual(metrics["playsbc_trunk_secondary_attempts_total"], 1)
         self.assertEqual(metrics["playsbc_trunk_secondary_successes_total"], 1)
+
+    def test_options_probe_failure_and_recovery_updates_trunk_health(self):
+        engine = server.RoutingEngine(
+            ({"name": "carrier", "match": "*", "target": "trunk-group:carrier"},),
+            {},
+            (
+                {
+                    "name": "carrier",
+                    "members": [
+                        {
+                            "name": "primary",
+                            "uri": "sip:{user}@192.0.2.10:5060",
+                            "options_probe": {
+                                "enabled": True,
+                                "failure_threshold": 1,
+                                "recovery_successes": 2,
+                            },
+                        }
+                    ],
+                },
+            ),
+        )
+
+        self.assertTrue(engine.trunks["primary"].healthy)
+        engine.record_probe_result("primary", False, "timeout")
+        self.assertFalse(engine.trunks["primary"].healthy)
+        engine.record_probe_result("primary", True, "200")
+        self.assertFalse(engine.trunks["primary"].healthy)
+        engine.record_probe_result("primary", True, "200")
+        self.assertTrue(engine.trunks["primary"].healthy)
+        metrics = engine.metrics()
+        self.assertEqual(metrics["playsbc_trunk_primary_options_probe_failures_total"], 1)
+        self.assertEqual(metrics["playsbc_trunk_primary_options_probe_successes_total"], 2)
 
     def test_number_header_and_transport_policies_apply_before_routing(self):
         engine = server.RoutingEngine(

@@ -30,5 +30,17 @@ playsbc:
     rtpengine_interfaces:
       - core
       - peer
+    ha:
+      enabled: true
+      cluster_id: playsbc-aa-lab
+      node_id: playsbc-a
+      shared_state_path: /var/lib/playsbc/ha-state.sqlite3
+      rtpengine_pairs:
+        - name: core-pair-a
+          node_id: playsbc-a
+          rtpengine_url: udp://172.28.0.40:2223
+        - name: peer-pair-b
+          node_id: playsbc-b
+          rtpengine_url: udp://192.168.28.40:2223
     reject_unknown_routes: true
     debug: true

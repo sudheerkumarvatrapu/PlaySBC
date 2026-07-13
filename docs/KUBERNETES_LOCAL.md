@@ -43,8 +43,8 @@ kubectl scale deployment/playsbc-playsbc --replicas=2
 kubectl get pods -l app.kubernetes.io/name=playsbc -o wide
 ```
 
-`ClientIP` affinity keeps one SIP source on one PlaySBC pod and one RTPengine control endpoint. Dialog and registrar state remain in memory, so deleting the selected PlaySBC pod intentionally demonstrates that affinity is not state replication: an established dialog does not survive pod loss. Shared dialog/registrar storage is a later distributed-systems phase.
+`ClientIP` affinity keeps one SIP source on one PlaySBC pod and one RTPengine control endpoint. The HA lab mode can also use SQLite-backed shared registrar/dialog state plus node-to-RTPengine pairing. This is useful for active-active experiments, but it is still a lab store; a production-style backend such as PostgreSQL or Redis is a later hardening phase.
 
 ## Media Model
 
-SIP reaches the PlaySBC Service. PlaySBC sends RTPengine NG control to the chart-managed RTPengine Service. RTPengine advertises the node IP and binds the configured host RTP range. This is a single-node lab model suitable for kind/minikube; a multi-node design needs a per-node RTPengine workload and explicit PlaySBC-to-RTPengine node pairing.
+SIP reaches the PlaySBC Service. PlaySBC sends RTPengine NG control to the chart-managed RTPengine Service. RTPengine advertises the node IP and binds the configured host RTP range. For active-active lab runs, configure one RTPengine pair per PlaySBC node and keep the shared state path on storage visible to both nodes.

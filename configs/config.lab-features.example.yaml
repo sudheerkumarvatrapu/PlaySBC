@@ -30,6 +30,19 @@ media_quality:
   loss_warn_percent: 1.0
   jitter_warn_ms: 30.0
 
+ha:
+  enabled: true
+  cluster_id: playsbc-aa-lab
+  node_id: playsbc-a
+  shared_state_path: /var/lib/playsbc/ha-state.sqlite3
+  rtpengine_pairs:
+    - name: core-pair-a
+      node_id: playsbc-a
+      rtpengine_url: udp://rtpengine-a:2223
+    - name: peer-pair-b
+      node_id: playsbc-b
+      rtpengine_url: udp://rtpengine-b:2223
+
 ai_voice_gateway:
   enabled: true
   provider: rasa
@@ -81,10 +94,22 @@ trunk_groups:
         uri: sip:{user}@primary.example.invalid:5061;transport=tls
         priority: 10
         max_calls: 80
+        options_probe:
+          enabled: true
+          interval_seconds: 30
+          timeout_seconds: 2
+          failure_threshold: 3
+          recovery_successes: 2
       - name: secondary
         uri: sip:{user}@secondary.example.invalid:5061;transport=tls
         priority: 20
         max_calls: 80
+        options_probe:
+          enabled: true
+          interval_seconds: 30
+          timeout_seconds: 2
+          failure_threshold: 3
+          recovery_successes: 2
 
 hunt_groups:
   - name: support

@@ -2189,12 +2189,15 @@ Content-Length: 0
         self.assertIn("ai-rasa-rtpengine", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ha-options-health-recovery", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tls-transport-policy", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-port-exhaustion", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtcp-receiver-quality", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tls-srtp-to-udp-rtp", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tls-srtp-to-tcp-rtp", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("udp-rtp-to-tls-srtp", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ha-shared-state-rtpengine", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
 
     def test_real_topology_profile_uses_one_regression_bundle(self):
         command = run_regression_suite.real_topology_command(
@@ -2593,6 +2596,24 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(args.rasa_mock_response_count, 2)
         self.assertEqual(args.rasa_mock_action, "transfer")
         self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
+
+    def test_dual_realm_ha_profiles_render_shared_state_and_pairing(self):
+        args = run_dual_realm_profile.profile_args("ha-shared-state-rtpengine", "ha-call", "b2bua-Regression")
+
+        self.assertEqual(args.media_backend, "rtpengine")
+        self.assertTrue(args.ha["enabled"])
+        self.assertEqual(args.ha["node_id"], "playsbc-a")
+        self.assertIn("{rtpengine_url}", args.ha["rtpengine_pairs"][0]["rtpengine_url"])
+        self.assertIn("HA RTPENGINE PAIR SELECTED", args.expected_log_markers["log.platform"])
+
+        probe = run_dual_realm_profile.profile_args("ha-options-health-recovery", "ha-probe", "b2bua-Regression")
+        self.assertFalse(probe.run_call)
+        self.assertFalse(probe.start_uas)
+        self.assertTrue(probe.ha["enabled"])
+        self.assertTrue(probe.trunk_groups[0]["members"][0]["options_probe"]["enabled"])
+        self.assertEqual(probe.trunk_groups[0]["members"][0]["options_probe"]["recovery_successes"], 1)
+        rendered_trunks = run_b2bua_sipp_smoke.render_harness_config_templates(probe.trunk_groups, probe)
+        self.assertEqual(rendered_trunks[0]["members"][0]["uri"], "sip:options@172.28.0.20:5060")
 
     def test_dual_realm_mixed_tls_srtp_profile_uses_independent_leg_transports(self):
         args = run_dual_realm_profile.profile_args("tls-srtp-to-tcp-rtp", "secure-call", "b2bua-Regression")

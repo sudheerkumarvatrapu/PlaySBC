@@ -58,6 +58,8 @@ ALL_B2BUA_PROFILES = (
     "esbc-hunt-group",
     "esbc-call-admission",
     "esbc-trunk-metrics",
+    "ha-shared-state-rtpengine",
+    "ha-options-health-recovery",
     "tls-transport-policy",
     "tcp-connection-reuse",
     "tcp-connection-failure",
@@ -85,6 +87,7 @@ RTPENGINE_B2BUA_PROFILES = (
     "tls-srtp-to-udp-rtp",
     "tls-srtp-to-tcp-rtp",
     "udp-rtp-to-tls-srtp",
+    "ha-shared-state-rtpengine",
     "load-5cps-60s-rtpengine-transcoding",
 )
 REAL_TOPOLOGY_PROFILE = "real-topology-rtpengine-transcoding"
