@@ -51,14 +51,14 @@ ai_voice_gateway:
 
 ## Regression Coverage
 
-| Test case | Purpose | Evidence |
-| --- | --- | --- |
-| `ai-rasa-lab` | SIPp A calls `ai-bot`; PlaySBC answers, records RTP input, and sends one Rasa REST turn | `log.ai`, `log.sip`, `log.media`, `capture.pcap`, HTML report |
-| `ai-rasa-rtpengine` | SIPp A calls `ai-bot`; RTP/RTCP is anchored by RTPengine; Rasa returns a multi-part response plus a transfer action | `log.ai`, `log.media`, RTPengine query evidence, HTML ladder |
-| `ai-rasa-real-lab` | Optional profile: same RTPengine AI call, but PlaySBC talks to a real Rasa REST service trained from `rasa/` | `log.ai`, `rasa.log`, `log.sip`, `log.media`, RTPengine evidence |
-| Unit: Rasa REST client | Validates Rasa request/response JSON shape | `tests/test_ai_gateway.py` |
-| Unit: AI route policy | Validates `ai-gateway:<bot>` routing | `tests/test_mini_call_server.py` |
-| Unit: dual-realm profile | Validates mock Rasa service and `log.ai` bundle wiring | `tests/test_sipp_harness.py` |
+| Test case | Short name | Purpose | Evidence |
+| --- | --- | --- | --- |
+| `ai-rasa-lab` | Mock Rasa REST, internal media | SIPp A calls `ai-bot`; PlaySBC terminates the AI call, consumes RTP input internally, and sends one deterministic mock Rasa REST turn | `log.ai`, `log.sip`, `log.media`, `capture.pcap`, HTML ladder with `Mock Rasa REST` |
+| `ai-rasa-rtpengine` | Mock Rasa REST, RTPengine media | Same AI call, but RTP/RTCP is anchored by RTPengine; mock Rasa returns multiple response chunks plus a transfer action | `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with `Mock Rasa + Action` |
+| `ai-rasa-real-lab` | Real Rasa pod, RTPengine media | Kubernetes starts and trains a real Rasa REST pod, PlaySBC posts to that service, and RTP/RTCP remains anchored by RTPengine | `rasa.log`, `rasa-pod-evidence.log`, `log.ai`, `log.sip`, `log.media`, HTML ladder with `Real Rasa Pod` |
+| Unit: Rasa REST client | JSON contract | Validates Rasa request/response JSON shape | `tests/test_ai_gateway.py` |
+| Unit: AI route policy | SIP route target | Validates `ai-gateway:<bot>` routing | `tests/test_mini_call_server.py` |
+| Unit: dual-realm profile | Harness wiring | Validates mock Rasa service and `log.ai` bundle wiring | `tests/test_sipp_harness.py` |
 
 ## Real Rasa Lab
 

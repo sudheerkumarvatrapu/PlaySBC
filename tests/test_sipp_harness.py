@@ -2793,6 +2793,35 @@ class RealTopologyTests(unittest.TestCase):
             "http://playsbc-playsbc-rasa:5005/webhooks/rest/webhook",
         )
 
+    def test_kubernetes_rasa_profiles_have_distinct_report_names_and_ladders(self):
+        args = run_k8s_regression.parse_args(["--rasa-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-rasa")
+
+        cases = {
+            "ai-rasa-lab": ("AI Voice Gateway - Mock Rasa REST", "Mock Rasa REST", "internal PlaySBC media"),
+            "ai-rasa-rtpengine": (
+                "AI Voice Gateway - Mock Rasa + RTPengine",
+                "Mock Rasa + Action",
+                "RTPengine RTP/RTCP anchor",
+            ),
+            "ai-rasa-real-lab": (
+                "AI Voice Gateway - Real Rasa Pod + RTPengine",
+                "Real Rasa Pod",
+                "real Rasa deployment",
+            ),
+        }
+
+        for profile_name, (title, node, mode) in cases.items():
+            with self.subTest(profile=profile_name):
+                profile = run_k8s_regression.profile_values(profile_name, "unit-rasa")
+                ladder = runner.dual_realm_ladder(profile)
+
+                self.assertEqual(run_k8s_regression.profile_display_title(profile_name), title)
+                self.assertIn(title, run_k8s_regression.profile_execution_label(profile_name))
+                self.assertIn(f"case={title}", ladder)
+                self.assertIn(mode, ladder)
+                self.assertIn(node, ladder)
+
     def test_kubernetes_rasa_profile_shortcut_uses_dedicated_outputs(self):
         args = run_k8s_regression.parse_args(["--rasa-profiles"])
         self.assertEqual(run_k8s_regression.selected_profiles(args), run_k8s_regression.RASA_PROFILES)

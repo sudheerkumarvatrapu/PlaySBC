@@ -61,6 +61,32 @@ RASA_OUTPUT_ROOT = str(ROOT / "logs" / "RASA-Regression")
 RASA_REPORT_DIR = str(ROOT / "logs" / "RASA-Regression" / "reports")
 DEFAULT_ROLLOUT_TIMEOUT = 120
 RASA_ROLLOUT_TIMEOUT = 600
+RASA_PROFILE_LABELS = {
+    "ai-rasa-lab": {
+        "title": "AI Voice Gateway - Mock Rasa REST",
+        "suite": "Kubernetes AI/Rasa Mock",
+        "rasa_node": "Mock Rasa REST",
+        "stt_node": "Scripted STT",
+        "tts_node": "Text TTS",
+        "mode": "mock REST webhook, internal PlaySBC media, single bot response",
+    },
+    "ai-rasa-rtpengine": {
+        "title": "AI Voice Gateway - Mock Rasa + RTPengine",
+        "suite": "Kubernetes AI/Rasa Mock RTPengine",
+        "rasa_node": "Mock Rasa + Action",
+        "stt_node": "Scripted STT",
+        "tts_node": "Text TTS",
+        "mode": "mock REST webhook, RTPengine RTP/RTCP anchor, multi-message bot response plus transfer action",
+    },
+    "ai-rasa-real-lab": {
+        "title": "AI Voice Gateway - Real Rasa Pod + RTPengine",
+        "suite": "Kubernetes AI/Rasa Real Lab",
+        "rasa_node": "Real Rasa Pod",
+        "stt_node": "Scripted STT",
+        "tts_node": "Text TTS",
+        "mode": "real Rasa deployment, trained in-cluster, RTPengine RTP/RTCP anchor, REST webhook proof",
+    },
+}
 
 
 @dataclass
@@ -101,6 +127,33 @@ def selected_profiles(args: argparse.Namespace) -> tuple[str, ...]:
     if getattr(args, "all_profiles", False):
         return ALL_PROFILES
     return tuple(args.profile or DEFAULT_PROFILES)
+
+
+def profile_display_title(profile_name: str) -> str:
+    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("title") or profile_name)
+
+
+def profile_suite_label(profile_name: str) -> str:
+    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("suite") or f"Kubernetes {profile_name}")
+
+
+def profile_execution_label(profile_name: str) -> str:
+    title = profile_display_title(profile_name)
+    return f"{title} [{profile_name}]" if title != profile_name else profile_name
+
+
+def profile_mode_detail(profile_name: str) -> str:
+    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("mode") or PROFILE_DESCRIPTIONS.get(profile_name, "special profile"))
+
+
+def ai_ladder_nodes(profile: SimpleNamespace) -> tuple[str, str, str]:
+    profile_name = str(getattr(profile, "profile", ""))
+    labels = RASA_PROFILE_LABELS.get(profile_name, {})
+    return (
+        str(labels.get("stt_node") or "STT Adapter"),
+        str(labels.get("rasa_node") or "Rasa Bot"),
+        str(labels.get("tts_node") or "TTS Adapter"),
+    )
 
 
 def command_text(command: Iterable[str]) -> str:
@@ -1415,8 +1468,8 @@ class K8sRegressionRunner:
 
         returncode = 0 if status == "passed" else next((code for code in returncodes if code != 0), 1)
         return ReportRow(
-            suite=f"Kubernetes {profile}",
-            name=profile,
+            suite=profile_suite_label(profile),
+            name=profile_execution_label(profile),
             status=status,
             returncode=returncode,
             duration_seconds=time.monotonic() - started_profile,
@@ -1574,7 +1627,8 @@ class K8sRegressionRunner:
             status_from_codes(returncodes),
             execution_started,
             (
-                f"Ran canonical profile={profile_name} on Kubernetes logical dual-realm topology; "
+                f"Ran {profile_execution_label(profile_name)} on Kubernetes logical dual-realm topology; "
+                f"mode={profile_mode_detail(profile_name)}; "
                 f"description={PROFILE_DESCRIPTIONS.get(profile_name, 'special real-topology profile')}"
             ),
         )
@@ -1607,7 +1661,7 @@ class K8sRegressionRunner:
             participants = ["Core SIPp A", "PlaySBC"]
             if profile_uses_rtpengine(profile):
                 participants.append("RTPengine")
-            participants.extend(["STT Adapter", "Rasa Bot", "TTS Adapter"])
+            participants.extend(ai_ladder_nodes(profile))
             return tuple(participants)
         participants = ["Core SIPp A", "PlaySBC", "Peer SIPp B"]
         if profile_uses_rtpengine(profile):
@@ -1617,7 +1671,19 @@ class K8sRegressionRunner:
     def render_unified_ladder(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> str:
         profile_name = str(getattr(profile, "profile", "k8s"))
         body = "\n".join(flow.render_ladder_text().splitlines()[1:])
-        return f"KUBERNETES SINGLE LADDER\nprofile={profile_name}\n{body}"
+        lines = [
+            "KUBERNETES SINGLE LADDER",
+            f"profile={profile_name}",
+        ]
+        if profile_name in RASA_PROFILE_LABELS:
+            lines.extend(
+                [
+                    f"case={profile_display_title(profile_name)}",
+                    f"mode={profile_mode_detail(profile_name)}",
+                ]
+            )
+        lines.append(body)
+        return "\n".join(lines)
 
     def add_registration_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         if getattr(profile, "register_callee", True):
@@ -1659,6 +1725,8 @@ class K8sRegressionRunner:
             flow.sip("PlaySBC", "Core SIPp A", "expected response")
 
     def add_ai_gateway_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
+        stt_node, rasa_node, tts_node = ai_ladder_nodes(profile)
+        profile_name = str(getattr(profile, "profile", ""))
         flow.sip("Core SIPp A", "PlaySBC", "INVITE")
         flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
         flow.sip("PlaySBC", "Core SIPp A", "180 Ringing")
@@ -1669,12 +1737,19 @@ class K8sRegressionRunner:
             flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
-        flow.sip("PlaySBC", "STT Adapter", "scripted STT")
-        flow.sip("STT Adapter", "PlaySBC", "intent text")
-        flow.sip("PlaySBC", "Rasa Bot", "REST turn")
-        flow.sip("Rasa Bot", "PlaySBC", "bot response")
-        flow.sip("PlaySBC", "TTS Adapter", "scripted TTS")
-        flow.sip("TTS Adapter", "PlaySBC", "speech frame")
+        flow.sip("PlaySBC", stt_node, "scripted STT")
+        flow.sip(stt_node, "PlaySBC", "intent text")
+        if profile_uses_real_rasa(profile):
+            flow.sip("PlaySBC", rasa_node, "REST POST /webhook")
+            flow.sip(rasa_node, "PlaySBC", "REST 200 support")
+        elif profile_name == "ai-rasa-rtpengine":
+            flow.sip("PlaySBC", rasa_node, "REST POST /mock")
+            flow.sip(rasa_node, "PlaySBC", "2 replies + transfer")
+        else:
+            flow.sip("PlaySBC", rasa_node, "REST POST /mock")
+            flow.sip(rasa_node, "PlaySBC", "single reply")
+        flow.sip("PlaySBC", tts_node, "text-only TTS")
+        flow.sip(tts_node, "PlaySBC", "no RTP prompt")
         flow.sip("Core SIPp A", "PlaySBC", "BYE")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
 
@@ -1983,12 +2058,15 @@ def main() -> int:
     if args.list_profiles:
         print("Available Kubernetes B2BUA profiles:")
         for profile in ALL_PROFILES:
-            print(f"  {profile}: {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
+            label = profile_execution_label(profile)
+            print(f"  {profile}: {label} - {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
         print("\nOptional profiles:")
         for profile in OPTIONAL_B2BUA_PROFILES:
-            print(f"  {profile}: {PROFILE_DESCRIPTIONS.get(profile, 'Optional Kubernetes profile.')}")
+            label = profile_execution_label(profile)
+            print(f"  {profile}: {label} - {PROFILE_DESCRIPTIONS.get(profile, 'Optional Kubernetes profile.')}")
         print("\nRasa shortcut:")
-        print(f"  --rasa-profiles: {', '.join(RASA_PROFILES)}")
+        for profile in RASA_PROFILES:
+            print(f"  --rasa-profiles includes {profile}: {profile_display_title(profile)}")
         print("\nSmoke aliases:")
         for profile in SMOKE_PROFILES:
             print(f"  {profile}")
