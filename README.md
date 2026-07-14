@@ -33,6 +33,19 @@ Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, HA st
 
 The Helm package contains Kubernetes manifests and PlaySBC configuration. It does not contain Docker image layers. Kubernetes pulls PlaySBC and RTPengine images at deployment time.
 
+## GitHub Security Scans
+
+GitHub runs security checks on pushes to `main`, pull requests, weekly schedule, and manual workflow dispatch:
+
+- CodeQL for Python source.
+- Dependency Review for pull requests.
+- Trivy filesystem scan for vulnerabilities, secrets, Dockerfiles, Helm, Compose, YAML, and Kubernetes-style config.
+- Checkov scan for Docker, Helm, Kubernetes, GitHub Actions, and secret patterns.
+- Trivy image scan for the published GHCR PlaySBC and RTPengine images on scheduled/manual runs.
+- Dependabot updates for GitHub Actions and Docker base images.
+
+Results appear under GitHub Actions and Code Scanning alerts.
+
 ## Deployment Models
 
 | Model | Best For | Needs Docker Desktop? | Needs Kubernetes? |
