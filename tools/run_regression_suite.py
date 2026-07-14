@@ -76,12 +76,17 @@ ALL_B2BUA_PROFILES = (
     "load-5cps-60s",
     "load-5cps-60s-rtpengine-transcoding",
 )
+OPTIONAL_B2BUA_PROFILES = (
+    "ai-rasa-real-lab",
+)
+SELECTABLE_B2BUA_PROFILES = (*ALL_B2BUA_PROFILES, *OPTIONAL_B2BUA_PROFILES)
 RTPENGINE_B2BUA_PROFILES = (
     "rtpengine",
     "rtpengine-media",
     "rtpengine-transcoding",
     "tcp-rtpengine-transcoding",
     "ai-rasa-rtpengine",
+    "ai-rasa-real-lab",
     "rtpengine-control-failure",
     "rtpengine-port-exhaustion",
     "rtpengine-interface-failure",
@@ -647,7 +652,7 @@ def main() -> int:
     parser.add_argument("--report-dir", default=str(ROOT / "logs" / "reports"))
     parser.add_argument("--sipp-smoke-root", default=str(ROOT / "logs" / "sipp-smoke-Regression"))
     parser.add_argument("--b2bua-log-folder", default="b2bua-Regression")
-    parser.add_argument("--b2bua-profile", action="append", choices=ALL_B2BUA_PROFILES, help="B2BUA profile to run; repeatable")
+    parser.add_argument("--b2bua-profile", action="append", choices=SELECTABLE_B2BUA_PROFILES, help="B2BUA profile to run; repeatable")
     parser.add_argument("--all-b2bua-profiles", action="store_true", help="Run all B2BUA profiles, including load and RTPengine profiles")
     parser.add_argument("--b2bua-media-driver", choices=("python", "sipp-pcap"), default="", help="Override B2BUA media driver for media-enabled profiles")
     parser.add_argument("--b2bua-sipp-pcap-sudo", action="store_true", help="Pass --sipp-pcap-sudo to B2BUA profile runs")

@@ -4,7 +4,7 @@ image:
   # For direct deployments after image publishing, use:
   # repository: ghcr.io/sudheerkumarvatrapu/playsbc
   repository: playsbc
-  tag: "1.0.0"
+  tag: "1.1.0"
   pullPolicy: IfNotPresent
 
 service:
@@ -41,6 +41,160 @@ rtpengine:
   hostNetwork: true
   sessionAffinity: ClientIP
   resources: {}
+
+rasa:
+  enabled: false
+  image:
+    repository: rasa/rasa
+    tag: 3.6.20-full
+    pullPolicy: IfNotPresent
+  servicePort: 5005
+  trainOnStart: true
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    failureThreshold: 120
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  resources: {}
+  project:
+    config: |
+      recipe: default.v1
+      language: en
+      pipeline:
+        - name: WhitespaceTokenizer
+        - name: CountVectorsFeaturizer
+        - name: DIETClassifier
+          epochs: 40
+      policies:
+        - name: RulePolicy
+    domain: |
+      version: "3.1"
+      intents:
+        - greet
+        - support
+        - sales
+        - billing
+        - agent
+        - repeat
+        - confirm
+        - nlu_fallback
+      responses:
+        utter_greet:
+          - text: "PlaySBC real Rasa bot is online."
+        utter_support:
+          - text: "Support path is ready. I can keep the call in the support queue."
+            custom:
+              playsbc_action: join
+              target: support
+              reason: support intent
+        utter_sales:
+          - text: "Sales path is ready. I can transfer this call to the sales trunk."
+            custom:
+              playsbc_action: transfer
+              target: sip:sales@peer.example
+              reason: sales intent
+        utter_billing:
+          - text: "Billing path is ready. I can transfer this call to the billing trunk."
+            custom:
+              playsbc_action: transfer
+              target: sip:billing@peer.example
+              reason: billing intent
+        utter_agent:
+          - text: "I will try to transfer this call to a human agent."
+            custom:
+              playsbc_action: transfer
+              target: sip:agent@peer.example
+              reason: agent requested
+        utter_repeat:
+          - text: "Sure. PlaySBC is connected to real Rasa over the REST channel."
+        utter_confirm:
+          - text: "Confirmed. The AI control path is alive."
+        utter_default:
+          - text: "I heard you, but I am not sure where to route this yet."
+      session_config:
+        session_expiration_time: 60
+        carry_over_slots_to_new_session: true
+    nlu: |
+      version: "3.1"
+      nlu:
+        - intent: greet
+          examples: |
+            - hello
+            - hello from playsbc real rasa
+            - hi
+        - intent: support
+          examples: |
+            - support
+            - I need support
+            - connect me to support
+        - intent: sales
+          examples: |
+            - sales
+            - talk to sales
+            - connect me to sales
+        - intent: billing
+          examples: |
+            - billing
+            - invoice help
+            - payment issue
+        - intent: agent
+          examples: |
+            - agent
+            - human agent
+            - transfer me to an agent
+        - intent: repeat
+          examples: |
+            - repeat
+            - say that again
+        - intent: confirm
+          examples: |
+            - yes
+            - confirm
+    rules: |
+      version: "3.1"
+      rules:
+        - rule: Greet caller
+          steps:
+            - intent: greet
+            - action: utter_greet
+        - rule: Route support intent
+          steps:
+            - intent: support
+            - action: utter_support
+        - rule: Route sales intent
+          steps:
+            - intent: sales
+            - action: utter_sales
+        - rule: Route billing intent
+          steps:
+            - intent: billing
+            - action: utter_billing
+        - rule: Route agent intent
+          steps:
+            - intent: agent
+            - action: utter_agent
+        - rule: Repeat status
+          steps:
+            - intent: repeat
+            - action: utter_repeat
+        - rule: Confirm status
+          steps:
+            - intent: confirm
+            - action: utter_confirm
+        - rule: Fallback
+          steps:
+            - intent: nlu_fallback
+            - action: utter_default
+    credentials: |
+      rest:
+    endpoints: |
+      action_endpoint:
+        url: ""
 
 playsbc:
   config:

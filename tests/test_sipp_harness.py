@@ -17,6 +17,7 @@ from tools import run_regression_suite
 from tools import run_real_topology
 from tools import run_dual_realm_profile
 from tools import run_k8s_regression
+from tools import run_k8s_regression_job
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2160,12 +2161,15 @@ Content-Length: 0
     def test_regression_suite_can_target_all_b2bua_profiles(self):
         self.assertEqual(
             len(run_regression_suite.ALL_B2BUA_PROFILES),
-            len(run_b2bua_sipp_smoke.B2BUA_PROFILES) + 1,
+            len(run_b2bua_sipp_smoke.B2BUA_PROFILES) - len(run_regression_suite.OPTIONAL_B2BUA_PROFILES) + 1,
         )
         self.assertEqual(
             set(run_regression_suite.ALL_B2BUA_PROFILES),
-            set(run_b2bua_sipp_smoke.B2BUA_PROFILES) | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
+            (set(run_b2bua_sipp_smoke.B2BUA_PROFILES) - set(run_regression_suite.OPTIONAL_B2BUA_PROFILES))
+            | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
         )
+        self.assertIn("ai-rasa-real-lab", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
+        self.assertNotIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2188,6 +2192,7 @@ Content-Length: 0
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-real-lab", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2599,6 +2604,16 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(args.rasa_mock_action, "transfer")
         self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
 
+    def test_dual_realm_real_rasa_profile_uses_optional_real_service(self):
+        args = run_dual_realm_profile.profile_args("ai-rasa-real-lab", "ai-real", "b2bua-Regression")
+
+        self.assertEqual(args.rasa_deployment, "real")
+        self.assertTrue(run_dual_realm_profile.needs_real_rasa(args))
+        self.assertFalse(run_dual_realm_profile.needs_ai_mock(args))
+        self.assertIn("172.28.0.61:5005", args.ai_voice_gateway["rasa_webhook_url"])
+        self.assertEqual(args.route_policies[0]["target"], "ai-gateway:rasa-support")
+        self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
+
     def test_dual_realm_ha_profiles_render_shared_state_and_pairing(self):
         basic = run_dual_realm_profile.profile_args("basic-signalling", "ha-all-basic", "b2bua-Regression")
         self.assertTrue(basic.ha["enabled"])
@@ -2686,7 +2701,11 @@ class RealTopologyTests(unittest.TestCase):
         deployment = (chart / "templates" / "deployment.yaml").read_text(encoding="utf-8")
         configmap = (chart / "templates" / "configmap.yaml").read_text(encoding="utf-8")
         rtpengine = (chart / "templates" / "rtpengine.yaml").read_text(encoding="utf-8")
+        rasa = (chart / "templates" / "rasa.yaml").read_text(encoding="utf-8")
         kind_values = (ROOT / "configs" / "kubernetes" / "kind-values.yaml").read_text(encoding="utf-8")
+        ai_rasa_values = (ROOT / "configs" / "kubernetes" / "ai-rasa-real-values.yaml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("readinessProbe:", deployment)
         self.assertIn("livenessProbe:", deployment)
@@ -2695,6 +2714,18 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("status.hostIP", rtpengine)
         self.assertIn("sessionAffinity", rtpengine)
         self.assertIn("rtpengine:\n  enabled: true", kind_values)
+        self.assertIn("startupProbe:", rasa)
+        self.assertNotIn(".Values.rasa.enabled", configmap)
+        self.assertNotIn(".Values.rasa.enabled", rasa)
+        self.assertIn(".Values.rasa | default dict", configmap)
+        self.assertIn(".Values.rasa | default dict", rasa)
+        self.assertIn("name: {{ include \"playsbc.fullname\" . }}-rasa", rasa)
+        self.assertIn("rasa train", rasa)
+        self.assertIn("rasa run --enable-api", rasa)
+        self.assertIn("-i 0.0.0.0", rasa)
+        self.assertNotIn("--host 0.0.0.0", rasa)
+        self.assertIn("rasa:\n  enabled: true", ai_rasa_values)
+        self.assertIn("target: ai-gateway:rasa-support", ai_rasa_values)
 
     def test_dual_realm_load_profiles_use_bounded_media_capture(self):
         internal = run_dual_realm_profile.profile_args("load-5cps-60s", "internal-load", "b2bua-Regression")
@@ -2743,6 +2774,99 @@ class RealTopologyTests(unittest.TestCase):
             with self.subTest(profile=profile_name):
                 profile = run_k8s_regression.profile_values(profile_name, "unit-k8s")
                 self.assertEqual(run_k8s_regression.k8s_pcap_capture_roles(profile), expected)
+
+    def test_kubernetes_real_rasa_profile_is_selectable_and_rewrites_webhook(self):
+        self.assertIn("ai-rasa-real-lab", run_k8s_regression.SELECTABLE_PROFILES)
+        self.assertNotIn("ai-rasa-real-lab", run_k8s_regression.ALL_PROFILES)
+
+        args = run_k8s_regression.parse_args(["--profile", "ai-rasa-real-lab"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("ai-rasa-real-lab", "unit-k8s")
+        profile.ai_voice_gateway = {
+            **profile.ai_voice_gateway,
+            "rasa_webhook_url": f"http://{args.service}-rasa:5005/webhooks/rest/webhook",
+        }
+
+        self.assertTrue(run_k8s_regression.profile_uses_real_rasa(profile))
+        self.assertEqual(
+            runner.profile_config(profile)["ai_voice_gateway"]["rasa_webhook_url"],
+            "http://playsbc-playsbc-rasa:5005/webhooks/rest/webhook",
+        )
+
+    def test_kubernetes_rasa_profiles_have_distinct_report_names_and_ladders(self):
+        args = run_k8s_regression.parse_args(["--rasa-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-rasa")
+
+        cases = {
+            "ai-rasa-lab": ("AI Voice Gateway - Mock Rasa REST", "Mock Rasa REST", "internal PlaySBC media"),
+            "ai-rasa-rtpengine": (
+                "AI Voice Gateway - Mock Rasa + RTPengine",
+                "Mock Rasa + Action",
+                "RTPengine RTP/RTCP anchor",
+            ),
+            "ai-rasa-real-lab": (
+                "AI Voice Gateway - Real Rasa Pod + RTPengine",
+                "Real Rasa Pod",
+                "real Rasa deployment",
+            ),
+        }
+
+        for profile_name, (title, node, mode) in cases.items():
+            with self.subTest(profile=profile_name):
+                profile = run_k8s_regression.profile_values(profile_name, "unit-rasa")
+                ladder = runner.dual_realm_ladder(profile)
+
+                self.assertEqual(run_k8s_regression.profile_display_title(profile_name), title)
+                self.assertIn(title, run_k8s_regression.profile_execution_label(profile_name))
+                self.assertIn(f"case={title}", ladder)
+                self.assertIn(mode, ladder)
+                self.assertIn(node, ladder)
+
+    def test_kubernetes_rasa_profile_shortcut_uses_dedicated_outputs(self):
+        args = run_k8s_regression.parse_args(["--rasa-profiles"])
+        self.assertEqual(run_k8s_regression.selected_profiles(args), run_k8s_regression.RASA_PROFILES)
+        self.assertEqual(args.output_root, str(ROOT / "logs" / "RASA-Regression"))
+        self.assertEqual(args.report_dir, str(ROOT / "logs" / "RASA-Regression" / "reports"))
+        self.assertEqual(args.rollout_timeout, 600)
+
+        job_args = run_k8s_regression_job.parse_args(["--rasa-profiles"])
+        command = run_k8s_regression_job.runner_command_args(job_args)
+
+        self.assertEqual(job_args.output_dir, str(ROOT / "logs" / "RASA-Regression"))
+        self.assertEqual(job_args.remote_output_root_name, "RASA-Regression")
+        self.assertEqual(job_args.remote_report_dir_name, "RASA-reports")
+        self.assertTrue(job_args.run_id.startswith("rasa-regression-"))
+        self.assertEqual(job_args.rollout_timeout, 600)
+        self.assertIn("--rasa-profiles", command)
+        self.assertNotIn("--all-profiles", command)
+        self.assertIn("--rollout-timeout", command)
+        self.assertIn("600", command)
+        self.assertIn("/workspace/logs/RASA-Regression", command)
+        self.assertIn("/workspace/logs/RASA-reports", command)
+
+    def test_kubernetes_full_suite_keeps_existing_output_layout(self):
+        args = run_k8s_regression_job.parse_args(["--all-profiles"])
+        command = run_k8s_regression_job.runner_command_args(args)
+
+        self.assertEqual(args.output_dir, str(ROOT / "logs" / "k8s-job"))
+        self.assertEqual(args.remote_output_root_name, "k8s-Regression")
+        self.assertEqual(args.remote_report_dir_name, "k8s-reports")
+        self.assertTrue(args.run_id.startswith("k8s-regression-"))
+        self.assertIn("--all-profiles", command)
+        self.assertNotIn("--rasa-profiles", command)
+        self.assertIn("/workspace/logs/k8s-Regression", command)
+        self.assertIn("/workspace/logs/k8s-reports", command)
+        self.assertTrue(run_k8s_regression_job.should_cleanup_local_logs(args))
+
+    def test_kubernetes_specific_profile_keeps_existing_job_output(self):
+        args = run_k8s_regression_job.parse_args(["--profile", "basic-signalling"])
+        command = run_k8s_regression_job.runner_command_args(args)
+
+        self.assertEqual(args.output_dir, str(ROOT / "logs" / "k8s-job"))
+        self.assertEqual(args.rollout_timeout, 120)
+        self.assertIn("--profile", command)
+        self.assertIn("basic-signalling", command)
+        self.assertFalse(run_k8s_regression_job.should_cleanup_local_logs(args))
 
     def test_kubernetes_auth_failure_ladder_matches_second_401(self):
         args = run_k8s_regression.parse_args(["--all-profiles"])

@@ -82,11 +82,11 @@ helm upgrade --install playsbc charts/playsbc \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.0.0 \
+  --set-string image.tag=1.1.0 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.0.0 \
+  --set-string rtpengine.image.tag=1.1.0 \
   --set rtpengine.image.pullPolicy=Always \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
@@ -96,15 +96,15 @@ Deploy from the GitHub release Helm package:
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.0.0/playsbc-1.0.0.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.1.0/playsbc-1.1.0.tgz \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.0.0 \
+  --set-string image.tag=1.1.0 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.0.0 \
+  --set-string rtpengine.image.tag=1.1.0 \
   --set rtpengine.image.pullPolicy=Always \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
@@ -188,6 +188,48 @@ Expected RTPengine line:
 Startup complete
 ```
 
+## Optional Real Rasa Lab
+
+The default regression uses a lightweight mock Rasa service. Use this optional values file when you want PlaySBC to talk to a real Rasa REST bot inside Kubernetes:
+
+```bash
+helm upgrade --install playsbc charts/playsbc \
+  --namespace playsbc \
+  --create-namespace \
+  -f configs/kubernetes/kind-values.yaml \
+  -f configs/kubernetes/ai-rasa-real-values.yaml
+```
+
+Verify the extra pod and service:
+
+```bash
+kubectl -n playsbc rollout status deployment/playsbc-playsbc-rasa
+kubectl -n playsbc get pods,svc
+kubectl -n playsbc logs deployment/playsbc-playsbc-rasa --tail=100
+```
+
+Run only the Kubernetes AI/Rasa profiles:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --rasa-profiles \
+  --build-playsbc-image \
+  --build-runner-image \
+  --build-sipp-image \
+  --kind-load-images \
+  --kind-cluster playsbc
+```
+
+This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, and `ai-rasa-real-lab`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
+
+If the kind node cannot pull DockerHub images, load Rasa first:
+
+```bash
+docker pull rasa/rasa:3.6.20-full
+kind load docker-image rasa/rasa:3.6.20-full --name playsbc
+```
+
 ## Run Kubernetes Regression
 
 Use this after PlaySBC and RTPengine are deployed by Helm. The preferred Kubernetes path is the in-cluster Job runner: one controller pod starts inside the `playsbc` namespace, applies each profile through Helm, creates temporary SIPp core/peer pods, runs the canonical B2BUA catalog, copies reports back to the repo, and restores the Helm release afterward.
@@ -241,9 +283,9 @@ If all required images are already available in the cluster, skip local builds:
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.0.0 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.0.0 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.0.0 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.1.0 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.1.0 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.1.0 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image
@@ -257,6 +299,14 @@ logs/k8s-job/<run-id>/k8s-Regression/
 logs/k8s-job/<run-id>/k8s-reports/latest.html
 ```
 
+Rasa-only Job-mode outputs:
+
+```text
+logs/RASA-Regression/<run-id>/runner.log
+logs/RASA-Regression/<run-id>/RASA-Regression/
+logs/RASA-Regression/<run-id>/RASA-reports/latest.html
+```
+
 Useful live checks while the Job runs:
 
 ```bash
@@ -268,7 +318,7 @@ kubectl -n playsbc describe job/<job-name>
 
 Job defaults:
 
-- Deletes old local `logs/k8s-job` output before a new run; use `--keep-old-logs` to retain history.
+- Deletes old local `logs/k8s-job` output before a full/default run; Rasa-only mode deletes old `logs/RASA-Regression` output. Use `--keep-old-logs` to retain history.
 - Builds `playsbc:k8s-regression`, `playsbc-k8s-regression:local`, and `playsbc-sipp:local` when the build flags are used.
 - Loads local images into `kind` when `--kind-load-images` is set.
 - Creates a lab-only `playsbc-regression-tls` Secret when TLS profiles are selected.
@@ -285,7 +335,7 @@ Coverage:
 - UDP, TCP, TLS/SRTP interworking, RTCP, and DTMF profiles.
 - REGISTER, digest auth success/failure, registered inbound/outbound calls.
 - ESBC route policy, trunk, failover, normalization, admission, health, and metrics profiles.
-- AI/Rasa lab profiles.
+- AI/Rasa lab profiles. The default catalog uses mock Rasa; run `--profile ai-rasa-real-lab` for real Rasa.
 - Negative SIP cases such as invalid BYE, unknown route, failed outbound leg, CANCEL, and retransmission.
 - Small load, soak, and 5 cps / 60 second CHT load profiles.
 
@@ -325,7 +375,7 @@ helm lint charts/playsbc
 helm template playsbc charts/playsbc \
   --namespace playsbc \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.0.0 \
+  --set-string image.tag=1.1.0 \
   --set rtpengine.enabled=true
 ```
 

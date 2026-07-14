@@ -71,6 +71,23 @@ services:
       core:
         ipv4_address: 172.28.0.60
 
+  rasa-real:
+    profiles:
+      - rasa-real
+    image: ${PLAYSBC_RASA_IMAGE:-rasa/rasa:3.6.20-full}
+    working_dir: /app/rasa
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        rasa train --config config.yml --domain domain.yml --data data --out /tmp/playsbc-rasa-models
+        && rasa run --enable-api --cors "*" --host 0.0.0.0 --port 5005
+        --model /tmp/playsbc-rasa-models --credentials credentials.yml --endpoints endpoints.yml
+    volumes:
+      - ./rasa:/app/rasa:ro
+    networks:
+      core:
+        ipv4_address: 172.28.0.61
+
   sipp-b:
     <<: *sipp-common
     depends_on:

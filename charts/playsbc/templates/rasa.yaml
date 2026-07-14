@@ -1,0 +1,123 @@
+{{- $rasa := .Values.rasa | default dict -}}
+{{- $rasaEnabled := get $rasa "enabled" | default false -}}
+{{- if $rasaEnabled }}
+{{- $image := get $rasa "image" | default dict -}}
+{{- $project := get $rasa "project" | default dict -}}
+{{- $servicePort := get $rasa "servicePort" | default 5005 -}}
+{{- $trainOnStart := true -}}
+{{- if hasKey $rasa "trainOnStart" -}}
+{{- $trainOnStart = get $rasa "trainOnStart" -}}
+{{- end -}}
+{{- $resources := get $rasa "resources" | default dict -}}
+{{- $startupProbe := get $rasa "startupProbe" | default dict -}}
+{{- $readinessProbe := get $rasa "readinessProbe" | default dict -}}
+{{- $livenessProbe := get $rasa "livenessProbe" | default dict -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "playsbc.fullname" . }}-rasa-project
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+data:
+  config.yml: |
+{{ get $project "config" | default "" | indent 4 }}
+  domain.yml: |
+{{ get $project "domain" | default "" | indent 4 }}
+  nlu.yml: |
+{{ get $project "nlu" | default "" | indent 4 }}
+  rules.yml: |
+{{ get $project "rules" | default "" | indent 4 }}
+  credentials.yml: |
+{{ get $project "credentials" | default "rest:\n" | indent 4 }}
+  endpoints.yml: |
+{{ get $project "endpoints" | default "action_endpoint:\n  url: \"\"\n" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "playsbc.fullname" . }}-rasa
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "playsbc.name" . }}-rasa
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "playsbc.name" . }}-rasa
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: rasa
+          image: "{{ get $image "repository" | default "rasa/rasa" }}:{{ get $image "tag" | default "3.6.20-full" }}"
+          imagePullPolicy: {{ get $image "pullPolicy" | default "IfNotPresent" }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |-
+              set -eu
+              rm -rf /tmp/playsbc-rasa-lab
+              mkdir -p /tmp/playsbc-rasa-lab/data
+              cp /project/config.yml /tmp/playsbc-rasa-lab/config.yml
+              cp /project/domain.yml /tmp/playsbc-rasa-lab/domain.yml
+              cp /project/credentials.yml /tmp/playsbc-rasa-lab/credentials.yml
+              cp /project/endpoints.yml /tmp/playsbc-rasa-lab/endpoints.yml
+              cp /project/nlu.yml /tmp/playsbc-rasa-lab/data/nlu.yml
+              cp /project/rules.yml /tmp/playsbc-rasa-lab/data/rules.yml
+              cd /tmp/playsbc-rasa-lab
+              MODEL_ARGS=""
+              if [ "{{ $trainOnStart }}" = "true" ]; then
+                rasa train --config config.yml --domain domain.yml --data data --out /tmp/playsbc-rasa-models
+                MODEL_ARGS="--model /tmp/playsbc-rasa-models"
+              fi
+              exec rasa run --enable-api --cors "*" -i 0.0.0.0 --port {{ $servicePort }} ${MODEL_ARGS} --credentials credentials.yml --endpoints endpoints.yml
+          ports:
+            - name: http
+              containerPort: {{ $servicePort }}
+              protocol: TCP
+          startupProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ get $startupProbe "initialDelaySeconds" | default 10 }}
+            periodSeconds: {{ get $startupProbe "periodSeconds" | default 5 }}
+            failureThreshold: {{ get $startupProbe "failureThreshold" | default 120 }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ get $readinessProbe "initialDelaySeconds" | default 5 }}
+            periodSeconds: {{ get $readinessProbe "periodSeconds" | default 5 }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ get $livenessProbe "initialDelaySeconds" | default 30 }}
+            periodSeconds: {{ get $livenessProbe "periodSeconds" | default 10 }}
+          volumeMounts:
+            - name: project
+              mountPath: /project
+              readOnly: true
+          resources:
+{{ toYaml $resources | indent 12 }}
+      volumes:
+        - name: project
+          configMap:
+            name: {{ include "playsbc.fullname" . }}-rasa-project
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}-rasa
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}-rasa
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ $servicePort }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

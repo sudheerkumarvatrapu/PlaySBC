@@ -18,7 +18,23 @@ from typing import Iterable, Optional
 ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(ROOT))
-from tools.run_k8s_regression import ALL_PROFILES, SELECTABLE_PROFILES, make_run_id  # noqa: E402
+from tools.run_k8s_regression import (  # noqa: E402
+    ALL_PROFILES,
+    RASA_PROFILES,
+    SELECTABLE_PROFILES,
+    make_rasa_run_id,
+    make_run_id,
+)
+
+
+DEFAULT_OUTPUT_DIR = str(ROOT / "logs" / "k8s-job")
+RASA_OUTPUT_DIR = str(ROOT / "logs" / "RASA-Regression")
+DEFAULT_REMOTE_OUTPUT_ROOT = "k8s-Regression"
+DEFAULT_REMOTE_REPORT_DIR = "k8s-reports"
+RASA_REMOTE_OUTPUT_ROOT = "RASA-Regression"
+RASA_REMOTE_REPORT_DIR = "RASA-reports"
+DEFAULT_ROLLOUT_TIMEOUT = 120
+RASA_ROLLOUT_TIMEOUT = 600
 
 
 @dataclass
@@ -201,13 +217,15 @@ def runner_command_args(args: argparse.Namespace) -> list[str]:
         "--tls-secret-name",
         args.tls_secret_name,
         "--output-root",
-        "/workspace/logs/k8s-Regression",
+        f"/workspace/logs/{args.remote_output_root_name}",
         "--report-dir",
-        "/workspace/logs/k8s-reports",
+        f"/workspace/logs/{args.remote_report_dir_name}",
         "--skip-namespace-check",
     ]
     profiles = args.profile or []
-    if args.all_profiles or not profiles:
+    if args.rasa_profiles:
+        command.append("--rasa-profiles")
+    elif args.all_profiles or not profiles:
         command.append("--all-profiles")
     else:
         for profile in profiles:
@@ -412,7 +430,7 @@ def collect_job_outputs(args: argparse.Namespace, pod_name: str, logs_text: str)
     if not pod_name:
         (output_root / "copy-skipped.log").write_text("Runner pod was not found.\n", encoding="utf-8")
         return output_root
-    for remote_name in ("k8s-reports", "k8s-Regression"):
+    for remote_name in (args.remote_report_dir_name, args.remote_output_root_name):
         destination = output_root / remote_name
         result = run_command(
             [
@@ -434,6 +452,12 @@ def collect_job_outputs(args: argparse.Namespace, pod_name: str, logs_text: str)
                 encoding="utf-8",
             )
     return output_root
+
+
+def should_cleanup_local_logs(args: argparse.Namespace) -> bool:
+    if args.keep_old_logs:
+        return False
+    return bool(args.rasa_profiles or args.all_profiles or not args.profile)
 
 
 def wait_for_runner(args: argparse.Namespace) -> tuple[str, str, str]:
@@ -468,7 +492,7 @@ def wait_for_runner(args: argparse.Namespace) -> tuple[str, str, str]:
 
 def run_job(args: argparse.Namespace) -> int:
     ensure_binary(args.kubectl_bin)
-    if not args.keep_old_logs:
+    if should_cleanup_local_logs(args):
         shutil.rmtree(Path(args.output_dir), ignore_errors=True)
     if args.build_playsbc_image or args.build_runner_image or args.build_sipp_image or args.kind_load_images:
         build_images(args)
@@ -514,7 +538,7 @@ def run_job(args: argparse.Namespace) -> int:
     print(f"Job status: {job_status} ({job_detail})")
     print(f"Runner pod: {pod_name or 'not found'}")
     print(f"Copied outputs: {output_root}")
-    latest = output_root / "k8s-reports" / "latest.html"
+    latest = output_root / args.remote_report_dir_name / "latest.html"
     if latest.exists():
         print(f"Latest report: {latest}")
     if job_status != "passed":
@@ -525,7 +549,7 @@ def run_job(args: argparse.Namespace) -> int:
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", default="", help="Run/report identifier; defaults to a timestamp")
     parser.add_argument("--namespace", default="playsbc", help="Fixed PlaySBC namespace; must remain playsbc")
@@ -547,6 +571,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kind-cluster", default="playsbc")
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
     parser.add_argument("--all-profiles", action="store_true", help="Run all canonical B2BUA profiles; default when --profile is omitted")
+    parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--service", default="playsbc-playsbc")
     parser.add_argument("--sip-port", type=int, default=5062)
@@ -559,7 +584,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--profile-timeout", type=int, default=180)
     parser.add_argument("--helm-timeout", type=int, default=180)
-    parser.add_argument("--rollout-timeout", type=int, default=120)
+    parser.add_argument("--rollout-timeout", type=int, default=DEFAULT_ROLLOUT_TIMEOUT)
     parser.add_argument("--sipp-timeout", type=int, default=90)
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--deployment-log-tail", type=int, default=250)
@@ -571,17 +596,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kubectl-timeout", type=int, default=180)
     parser.add_argument("--copy-timeout", type=int, default=600)
     parser.add_argument("--image-build-timeout", type=int, default=1200)
-    parser.add_argument("--output-dir", default=str(ROOT / "logs" / "k8s-job"))
-    parser.add_argument("--keep-old-logs", action="store_true", help="Keep existing local logs/k8s-job runs before launching")
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--remote-output-root-name", default=DEFAULT_REMOTE_OUTPUT_ROOT)
+    parser.add_argument("--remote-report-dir-name", default=DEFAULT_REMOTE_REPORT_DIR)
+    parser.add_argument("--keep-old-logs", action="store_true", help="Keep existing local regression logs before launching")
     parser.add_argument("--no-restore-helm-values", action="store_true", help="Leave Helm on the last profile after the in-cluster run")
     parser.add_argument("--keep-job", action="store_true")
     parser.add_argument("--keep-sipp-pods", action="store_true")
     parser.add_argument("--print-runner-log", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.namespace != "playsbc":
         raise SystemExit("Kubernetes regression Job mode is fixed to the playsbc namespace.")
-    args.run_id = args.run_id or make_run_id()
+    if args.rasa_profiles and (args.all_profiles or args.profile):
+        raise SystemExit("--rasa-profiles cannot be combined with --all-profiles or --profile")
+    if args.rasa_profiles:
+        if args.output_dir == DEFAULT_OUTPUT_DIR:
+            args.output_dir = RASA_OUTPUT_DIR
+        if args.remote_output_root_name == DEFAULT_REMOTE_OUTPUT_ROOT:
+            args.remote_output_root_name = RASA_REMOTE_OUTPUT_ROOT
+        if args.remote_report_dir_name == DEFAULT_REMOTE_REPORT_DIR:
+            args.remote_report_dir_name = RASA_REMOTE_REPORT_DIR
+        if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
+            args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
+    args.run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_run_id())
     args.job_name = args.job_name or args.run_id
     if len(args.job_name) > 63:
         args.job_name = args.job_name[:63].rstrip("-")
@@ -592,7 +630,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.all_profiles or not args.profile:
+    if args.rasa_profiles:
+        print(f"Launching Kubernetes RASA Regression Job for {len(RASA_PROFILES)} profiles.")
+        print(f"Local output directory: {args.output_dir}")
+    elif args.all_profiles or not args.profile:
         print(f"Launching Kubernetes Job for {len(ALL_PROFILES)} B2BUA profiles.")
     else:
         print(f"Launching Kubernetes Job for profiles: {', '.join(args.profile)}")

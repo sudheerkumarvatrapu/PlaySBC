@@ -1,0 +1,42 @@
+version: "3.1"
+
+rules:
+  - rule: Greet caller
+    steps:
+      - intent: greet
+      - action: utter_greet
+
+  - rule: Route support intent
+    steps:
+      - intent: support
+      - action: utter_support
+
+  - rule: Route sales intent
+    steps:
+      - intent: sales
+      - action: utter_sales
+
+  - rule: Route billing intent
+    steps:
+      - intent: billing
+      - action: utter_billing
+
+  - rule: Route agent intent
+    steps:
+      - intent: agent
+      - action: utter_agent
+
+  - rule: Repeat status
+    steps:
+      - intent: repeat
+      - action: utter_repeat
+
+  - rule: Confirm status
+    steps:
+      - intent: confirm
+      - action: utter_confirm
+
+  - rule: Fallback
+    steps:
+      - intent: nlu_fallback
+      - action: utter_default

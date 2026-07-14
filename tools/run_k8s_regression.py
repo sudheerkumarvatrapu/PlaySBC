@@ -40,6 +40,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
 )
 from tools.run_regression_suite import (  # noqa: E402
     ALL_B2BUA_PROFILES,
+    OPTIONAL_B2BUA_PROFILES,
     REAL_TOPOLOGY_PROFILE,
     cleanup_old_reports,
     ReportPhase,
@@ -50,8 +51,42 @@ from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 ALL_PROFILES = ALL_B2BUA_PROFILES
-SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES)
+CATALOG_PROFILES = (*ALL_PROFILES, *OPTIONAL_B2BUA_PROFILES)
+RASA_PROFILES = ("ai-rasa-lab", "ai-rasa-rtpengine", "ai-rasa-real-lab")
+SELECTABLE_PROFILES = (*SMOKE_PROFILES, *CATALOG_PROFILES)
 LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
+DEFAULT_OUTPUT_ROOT = str(ROOT / "logs" / "k8s-Regression")
+DEFAULT_REPORT_DIR = str(ROOT / "logs" / "k8s-reports")
+RASA_OUTPUT_ROOT = str(ROOT / "logs" / "RASA-Regression")
+RASA_REPORT_DIR = str(ROOT / "logs" / "RASA-Regression" / "reports")
+DEFAULT_ROLLOUT_TIMEOUT = 120
+RASA_ROLLOUT_TIMEOUT = 600
+RASA_PROFILE_LABELS = {
+    "ai-rasa-lab": {
+        "title": "AI Voice Gateway - Mock Rasa REST",
+        "suite": "Kubernetes AI/Rasa Mock",
+        "rasa_node": "Mock Rasa REST",
+        "stt_node": "Scripted STT",
+        "tts_node": "Text TTS",
+        "mode": "mock REST webhook, internal PlaySBC media, single bot response",
+    },
+    "ai-rasa-rtpengine": {
+        "title": "AI Voice Gateway - Mock Rasa + RTPengine",
+        "suite": "Kubernetes AI/Rasa Mock RTPengine",
+        "rasa_node": "Mock Rasa + Action",
+        "stt_node": "Scripted STT",
+        "tts_node": "Text TTS",
+        "mode": "mock REST webhook, RTPengine RTP/RTCP anchor, multi-message bot response plus transfer action",
+    },
+    "ai-rasa-real-lab": {
+        "title": "AI Voice Gateway - Real Rasa Pod + RTPengine",
+        "suite": "Kubernetes AI/Rasa Real Lab",
+        "rasa_node": "Real Rasa Pod",
+        "stt_node": "Scripted STT",
+        "tts_node": "Text TTS",
+        "mode": "real Rasa deployment, trained in-cluster, RTPengine RTP/RTCP anchor, REST webhook proof",
+    },
+}
 
 
 @dataclass
@@ -80,6 +115,45 @@ class RtcpTarget:
 
 def make_run_id() -> str:
     return time.strftime("k8s-regression-%Y%m%d-%H%M%S", time.localtime())
+
+
+def make_rasa_run_id() -> str:
+    return time.strftime("rasa-regression-%Y%m%d-%H%M%S", time.localtime())
+
+
+def selected_profiles(args: argparse.Namespace) -> tuple[str, ...]:
+    if getattr(args, "rasa_profiles", False):
+        return RASA_PROFILES
+    if getattr(args, "all_profiles", False):
+        return ALL_PROFILES
+    return tuple(args.profile or DEFAULT_PROFILES)
+
+
+def profile_display_title(profile_name: str) -> str:
+    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("title") or profile_name)
+
+
+def profile_suite_label(profile_name: str) -> str:
+    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("suite") or f"Kubernetes {profile_name}")
+
+
+def profile_execution_label(profile_name: str) -> str:
+    title = profile_display_title(profile_name)
+    return f"{title} [{profile_name}]" if title != profile_name else profile_name
+
+
+def profile_mode_detail(profile_name: str) -> str:
+    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("mode") or PROFILE_DESCRIPTIONS.get(profile_name, "special profile"))
+
+
+def ai_ladder_nodes(profile: SimpleNamespace) -> tuple[str, str, str]:
+    profile_name = str(getattr(profile, "profile", ""))
+    labels = RASA_PROFILE_LABELS.get(profile_name, {})
+    return (
+        str(labels.get("stt_node") or "STT Adapter"),
+        str(labels.get("rasa_node") or "Rasa Bot"),
+        str(labels.get("tts_node") or "TTS Adapter"),
+    )
 
 
 def command_text(command: Iterable[str]) -> str:
@@ -271,6 +345,16 @@ def profile_uses_tls(profile: SimpleNamespace) -> bool:
 
 def profile_uses_rtpengine(profile: SimpleNamespace) -> bool:
     return str(getattr(profile, "media_backend", "internal")) == "rtpengine"
+
+
+def profile_uses_real_rasa(profile: SimpleNamespace) -> bool:
+    config = getattr(profile, "ai_voice_gateway", {}) or {}
+    return bool(
+        isinstance(config, dict)
+        and config.get("enabled")
+        and str(config.get("provider", "rasa")).lower() == "rasa"
+        and str(getattr(profile, "rasa_deployment", "")).lower() == "real"
+    )
 
 
 def profile_enables_rtpengine_deployment(profile: SimpleNamespace, args: argparse.Namespace) -> bool:
@@ -752,8 +836,11 @@ class K8sRegressionRunner:
 
     def collect_k8s_evidence(self, bundle: Path, profile_name: str) -> None:
         include_rtpengine = False
-        if profile_name in ALL_PROFILES:
-            include_rtpengine = profile_enables_rtpengine_deployment(profile_values(profile_name, self.run_id), self.args)
+        include_rasa = False
+        if profile_name in CATALOG_PROFILES:
+            profile = profile_values(profile_name, self.run_id)
+            include_rtpengine = profile_enables_rtpengine_deployment(profile, self.args)
+            include_rasa = profile_uses_real_rasa(profile)
         commands = {
             "kubectl-pods.log": ["get", "pods", "-o", "wide"],
             "kubectl-services.log": ["get", "svc", "-o", "wide"],
@@ -767,10 +854,19 @@ class K8sRegressionRunner:
                 f"RTPengine evidence not applicable for profile={profile_name}; deployment not expected for this profile.\n",
                 encoding="utf-8",
             )
+        if include_rasa:
+            commands["rasa.log"] = ["logs", f"deployment/{self.args.service}-rasa", f"--tail={self.args.deployment_log_tail}"]
+        else:
+            (bundle / "rasa.log").write_text(
+                f"Real Rasa evidence not applicable for profile={profile_name}; deployment not expected for this profile.\n",
+                encoding="utf-8",
+            )
         for filename, parts in commands.items():
             result = self.kubectl(*parts, check=False)
             (bundle / filename).write_text(result.stdout + result.stderr, encoding="utf-8")
         self.collect_playsbc_pod_evidence(bundle)
+        if include_rasa:
+            self.collect_rasa_pod_evidence(bundle)
 
     def start_packet_captures(
         self,
@@ -1039,6 +1135,33 @@ class K8sRegressionRunner:
                 evidence.append(logs.stdout + logs.stderr)
         (bundle / "playsbc-pod-evidence.log").write_text("\n".join(evidence), encoding="utf-8")
 
+    def collect_rasa_pod_evidence(self, bundle: Path) -> None:
+        selector = f"app.kubernetes.io/name=playsbc-rasa,app.kubernetes.io/instance={self.args.helm_release}"
+        result = self.kubectl("get", "pods", "-l", selector, "-o", "json", check=False)
+        evidence: list[str] = []
+        try:
+            pods = json.loads(result.stdout or "{}").get("items", [])
+        except json.JSONDecodeError:
+            pods = []
+        if result.returncode != 0:
+            evidence.append(result.stdout + result.stderr)
+        for pod in pods:
+            name = pod.get("metadata", {}).get("name", "")
+            if not name:
+                continue
+            evidence.append(f"===== describe pod/{name} =====")
+            described = self.kubectl("describe", "pod", str(name), check=False)
+            evidence.append(described.stdout + described.stderr)
+            for previous in (False, True):
+                title = f"logs pod/{name}" + (" --previous" if previous else "")
+                evidence.append(f"===== {title} =====")
+                command = ["logs", f"pod/{name}", "-c", "rasa", f"--tail={self.args.deployment_log_tail}"]
+                if previous:
+                    command.append("--previous")
+                logs = self.kubectl(*command, check=False)
+                evidence.append(logs.stdout + logs.stderr)
+        (bundle / "rasa-pod-evidence.log").write_text("\n".join(evidence), encoding="utf-8")
+
     def write_log(self, bundle: Path, filename: str, title: str, body: str = "") -> None:
         bundle.mkdir(parents=True, exist_ok=True)
         path = bundle / filename
@@ -1150,6 +1273,10 @@ class K8sRegressionRunner:
         elif not (self.original_values or {}).get("tls", {}).get("enabled", False):
             values.setdefault("tls", {})["enabled"] = False
             values.setdefault("tls", {})["existingSecret"] = ""
+        if profile_uses_real_rasa(profile):
+            values.setdefault("rasa", {})["enabled"] = True
+        elif not (self.original_values or {}).get("rasa", {}).get("enabled", False):
+            values.setdefault("rasa", {})["enabled"] = False
         values_path = bundle / "helm-profile-values.yaml"
         values_path.write_text(dump_simple_yaml(values), encoding="utf-8")
         helm_started = time.monotonic()
@@ -1175,6 +1302,19 @@ class K8sRegressionRunner:
         rollout = self.kubectl("rollout", "status", f"deployment/{self.args.deployment}", f"--timeout={self.args.rollout_timeout}s", check=True)
         rollout_seconds = time.monotonic() - rollout_started
         self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT READY", rollout.stdout + rollout.stderr)
+        rasa_detail = "not-required"
+        if profile_uses_real_rasa(profile):
+            rasa_deployment = f"{self.args.service}-rasa"
+            rasa_started = time.monotonic()
+            rasa_rollout = self.kubectl(
+                "rollout",
+                "status",
+                f"deployment/{rasa_deployment}",
+                f"--timeout={self.args.rollout_timeout}s",
+                check=True,
+            )
+            rasa_detail = f"{rasa_deployment} ready in {time.monotonic() - rasa_started:.3f}s"
+            self.write_log(bundle, "log.platform", "RASA ROLLOUT READY", rasa_rollout.stdout + rasa_rollout.stderr)
         phases.append(
             "Configuration",
             "passed",
@@ -1184,7 +1324,7 @@ class K8sRegressionRunner:
                 f"media_backend={getattr(profile, 'media_backend', 'internal')}; "
                 f"advertised_ip={advertised_ip}; tls_secret={self.args.tls_secret_name if profile_uses_tls(profile) else 'not-required'}; "
                 f"helm_upgrade_seconds={helm_seconds:.3f}; rollout_seconds={rollout_seconds:.3f}; "
-                f"core_realm=pod-label:core peer_realm=pod-label:peer."
+                f"rasa={rasa_detail}; core_realm=pod-label:core peer_realm=pod-label:peer."
             ),
         )
 
@@ -1297,7 +1437,7 @@ class K8sRegressionRunner:
                 returncodes, command_lines, sip_ladder = self.profile_register_contact(bundle, phases)
             elif profile == "b2bua-signalling":
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_signalling(bundle, phases)
-            elif profile in ALL_PROFILES:
+            elif profile in CATALOG_PROFILES:
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_catalog(profile, bundle, phases)
             else:
                 raise ValueError(f"Unsupported Kubernetes regression profile: {profile}")
@@ -1328,8 +1468,8 @@ class K8sRegressionRunner:
 
         returncode = 0 if status == "passed" else next((code for code in returncodes if code != 0), 1)
         return ReportRow(
-            suite=f"Kubernetes {profile}",
-            name=profile,
+            suite=profile_suite_label(profile),
+            name=profile_execution_label(profile),
             status=status,
             returncode=returncode,
             duration_seconds=time.monotonic() - started_profile,
@@ -1359,6 +1499,10 @@ class K8sRegressionRunner:
         profile.caller_register_port = 5070
         if getattr(profile, "rtpengine_url", "") == "udp://playsbc-playsbc-rtpengine:2223":
             profile.rtpengine_url = f"udp://{self.args.rtpengine_service}:2223"
+        if profile_uses_real_rasa(profile):
+            ai_config = dict(getattr(profile, "ai_voice_gateway", {}) or {})
+            ai_config["rasa_webhook_url"] = f"http://{self.args.service}-rasa:5005/webhooks/rest/webhook"
+            profile.ai_voice_gateway = ai_config
         phases.append(
             "Test Setup",
             "passed",
@@ -1483,7 +1627,8 @@ class K8sRegressionRunner:
             status_from_codes(returncodes),
             execution_started,
             (
-                f"Ran canonical profile={profile_name} on Kubernetes logical dual-realm topology; "
+                f"Ran {profile_execution_label(profile_name)} on Kubernetes logical dual-realm topology; "
+                f"mode={profile_mode_detail(profile_name)}; "
                 f"description={PROFILE_DESCRIPTIONS.get(profile_name, 'special real-topology profile')}"
             ),
         )
@@ -1516,7 +1661,7 @@ class K8sRegressionRunner:
             participants = ["Core SIPp A", "PlaySBC"]
             if profile_uses_rtpengine(profile):
                 participants.append("RTPengine")
-            participants.extend(["STT Adapter", "Rasa Bot", "TTS Adapter"])
+            participants.extend(ai_ladder_nodes(profile))
             return tuple(participants)
         participants = ["Core SIPp A", "PlaySBC", "Peer SIPp B"]
         if profile_uses_rtpengine(profile):
@@ -1526,7 +1671,19 @@ class K8sRegressionRunner:
     def render_unified_ladder(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> str:
         profile_name = str(getattr(profile, "profile", "k8s"))
         body = "\n".join(flow.render_ladder_text().splitlines()[1:])
-        return f"KUBERNETES SINGLE LADDER\nprofile={profile_name}\n{body}"
+        lines = [
+            "KUBERNETES SINGLE LADDER",
+            f"profile={profile_name}",
+        ]
+        if profile_name in RASA_PROFILE_LABELS:
+            lines.extend(
+                [
+                    f"case={profile_display_title(profile_name)}",
+                    f"mode={profile_mode_detail(profile_name)}",
+                ]
+            )
+        lines.append(body)
+        return "\n".join(lines)
 
     def add_registration_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         if getattr(profile, "register_callee", True):
@@ -1568,6 +1725,8 @@ class K8sRegressionRunner:
             flow.sip("PlaySBC", "Core SIPp A", "expected response")
 
     def add_ai_gateway_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
+        stt_node, rasa_node, tts_node = ai_ladder_nodes(profile)
+        profile_name = str(getattr(profile, "profile", ""))
         flow.sip("Core SIPp A", "PlaySBC", "INVITE")
         flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
         flow.sip("PlaySBC", "Core SIPp A", "180 Ringing")
@@ -1578,12 +1737,19 @@ class K8sRegressionRunner:
             flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
-        flow.sip("PlaySBC", "STT Adapter", "scripted STT")
-        flow.sip("STT Adapter", "PlaySBC", "intent text")
-        flow.sip("PlaySBC", "Rasa Bot", "REST turn")
-        flow.sip("Rasa Bot", "PlaySBC", "bot response")
-        flow.sip("PlaySBC", "TTS Adapter", "scripted TTS")
-        flow.sip("TTS Adapter", "PlaySBC", "speech frame")
+        flow.sip("PlaySBC", stt_node, "scripted STT")
+        flow.sip(stt_node, "PlaySBC", "intent text")
+        if profile_uses_real_rasa(profile):
+            flow.sip("PlaySBC", rasa_node, "REST POST /webhook")
+            flow.sip(rasa_node, "PlaySBC", "REST 200 support")
+        elif profile_name == "ai-rasa-rtpengine":
+            flow.sip("PlaySBC", rasa_node, "REST POST /mock")
+            flow.sip(rasa_node, "PlaySBC", "2 replies + transfer")
+        else:
+            flow.sip("PlaySBC", rasa_node, "REST POST /mock")
+            flow.sip(rasa_node, "PlaySBC", "single reply")
+        flow.sip("PlaySBC", tts_node, "text-only TTS")
+        flow.sip(tts_node, "PlaySBC", "no RTP prompt")
         flow.sip("Core SIPp A", "PlaySBC", "BYE")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
 
@@ -1848,14 +2014,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--chart", default=str(ROOT / "charts" / "playsbc"))
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
     parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 47 B2BUA profiles on Kubernetes")
+    parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
     parser.add_argument("--list-profiles", action="store_true")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--output-root", default=str(ROOT / "logs" / "k8s-Regression"))
-    parser.add_argument("--report-dir", default=str(ROOT / "logs" / "k8s-reports"))
+    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--report-dir", default=DEFAULT_REPORT_DIR)
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--helm-timeout", type=int, default=180)
-    parser.add_argument("--rollout-timeout", type=int, default=120)
+    parser.add_argument("--rollout-timeout", type=int, default=DEFAULT_ROLLOUT_TIMEOUT)
     parser.add_argument("--sipp-timeout", type=int, default=60)
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--image-build-timeout", type=int, default=900)
@@ -1863,6 +2030,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--tls-secret-name", default=LAB_TLS_SECRET_NAME)
     parser.add_argument("--no-restore-helm-values", action="store_true", help="Leave Helm on the last rendered profile instead of restoring pre-run values")
     parser.add_argument("--skip-namespace-check", action="store_true", help="Skip cluster-scoped namespace lookup, useful for in-cluster Job RBAC")
+    parser.add_argument("--keep-old-logs", action="store_true", help="Keep existing Rasa-only logs when --rasa-profiles is used")
     parser.add_argument("--options-user", default="health")
     parser.add_argument("--register-user", default="1001")
     parser.add_argument("--caller", default="1001")
@@ -1870,7 +2038,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--call-hold-ms", type=int, default=1000)
     parser.add_argument("--uas-start-delay", type=float, default=1.0)
     parser.add_argument("--keep-pods", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.rasa_profiles and (args.all_profiles or args.profile):
+        raise SystemExit("--rasa-profiles cannot be combined with --all-profiles or --profile")
+    if args.rasa_profiles:
+        if args.output_root == DEFAULT_OUTPUT_ROOT:
+            args.output_root = RASA_OUTPUT_ROOT
+        if args.report_dir == DEFAULT_REPORT_DIR:
+            args.report_dir = RASA_REPORT_DIR
+        if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
+            args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
+    return args
 
 
 def main() -> int:
@@ -1880,15 +2058,27 @@ def main() -> int:
     if args.list_profiles:
         print("Available Kubernetes B2BUA profiles:")
         for profile in ALL_PROFILES:
-            print(f"  {profile}: {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
+            label = profile_execution_label(profile)
+            print(f"  {profile}: {label} - {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
+        print("\nOptional profiles:")
+        for profile in OPTIONAL_B2BUA_PROFILES:
+            label = profile_execution_label(profile)
+            print(f"  {profile}: {label} - {PROFILE_DESCRIPTIONS.get(profile, 'Optional Kubernetes profile.')}")
+        print("\nRasa shortcut:")
+        for profile in RASA_PROFILES:
+            print(f"  --rasa-profiles includes {profile}: {profile_display_title(profile)}")
         print("\nSmoke aliases:")
         for profile in SMOKE_PROFILES:
             print(f"  {profile}")
         return 0
-    profiles = ALL_PROFILES if args.all_profiles else tuple(args.profile or DEFAULT_PROFILES)
-    run_id = args.run_id or make_run_id()
+    profiles = selected_profiles(args)
+    run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_run_id())
     output_root = Path(args.output_root)
     report_dir = Path(args.report_dir)
+    if args.rasa_profiles and not args.keep_old_logs:
+        shutil.rmtree(output_root, ignore_errors=True)
+        if not report_dir.is_relative_to(output_root):
+            shutil.rmtree(report_dir, ignore_errors=True)
     output_root.mkdir(parents=True, exist_ok=True)
 
     runner = K8sRegressionRunner(args, run_id)
