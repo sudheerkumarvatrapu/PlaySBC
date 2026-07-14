@@ -190,7 +190,19 @@ Startup complete
 
 ## Run Kubernetes Regression
 
-Use this after PlaySBC and RTPengine are already deployed by Helm. The runner creates temporary SIPp pods inside the `playsbc` namespace, mounts the repo SIPp XMLs with a ConfigMap, executes the profiles against the Kubernetes Service, collects pod/deployment evidence, and writes the same robot-style HTML report format as the local B2BUA suite.
+Use this after PlaySBC and RTPengine are already deployed by Helm. The runner executes the canonical B2BUA regression catalog against the Kubernetes Service and writes the same robot-style HTML report format as the local B2BUA suite.
+
+Execution model:
+
+- The Python runner starts from your Mac or Linux shell.
+- Each profile creates temporary SIPp pods in the `playsbc` namespace.
+- SIPp A runs as the logical `core` realm pod.
+- SIPp B runs as the logical `peer` realm pod.
+- PlaySBC is reconfigured through Helm before each profile.
+- RTPengine-backed profiles use the in-cluster RTPengine Service.
+- Temporary SIPp pods are deleted after each profile unless `--keep-pods` is used.
+
+This does not replace or alter the local Docker regression command. The Docker dual-realm suite still uses real Docker network addresses such as `172.28.x.x` and `192.168.x.x`. In a default `kind` or `minikube` cluster, Kubernetes regression uses logical core/peer pods and labels inside one pod network. Hard secondary realm interfaces such as a true `172.x` core pod NIC and `192.x` peer pod NIC require a future Multus or multi-network CNI enhancement.
 
 One-time SIPp image prep for `kind`:
 
@@ -213,7 +225,14 @@ helm upgrade playsbc charts/playsbc \
 kubectl -n playsbc rollout status deployment/playsbc-playsbc
 ```
 
-Run all Kubernetes profiles:
+List the Kubernetes profile catalog:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression.py --list-profiles
+```
+
+Run all 47 canonical Kubernetes B2BUA profiles:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
@@ -235,13 +254,17 @@ python3 tools/run_k8s_regression.py \
   --kind-cluster playsbc
 ```
 
-Current Kubernetes profiles:
+Coverage:
 
-| Profile | What It Checks |
-| --- | --- |
-| `options` | SIPp pod sends OPTIONS to the PlaySBC Kubernetes Service and expects `200 OK`. |
-| `register-contact` | SIPp pod registers a contact through PlaySBC and expects registrar `200 OK`. |
-| `b2bua-signalling` | SIPp B registers in-cluster, SIPp A calls through PlaySBC B2BUA, and SIPp B answers the call. |
+- B2BUA signalling, media, transcoding, and RTPengine anchoring.
+- UDP, TCP, TLS/SRTP interworking, RTCP, and DTMF profiles.
+- REGISTER, digest auth success/failure, registered inbound/outbound calls.
+- ESBC route policy, trunk, failover, normalization, admission, health, and metrics profiles.
+- AI/Rasa lab profiles.
+- Negative SIP cases such as invalid BYE, unknown route, failed outbound leg, CANCEL, and retransmission.
+- Small load, soak, and 5 cps / 60 second CHT load profiles.
+
+The three smoke aliases are still available for quick Kubernetes checks: `options`, `register-contact`, and `b2bua-signalling`.
 
 Outputs:
 
@@ -254,9 +277,10 @@ logs/k8s-reports/latest.html
 Useful single-profile commands:
 
 ```bash
-python3 tools/run_k8s_regression.py --profile options
-python3 tools/run_k8s_regression.py --profile register-contact
-python3 tools/run_k8s_regression.py --profile b2bua-signalling
+python3 tools/run_k8s_regression.py --profile basic-signalling
+python3 tools/run_k8s_regression.py --profile basic-media
+python3 tools/run_k8s_regression.py --profile rtpengine
+python3 tools/run_k8s_regression.py --profile register-auth-success
 ```
 
 ## Inspect Helm Release

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -12,16 +13,41 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from types import SimpleNamespace
+from typing import Any, Iterable, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_DIR = ROOT / "sipp" / "scenarios"
-DEFAULT_PROFILES = ("options", "register-contact", "b2bua-signalling")
-ALL_PROFILES = DEFAULT_PROFILES
+SMOKE_PROFILES = ("options", "register-contact", "b2bua-signalling")
 
 sys.path.insert(0, str(ROOT))
-from tools.run_regression_suite import cleanup_old_reports, ReportPhase, ReportRow, write_reports  # noqa: E402
+from tools.run_b2bua_sipp_smoke import (  # noqa: E402
+    BASE_DEFAULTS,
+    B2BUA_PROFILES,
+    MEDIA_PCAPS,
+    MEDIA_PAYLOAD_TYPES,
+    MEDIA_RTPMAP_LINES,
+    PROFILE_DESCRIPTIONS,
+    call_limit,
+    dump_simple_yaml,
+    is_transcoding_profile,
+    render_harness_config_templates,
+    sipp_timeout_seconds,
+    uas_media_codec,
+)
+from tools.run_regression_suite import (  # noqa: E402
+    ALL_B2BUA_PROFILES,
+    REAL_TOPOLOGY_PROFILE,
+    cleanup_old_reports,
+    ReportPhase,
+    ReportRow,
+    write_reports,
+)
+
+DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
+ALL_PROFILES = ALL_B2BUA_PROFILES
+SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES)
 
 
 @dataclass
@@ -77,6 +103,131 @@ def ensure_binary(name: str) -> None:
         raise SystemExit(f"{name} executable not found in PATH")
 
 
+def short_name(text: str, limit: int = 44) -> str:
+    cleaned = re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-")
+    return cleaned[:limit].strip("-") or "profile"
+
+
+def status_from_codes(returncodes: list[int]) -> str:
+    return "passed" if returncodes and all(code == 0 for code in returncodes) else "failed"
+
+
+def profile_values(profile: str, run_id: str) -> SimpleNamespace:
+    values: dict[str, Any] = dict(BASE_DEFAULTS)
+    if profile == REAL_TOPOLOGY_PROFILE:
+        values.update(B2BUA_PROFILES["rtpengine-transcoding"])
+        values.update({"caller": "core-a", "callee": "peer-b"})
+    else:
+        values.update(B2BUA_PROFILES[profile])
+    values.update(
+        {
+            "profile": profile,
+            "resolved_run_id": run_id,
+            "host": "",
+            "server_host": "",
+            "server_port": 5062,
+            "uac_port": 5060,
+            "uas_port": 5060,
+            "register_port": 5070,
+            "caller_register_port": 5070,
+            "sipp_pcap_sudo": False,
+            "dry_run": False,
+            "pcap_topology": "kubernetes-dual-realm",
+        }
+    )
+    if values.get("rtpengine_url") == BASE_DEFAULTS["rtpengine_url"]:
+        values["rtpengine_url"] = "udp://playsbc-playsbc-rtpengine:2223"
+    transports = [item.strip() for item in str(values.get("sip_transport", "udp")).split(",") if item.strip()]
+    values["uac_transport"] = values.get("uac_transport") or (transports[0] if len(transports) == 1 else "udp")
+    values["uas_transport"] = values.get("uas_transport") or (transports[0] if len(transports) == 1 else "udp")
+    values["media_enabled"] = bool(values.get("media_codec"))
+    values["media_pcap"] = values.get("media_pcap") or (MEDIA_PCAPS[values["media_codec"]] if values.get("media_codec") else "")
+    values["server_codec"] = values.get("server_codec") or values.get("media_codec") or "PCMU"
+    values["ladder_enabled"] = values.get("ladder") if values.get("ladder") is not None else (values.get("calls", 1) == 1 and values.get("rate", 1) == 1)
+    return SimpleNamespace(**values)
+
+
+def format_config_value(value: object, profile: SimpleNamespace) -> object:
+    rendered = render_harness_config_templates(value, profile)
+    return rendered
+
+
+def route_policies_for(profile: SimpleNamespace) -> list[dict[str, object]]:
+    policies = getattr(profile, "route_policies", None) or [
+        {"name": "registered-endpoints", "match": "*", "target": "registration", "priority": 10}
+    ]
+    rendered = format_config_value(policies, profile)
+    return rendered if isinstance(rendered, list) else []
+
+
+def b2bua_routes_for(profile: SimpleNamespace) -> dict[str, object]:
+    rendered = format_config_value(getattr(profile, "b2bua_routes", {}) or {}, profile)
+    return rendered if isinstance(rendered, dict) else {}
+
+
+def transport_args(transport: str, role: str) -> list[str]:
+    name = str(transport or "udp").lower()
+    if name == "tcp":
+        return ["-t", "t1"] if role == "server" else ["-t", "tn", "-max_socket", "1024"]
+    if name == "tls":
+        return ["-t", "l1"] if role == "server" else ["-t", "ln"]
+    return []
+
+
+def trace_args() -> list[str]:
+    return ["-trace_msg", "-trace_err", "-trace_stat", "-trace_counts", "-trace_logs"]
+
+
+def sdp_payloads(profile: SimpleNamespace, role: str) -> tuple[str, str]:
+    if is_transcoding_profile(profile):
+        codec = uas_media_codec(profile) if role == "uas" else str(getattr(profile, "media_codec", "PCMU")).upper()
+        payload_type = MEDIA_PAYLOAD_TYPES[codec]
+        return f"{payload_type} 101", MEDIA_RTPMAP_LINES[codec]
+    return "0 8 101", "\n      ".join(MEDIA_RTPMAP_LINES[codec] for codec in ("PCMU", "PCMA"))
+
+
+def media_pcap_path(profile: SimpleNamespace, role: str) -> str:
+    codec = uas_media_codec(profile) if role == "uas" else str(getattr(profile, "media_codec", "PCMU")).upper()
+    relative = MEDIA_PCAPS.get(codec, MEDIA_PCAPS["PCMU"])
+    return f"/scenarios/{relative}"
+
+
+def scenario_source(profile: SimpleNamespace, role: str) -> Path:
+    if role == "register":
+        return SCENARIO_DIR / str(getattr(profile, "registration_scenario", "register_contact.xml"))
+    if role == "uac":
+        configured = str(getattr(profile, "uac_scenario", "") or "")
+        if configured:
+            return SCENARIO_DIR / configured
+        return SCENARIO_DIR / ("b2bua_uac_a_media.xml" if getattr(profile, "media_enabled", False) else "b2bua_uac_a.xml")
+    configured = str(getattr(profile, "uas_scenario", "") or "")
+    if configured:
+        return SCENARIO_DIR / configured
+    return SCENARIO_DIR / ("b2bua_uas_b_media.xml" if getattr(profile, "media_enabled", False) else "b2bua_uas_b.xml")
+
+
+def rendered_scenario(profile: SimpleNamespace, role: str) -> str:
+    source = scenario_source(profile, role)
+    text = source.read_text(encoding="ISO-8859-1")
+    if role == "register" and str(getattr(profile, "registration_auth_expected", "") or ""):
+        username = str(getattr(profile, "registration_username", "") or getattr(profile, "callee", ""))
+        password = str(getattr(profile, "registration_password", ""))
+        text = text.replace("__AUTH_USERNAME__", username).replace("__AUTH_PASSWORD__", password)
+    if "[media_pcap]" in text:
+        text = text.replace("[media_pcap]", media_pcap_path(profile, "uas" if role == "uas" else "uac"))
+    if "[uac_sdp_payloads]" in text:
+        payloads, rtpmaps = sdp_payloads(profile, "uac")
+        text = text.replace("[uac_sdp_payloads]", payloads).replace("[uac_sdp_rtpmaps]", rtpmaps)
+    if "[uas_sdp_payloads]" in text:
+        payloads, rtpmaps = sdp_payloads(profile, "uas")
+        text = text.replace("[uas_sdp_payloads]", payloads).replace("[uas_sdp_rtpmaps]", rtpmaps)
+    return text
+
+
+def is_load_profile(profile: SimpleNamespace) -> bool:
+    return int(getattr(profile, "calls", 1)) > 1
+
+
 def scenario_configmap_manifest(name: str) -> dict[str, object]:
     data = {}
     for path in sorted(SCENARIO_DIR.glob("*.xml")):
@@ -97,18 +248,25 @@ def scenario_configmap_manifest(name: str) -> dict[str, object]:
     }
 
 
-def pod_manifest(name: str, image: str, pull_policy: str, configmap: str, run_id: str) -> dict[str, object]:
+def pod_manifest(
+    name: str,
+    image: str,
+    pull_policy: str,
+    configmap: str,
+    run_id: str,
+    realm: str = "",
+) -> dict[str, object]:
+    labels = {
+        "app.kubernetes.io/name": "playsbc-k8s-regression",
+        "app.kubernetes.io/part-of": "playsbc",
+        "playsbc-regression-run": run_id,
+    }
+    if realm:
+        labels["playsbc.openai.com/realm"] = realm
     return {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {
-            "name": name,
-            "labels": {
-                "app.kubernetes.io/name": "playsbc-k8s-regression",
-                "app.kubernetes.io/part-of": "playsbc",
-                "playsbc-regression-run": run_id,
-            },
-        },
+        "metadata": {"name": name, "labels": labels},
         "spec": {
             "restartPolicy": "Never",
             "containers": [
@@ -117,10 +275,13 @@ def pod_manifest(name: str, image: str, pull_policy: str, configmap: str, run_id
                     "image": image,
                     "imagePullPolicy": pull_policy,
                     "command": ["sleep", "3600"],
-                    "volumeMounts": [{"name": "scenarios", "mountPath": "/scenarios", "readOnly": True}],
+                    "volumeMounts": [{"name": "scenario-overrides", "mountPath": "/scenario-overrides", "readOnly": True}],
+                    "securityContext": {
+                        "capabilities": {"add": ["NET_RAW"]},
+                    },
                 }
             ],
-            "volumes": [{"name": "scenarios", "configMap": {"name": configmap}}],
+            "volumes": [{"name": "scenario-overrides", "configMap": {"name": configmap}}],
         },
     }
 
@@ -211,8 +372,8 @@ class K8sRegressionRunner:
         )
         self.image_prepared = True
 
-    def create_agent(self, name: str, bundle: Path) -> str:
-        manifest = pod_manifest(name, self.args.sipp_image, self.args.image_pull_policy, self.args.configmap, self.run_id)
+    def create_agent(self, name: str, bundle: Path, realm: str = "") -> str:
+        manifest = pod_manifest(name, self.args.sipp_image, self.args.image_pull_policy, self.args.configmap, self.run_id, realm=realm)
         self.kubectl("apply", "-f", "-", input_text=json.dumps(manifest), check=True)
         self.kubectl("wait", "--for=condition=Ready", f"pod/{name}", f"--timeout={self.args.pod_ready_timeout}s", check=True)
         ip_result = self.kubectl("get", "pod", name, "-o", "jsonpath={.status.podIP}", check=True)
@@ -335,6 +496,216 @@ class K8sRegressionRunner:
     def target(self) -> str:
         return f"{self.args.service}:{self.args.sip_port}"
 
+    def write_text_to_pod(self, pod: str, path: str, text: str) -> None:
+        command = [
+            self.args.kubectl_bin,
+            "-n",
+            self.args.namespace,
+            "exec",
+            "-i",
+            pod,
+            "--",
+            "sh",
+            "-lc",
+            f"cat > {shlex.quote(path)}",
+        ]
+        run_command(command, timeout=20, input_text=text, check=True)
+
+    def prepare_profile_scenarios(self, profile: SimpleNamespace, uac_pod: str, uas_pod: str) -> tuple[str, str, str]:
+        uac_path = f"/tmp/{short_name(profile.profile)}-uac.xml"
+        uas_path = f"/tmp/{short_name(profile.profile)}-uas.xml"
+        register_path = f"/tmp/{short_name(profile.profile)}-register.xml"
+        self.write_text_to_pod(uac_pod, uac_path, rendered_scenario(profile, "uac"))
+        self.write_text_to_pod(uas_pod, uas_path, rendered_scenario(profile, "uas"))
+        self.write_text_to_pod(uas_pod, register_path, rendered_scenario(profile, "register"))
+        self.write_text_to_pod(uac_pod, register_path, rendered_scenario(profile, "register"))
+        return uac_path, uas_path, register_path
+
+    def profile_config(self, profile: SimpleNamespace) -> dict[str, object]:
+        return {
+            "sip_ip": "0.0.0.0",
+            "sip_advertised_ip": self.args.service,
+            "b2bua_advertised_ip": self.args.service,
+            "sip_port": self.args.sip_port,
+            "tls_port": self.args.tls_port,
+            "sip_transport": getattr(profile, "sip_transport", "udp"),
+            "rtp_min": getattr(profile, "server_rtp_min", 30000),
+            "rtp_max": getattr(profile, "server_rtp_max", 30100),
+            "default_codec": getattr(profile, "server_codec", "PCMU"),
+            "auth_realm": "playsbc",
+            "users": getattr(profile, "users", {}),
+            "bridge_rooms": ["bridge"],
+            "b2bua_routes": b2bua_routes_for(profile),
+            "route_policies": route_policies_for(profile),
+            "trunk_groups": format_config_value(getattr(profile, "trunk_groups", []), profile),
+            "hunt_groups": format_config_value(getattr(profile, "hunt_groups", []), profile),
+            "number_normalization": getattr(profile, "number_normalization", []),
+            "header_normalization": getattr(profile, "header_normalization", {}),
+            "transport_policies": getattr(profile, "transport_policies", []),
+            "call_admission": getattr(profile, "call_admission", {}),
+            "b2bua_ladder_logs": getattr(profile, "ladder_enabled", True),
+            "media_backend": getattr(profile, "media_backend", "internal"),
+            "rtpengine_url": getattr(profile, "rtpengine_url", f"udp://{self.args.rtpengine_service}:2223"),
+            "rtpengine_timeout": getattr(profile, "rtpengine_timeout", 3.0),
+            "rtpengine_directions": getattr(profile, "rtpengine_directions", []),
+            "rtpengine_interfaces": getattr(profile, "rtpengine_interfaces", []),
+            "rtpengine_max_sessions": getattr(profile, "rtpengine_max_sessions", -1),
+            "rtpengine_offer_transport_protocol": getattr(profile, "rtpengine_offer_transport_protocol", ""),
+            "rtpengine_answer_transport_protocol": getattr(profile, "rtpengine_answer_transport_protocol", ""),
+            "rtpengine_sdes": getattr(profile, "rtpengine_sdes", []),
+            "rtpengine_dtls": getattr(profile, "rtpengine_dtls", ""),
+            "media_quality": getattr(profile, "media_quality", {}),
+            "ai_voice_gateway": getattr(profile, "ai_voice_gateway", {}),
+            "ha": format_config_value(getattr(profile, "ha", {}), profile),
+            "reject_unknown_routes": getattr(profile, "reject_unknown_routes", False),
+            "debug": True,
+        }
+
+    def apply_profile_config(self, profile: SimpleNamespace, bundle: Path, phases: PhaseLog) -> None:
+        started = time.monotonic()
+        current_values = run_command(
+            [
+                self.args.helm_bin,
+                "get",
+                "values",
+                self.args.helm_release,
+                "--namespace",
+                self.args.namespace,
+                "--all",
+                "-o",
+                "json",
+            ],
+            timeout=self.args.helm_timeout,
+            check=True,
+        )
+        values = json.loads(current_values.stdout or "{}")
+        values.setdefault("playsbc", {})["config"] = self.profile_config(profile)
+        values.setdefault("rtpengine", {})["enabled"] = bool(
+            self.args.rtpengine_enabled
+            and getattr(profile, "media_backend", "internal") == "rtpengine"
+            and profile.profile != "rtpengine-control-failure"
+        )
+        values_path = bundle / "helm-profile-values.yaml"
+        values_path.write_text(dump_simple_yaml(values), encoding="utf-8")
+        result = run_command(
+            [
+                self.args.helm_bin,
+                "upgrade",
+                self.args.helm_release,
+                self.args.chart,
+                "--namespace",
+                self.args.namespace,
+                "-f",
+                str(values_path),
+            ],
+            timeout=self.args.helm_timeout,
+            check=True,
+        )
+        self.write_log(bundle, "log.platform", "HELM PROFILE UPGRADE", result.stdout + result.stderr)
+        restart = self.kubectl("rollout", "restart", f"deployment/{self.args.deployment}", check=True)
+        self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT RESTART", restart.stdout + restart.stderr)
+        rollout = self.kubectl("rollout", "status", f"deployment/{self.args.deployment}", f"--timeout={self.args.rollout_timeout}s", check=True)
+        self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT READY", rollout.stdout + rollout.stderr)
+        phases.append(
+            "Configuration",
+            "passed",
+            started,
+            (
+                f"Rendered and applied Helm config for profile={profile.profile}; "
+                f"media_backend={getattr(profile, 'media_backend', 'internal')}; "
+                f"core_realm=pod-label:core peer_realm=pod-label:peer."
+            ),
+        )
+
+    def b2bua_base_args(self, profile: SimpleNamespace, pod_ip: str, local_port: int) -> list[str]:
+        calls = int(getattr(profile, "calls", 1))
+        rate = int(getattr(profile, "rate", 1))
+        hold_ms = int(getattr(profile, "hold_ms", self.args.call_hold_ms))
+        return [
+            "-i",
+            pod_ip,
+            "-mi",
+            pod_ip,
+            "-p",
+            str(local_port),
+            "-m",
+            str(calls),
+            "-l",
+            str(call_limit(calls, rate, hold_ms)),
+            "-timeout",
+            str(sipp_timeout_seconds(calls, rate, hold_ms)),
+            "-timeout_error",
+            "-nostdin",
+            "-min_rtp_port",
+            "6000",
+            "-max_rtp_port",
+            "6998",
+            *trace_args(),
+        ]
+
+    def b2bua_uas_args(self, profile: SimpleNamespace, scenario: str, peer_ip: str) -> list[str]:
+        return [
+            "-sf",
+            scenario,
+            "-s",
+            str(getattr(profile, "callee", self.args.callee)),
+            *self.b2bua_base_args(profile, peer_ip, 5060),
+            *transport_args(getattr(profile, "uas_transport", "udp"), "server"),
+        ]
+
+    def b2bua_register_args(self, profile: SimpleNamespace, scenario: str, user: str, pod_ip: str, realm: str) -> list[str]:
+        transport_name = getattr(profile, "uas_transport", "udp") if realm == "peer" else getattr(profile, "uac_transport", "udp")
+        remote_port = self.args.tls_port if transport_name == "tls" else self.args.sip_port
+        return [
+            f"{self.args.service}:{remote_port}",
+            "-sf",
+            scenario,
+            "-s",
+            user,
+            "-key",
+            "contact_port",
+            "5060",
+            "-m",
+            "1",
+            "-r",
+            "1",
+            "-i",
+            pod_ip,
+            "-mi",
+            pod_ip,
+            "-p",
+            "5070",
+            "-timeout",
+            "15",
+            "-timeout_error",
+            "-nostdin",
+            *trace_args(),
+            *transport_args(transport_name, "client"),
+        ]
+
+    def b2bua_uac_args(self, profile: SimpleNamespace, scenario: str, core_ip: str) -> list[str]:
+        transport_name = getattr(profile, "uac_transport", "udp")
+        remote_port = self.args.tls_port if transport_name == "tls" else self.args.sip_port
+        calls = int(getattr(profile, "calls", 1))
+        rate = int(getattr(profile, "rate", 1))
+        hold_ms = int(getattr(profile, "hold_ms", self.args.call_hold_ms))
+        return [
+            f"{self.args.service}:{remote_port}",
+            "-sf",
+            scenario,
+            "-s",
+            str(getattr(profile, "callee", self.args.callee)),
+            "-key",
+            "caller",
+            str(getattr(profile, "caller", self.args.caller)),
+            "-r",
+            str(rate),
+            "-d",
+            str(hold_ms),
+            *self.b2bua_base_args(profile, core_ip, 5060),
+            *transport_args(transport_name, "client"),
+        ]
+
     def run_profile(self, profile: str, output_root: Path) -> ReportRow:
         bundle = output_root / f"{self.run_id}-{profile}"
         bundle.mkdir(parents=True, exist_ok=True)
@@ -355,9 +726,11 @@ class K8sRegressionRunner:
                 returncodes, command_lines, sip_ladder = self.profile_register_contact(bundle, phases)
             elif profile == "b2bua-signalling":
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_signalling(bundle, phases)
+            elif profile in ALL_PROFILES:
+                returncodes, command_lines, sip_ladder = self.profile_b2bua_catalog(profile, bundle, phases)
             else:
                 raise ValueError(f"Unsupported Kubernetes regression profile: {profile}")
-            status = "passed" if returncodes and all(code == 0 for code in returncodes) else "failed"
+            status = status_from_codes(returncodes)
             detail = f"Executed profile={profile}; step_returncodes={','.join(str(code) for code in returncodes)}."
         except Exception as exc:
             status = "failed"
@@ -393,6 +766,142 @@ class K8sRegressionRunner:
             command=" && ".join(command_lines) if command_lines else f"tools/run_k8s_regression.py --profile {profile}",
             phases=phases.phases,
             sip_ladder=sip_ladder,
+        )
+
+    def profile_b2bua_catalog(self, profile_name: str, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
+        setup_started = time.monotonic()
+        profile = profile_values(profile_name, self.run_id)
+        stem = short_name(f"{self.run_id}-{profile_name}", limit=48)
+        core_pod = f"{stem}-core"
+        peer_pod = f"{stem}-peer"
+        core_ip = self.create_agent(core_pod, bundle, realm="core")
+        peer_ip = self.create_agent(peer_pod, bundle, realm="peer")
+        profile.host = peer_ip
+        profile.server_host = self.args.service
+        profile.server_port = self.args.sip_port
+        profile.uac_port = 5060
+        profile.uas_port = 5060
+        profile.register_port = 5070
+        profile.caller_register_port = 5070
+        if getattr(profile, "rtpengine_url", "") == "udp://playsbc-playsbc-rtpengine:2223":
+            profile.rtpengine_url = f"udp://{self.args.rtpengine_service}:2223"
+        phases.append(
+            "Test Setup",
+            "passed",
+            setup_started,
+            (
+                f"Started Kubernetes dual-realm SIPp pods: core={core_pod} ip={core_ip}, "
+                f"peer={peer_pod} ip={peer_ip}. The realms are logical Kubernetes pods/labels, "
+                "not Multus-backed secondary subnets."
+            ),
+        )
+
+        self.apply_profile_config(profile, bundle, phases)
+        uac_scenario, uas_scenario, register_scenario = self.prepare_profile_scenarios(profile, core_pod, peer_pod)
+
+        execution_started = time.monotonic()
+        returncodes: list[int] = []
+        commands: list[str] = []
+        processes: list[tuple[str, str, subprocess.Popen[str]]] = []
+
+        try:
+            if getattr(profile, "start_uas", True):
+                uas_args = self.b2bua_uas_args(profile, uas_scenario, peer_ip)
+                uas_process = self.start_sipp_process(peer_pod, "peer-sipp-b-uas", uas_args, bundle)
+                processes.append(("peer-sipp-b-uas", peer_pod, uas_process))
+                commands.append(command_text(self.sipp_exec_command(peer_pod, uas_args)))
+                time.sleep(self.args.uas_start_delay)
+
+            if getattr(profile, "register_callee", True):
+                register_args = self.b2bua_register_args(
+                    profile,
+                    register_scenario,
+                    str(getattr(profile, "callee", self.args.callee)),
+                    peer_ip,
+                    "peer",
+                )
+                result = self.run_sipp_step(peer_pod, "peer-registration-callee", register_args, bundle, timeout=30)
+                returncodes.append(result.returncode)
+                commands.append(command_text(result.command))
+
+            if getattr(profile, "register_caller", False):
+                register_args = self.b2bua_register_args(
+                    profile,
+                    register_scenario,
+                    str(getattr(profile, "caller", self.args.caller)),
+                    core_ip,
+                    "core",
+                )
+                result = self.run_sipp_step(core_pod, "core-registration-caller", register_args, bundle, timeout=30)
+                returncodes.append(result.returncode)
+                commands.append(command_text(result.command))
+
+            if getattr(profile, "run_call", True):
+                uac_args = self.b2bua_uac_args(profile, uac_scenario, core_ip)
+                timeout = max(self.args.sipp_timeout, sipp_timeout_seconds(int(getattr(profile, "calls", 1)), int(getattr(profile, "rate", 1)), int(getattr(profile, "hold_ms", self.args.call_hold_ms))) + 30)
+                result = self.run_sipp_step(core_pod, "core-sipp-a-uac", uac_args, bundle, timeout=timeout)
+                returncodes.append(result.returncode)
+                commands.append(command_text(result.command))
+
+            for step_name, pod, process in processes:
+                try:
+                    rc = process.wait(timeout=max(30, self.args.sipp_timeout + 30))
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    rc = 124
+                finally:
+                    self.close_process_files(process)
+                returncodes.append(int(rc))
+                self.write_log(bundle, "log.sipp", f"{step_name.upper()} RESULT", f"returncode={rc}")
+                self.collect_sipp_traces(pod, bundle / step_name)
+        finally:
+            for _step_name, _pod, process in processes:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                self.close_process_files(process)
+
+        phases.append(
+            "Test Execution",
+            status_from_codes(returncodes),
+            execution_started,
+            (
+                f"Ran canonical profile={profile_name} on Kubernetes logical dual-realm topology; "
+                f"description={PROFILE_DESCRIPTIONS.get(profile_name, 'special real-topology profile')}"
+            ),
+        )
+        ladder = "" if is_load_profile(profile) else self.dual_realm_ladder(profile)
+        return returncodes or [0], commands, ladder
+
+    def dual_realm_ladder(self, profile: SimpleNamespace) -> str:
+        if not getattr(profile, "run_call", True):
+            return (
+                "KUBERNETES DUAL-REALM LADDER\n"
+                "Core SIPp A        PlaySBC Service        Peer SIPp B/RTPengine\n"
+                "    |                    |                         |\n"
+                "    | profile setup/control only                    |\n"
+            )
+        return (
+            "KUBERNETES DUAL-REALM SIP LADDER\n"
+            "Core SIPp A             PlaySBC Service             Peer SIPp B\n"
+            "    |                         |                         |\n"
+            "    |                         | REGISTER                |\n"
+            "    |                         |<------------------------|\n"
+            "    |                         | 200 OK                   |\n"
+            "    |                         |------------------------>|\n"
+            "    | INVITE                  |                         |\n"
+            "    |------------------------>|                         |\n"
+            "    | 100 Trying              |                         |\n"
+            "    |<------------------------|                         |\n"
+            "    |                         | INVITE                  |\n"
+            "    |                         |------------------------>|\n"
+            "    |                         | final/provisional reply |\n"
+            "    | final/provisional reply |                         |\n"
+            "    |<------------------------|                         |\n"
+            "    | ACK/BYE as scenario requires                       |\n"
         )
 
     def profile_options(self, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
@@ -589,6 +1098,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--namespace", default="playsbc")
     parser.add_argument("--service", default="playsbc-playsbc")
     parser.add_argument("--sip-port", type=int, default=5062)
+    parser.add_argument("--tls-port", type=int, default=5061)
     parser.add_argument("--deployment", default="playsbc-playsbc")
     parser.add_argument("--rtpengine-service", default="playsbc-playsbc-rtpengine")
     parser.add_argument("--rtpengine-deployment", default="playsbc-playsbc-rtpengine")
@@ -598,12 +1108,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-sipp-image", action="store_true", help="Build docker/sipp.Dockerfile before running")
     parser.add_argument("--kind-load-image", action="store_true", help="Load --sipp-image into the kind cluster before running")
     parser.add_argument("--kind-cluster", default="playsbc")
-    parser.add_argument("--profile", action="append", choices=ALL_PROFILES)
-    parser.add_argument("--all-profiles", action="store_true")
+    parser.add_argument("--helm-bin", default="helm")
+    parser.add_argument("--helm-release", default="playsbc")
+    parser.add_argument("--chart", default=str(ROOT / "charts" / "playsbc"))
+    parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
+    parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 47 B2BUA profiles on Kubernetes")
+    parser.add_argument("--list-profiles", action="store_true")
+    parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-root", default=str(ROOT / "logs" / "k8s-Regression"))
     parser.add_argument("--report-dir", default=str(ROOT / "logs" / "k8s-reports"))
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--helm-timeout", type=int, default=180)
+    parser.add_argument("--rollout-timeout", type=int, default=120)
     parser.add_argument("--sipp-timeout", type=int, default=60)
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--image-build-timeout", type=int, default=900)
@@ -621,6 +1138,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     ensure_binary(args.kubectl_bin)
+    ensure_binary(args.helm_bin)
+    if args.list_profiles:
+        print("Available Kubernetes B2BUA profiles:")
+        for profile in ALL_PROFILES:
+            print(f"  {profile}: {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
+        print("\nSmoke aliases:")
+        for profile in SMOKE_PROFILES:
+            print(f"  {profile}")
+        return 0
     profiles = ALL_PROFILES if args.all_profiles else tuple(args.profile or DEFAULT_PROFILES)
     run_id = args.run_id or make_run_id()
     output_root = Path(args.output_root)

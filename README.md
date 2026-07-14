@@ -375,7 +375,7 @@ curl http://127.0.0.1:8080/readyz
 curl http://127.0.0.1:8080/metrics
 ```
 
-Kubernetes regression:
+Kubernetes regression runs from your shell and creates temporary SIPp A/core and SIPp B/peer pods in the `playsbc` namespace. `--all-profiles` runs the 47-profile canonical B2BUA catalog through the Kubernetes Service and rewrites PlaySBC config through Helm per profile.
 
 ```bash
 docker build -f docker/sipp.Dockerfile -t playsbc-sipp:local .
@@ -383,7 +383,7 @@ kind load docker-image playsbc-sipp:local --name playsbc
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression.py --all-profiles
 ```
 
-Report: `logs/k8s-reports/latest.html`. Full Kubernetes commands are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
+Report: `logs/k8s-reports/latest.html`. This does not affect the local Docker regression suite. Full Kubernetes commands and the logical dual-realm caveat are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
 
 Cleanup:
 
