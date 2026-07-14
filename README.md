@@ -35,14 +35,12 @@ The Helm package contains Kubernetes manifests and PlaySBC configuration. It doe
 
 ## GitHub Security Scans
 
-GitHub runs security checks on pushes to `main`, pull requests, weekly schedule, and manual workflow dispatch:
+GitHub runs security checks on every pushed commit and pull request update:
 
 - CodeQL for Python source.
 - Dependency Review for pull requests.
 - Trivy filesystem scan for vulnerabilities, secrets, Dockerfiles, Helm, Compose, YAML, and Kubernetes-style config.
 - Checkov scan for Docker, Helm, Kubernetes, GitHub Actions, and secret patterns.
-- Trivy image scan for the published GHCR PlaySBC and RTPengine images on scheduled/manual runs.
-- Dependabot updates for GitHub Actions and Docker base images.
 
 Results appear under GitHub Actions and Code Scanning alerts.
 
