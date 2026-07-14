@@ -2744,6 +2744,31 @@ class RealTopologyTests(unittest.TestCase):
                 profile = run_k8s_regression.profile_values(profile_name, "unit-k8s")
                 self.assertEqual(run_k8s_regression.k8s_pcap_capture_roles(profile), expected)
 
+    def test_kubernetes_auth_failure_ladder_matches_second_401(self):
+        args = run_k8s_regression.parse_args(["--all-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        route = server.RouteResult(
+            target=server.SipUri("1001", "peer.example", 5060, "udp"),
+            source="unit",
+            policy_name="unit",
+            original_user="1001",
+            routed_user="1001",
+        )
+        flow = server.B2BUAFlowLog(
+            None,
+            "unit-call",
+            "1001",
+            route,
+            participants=("Core SIPp A", "PlaySBC", "Peer SIPp B"),
+        )
+
+        runner.add_registration_flow(flow, "Peer SIPp B", "failure")
+        ladder = flow.render_ladder_text()
+
+        self.assertIn("REGISTER + bad digest", ladder)
+        self.assertIn("401 Unauthorized", ladder)
+        self.assertNotIn("403 Forbidden", ladder)
+
     def test_kubernetes_extracts_rtcp_target_from_received_sdp(self):
         trace = """
 ----------------------------------------------- 2026-07-14T10:45:49Z

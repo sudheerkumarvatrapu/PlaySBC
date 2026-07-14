@@ -1544,7 +1544,7 @@ class K8sRegressionRunner:
                 flow.sip("PlaySBC", endpoint, "200 OK")
             else:
                 flow.sip(endpoint, "PlaySBC", "REGISTER + bad digest")
-                flow.sip("PlaySBC", endpoint, "403 Forbidden")
+                flow.sip("PlaySBC", endpoint, "401 Unauthorized")
             return
         flow.sip(endpoint, "PlaySBC", "REGISTER")
         flow.sip("PlaySBC", endpoint, "200 OK")
