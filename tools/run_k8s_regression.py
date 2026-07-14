@@ -281,8 +281,19 @@ def profile_enables_rtpengine_deployment(profile: SimpleNamespace, args: argpars
     )
 
 
-def should_capture_k8s_pcap(profile: SimpleNamespace) -> bool:
-    return not is_load_profile(profile)
+def k8s_pcap_capture_roles(profile: SimpleNamespace) -> tuple[str, ...]:
+    if is_load_profile(profile):
+        return ()
+
+    roles: list[str] = []
+    if bool(getattr(profile, "run_call", True)) or bool(getattr(profile, "register_caller", False)):
+        roles.append("core")
+    if bool(getattr(profile, "register_callee", True)):
+        roles.append("peer")
+    elif bool(getattr(profile, "run_call", True)) and bool(getattr(profile, "start_uas", True)):
+        roles.append("peer")
+
+    return tuple(dict.fromkeys(roles))
 
 
 def should_run_k8s_rtcp(profile: SimpleNamespace) -> bool:
@@ -767,8 +778,9 @@ class K8sRegressionRunner:
         bundle: Path,
         pods: list[tuple[str, str]],
     ) -> list[CaptureProcess]:
-        if not should_capture_k8s_pcap(profile):
-            self.write_log(bundle, "log.networking", "K8S PCAP CAPTURE SKIPPED", "reason=load_profile")
+        if not pods:
+            reason = "load_profile" if is_load_profile(profile) else "no_expected_packet_flow"
+            self.write_log(bundle, "log.networking", "K8S PCAP CAPTURE SKIPPED", f"reason={reason}")
             return []
         captures: list[CaptureProcess] = []
         for role, pod in pods:
@@ -1370,7 +1382,9 @@ class K8sRegressionRunner:
         capture_ok = True
 
         try:
-            captures = self.start_packet_captures(profile, bundle, [("core", core_pod), ("peer", peer_pod)])
+            pod_by_role = {"core": core_pod, "peer": peer_pod}
+            capture_pods = [(role, pod_by_role[role]) for role in k8s_pcap_capture_roles(profile)]
+            captures = self.start_packet_captures(profile, bundle, capture_pods)
             if getattr(profile, "start_uas", True):
                 uas_args = self.b2bua_uas_args(profile, uas_scenario, peer_ip)
                 uas_process = self.start_sipp_process(peer_pod, "peer-sipp-b-uas", uas_args, bundle)

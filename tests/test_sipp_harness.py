@@ -2729,6 +2729,21 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(runner.profile_config(internal)["b2bua_advertised_ip"], "$POD_IP")
         self.assertEqual(runner.profile_config(rtpengine)["sip_advertised_ip"], "$POD_IP")
 
+    def test_kubernetes_pcap_capture_roles_follow_expected_traffic(self):
+        cases = {
+            "basic-media": ("core", "peer"),
+            "register-auth-failure": ("peer",),
+            "ai-rasa-lab": ("core",),
+            "unknown-route": ("core",),
+            "ha-options-health-recovery": (),
+            "load-5cps-60s": (),
+        }
+
+        for profile_name, expected in cases.items():
+            with self.subTest(profile=profile_name):
+                profile = run_k8s_regression.profile_values(profile_name, "unit-k8s")
+                self.assertEqual(run_k8s_regression.k8s_pcap_capture_roles(profile), expected)
+
     def test_kubernetes_extracts_rtcp_target_from_received_sdp(self):
         trace = """
 ----------------------------------------------- 2026-07-14T10:45:49Z
