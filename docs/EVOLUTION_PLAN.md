@@ -50,6 +50,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - RTPengine media-session migration or continuity design: either shared RTPengine pair ownership, session re-homing, or deterministic media teardown/re-establish after a PlaySBC/RTPengine pair loss.
 - Multi-node chaos/failover regression that kills one PlaySBC/RTPengine pair during active SIP/RTP traffic.
 - Kubernetes real dual-realm networking: replace the current logical core/peer pod model with Multus or another multi-network CNI so SIPp, PlaySBC, and RTPengine can use separate Kubernetes media/signalling interfaces such as core `172.x` and peer `192.x`.
+- Full active-active Kubernetes HA topology for all regression profiles: run every profile through multiple PlaySBC pods and paired RTPengine nodes behind the lab load-balancing/drain model, not only the dedicated HA profiles.
 - External shared state backend option such as Redis/PostgreSQL after the SQLite lab store proves the behavior
 
 ### AI Real Speech Pipeline
