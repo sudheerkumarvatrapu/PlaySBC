@@ -51,8 +51,14 @@ from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 ALL_PROFILES = ALL_B2BUA_PROFILES
-SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES, *OPTIONAL_B2BUA_PROFILES)
+CATALOG_PROFILES = (*ALL_PROFILES, *OPTIONAL_B2BUA_PROFILES)
+RASA_PROFILES = ("ai-rasa-lab", "ai-rasa-rtpengine", "ai-rasa-real-lab")
+SELECTABLE_PROFILES = (*SMOKE_PROFILES, *CATALOG_PROFILES)
 LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
+DEFAULT_OUTPUT_ROOT = str(ROOT / "logs" / "k8s-Regression")
+DEFAULT_REPORT_DIR = str(ROOT / "logs" / "k8s-reports")
+RASA_OUTPUT_ROOT = str(ROOT / "logs" / "RASA-Regression")
+RASA_REPORT_DIR = str(ROOT / "logs" / "RASA-Regression" / "reports")
 
 
 @dataclass
@@ -81,6 +87,18 @@ class RtcpTarget:
 
 def make_run_id() -> str:
     return time.strftime("k8s-regression-%Y%m%d-%H%M%S", time.localtime())
+
+
+def make_rasa_run_id() -> str:
+    return time.strftime("rasa-regression-%Y%m%d-%H%M%S", time.localtime())
+
+
+def selected_profiles(args: argparse.Namespace) -> tuple[str, ...]:
+    if getattr(args, "rasa_profiles", False):
+        return RASA_PROFILES
+    if getattr(args, "all_profiles", False):
+        return ALL_PROFILES
+    return tuple(args.profile or DEFAULT_PROFILES)
 
 
 def command_text(command: Iterable[str]) -> str:
@@ -764,11 +782,7 @@ class K8sRegressionRunner:
     def collect_k8s_evidence(self, bundle: Path, profile_name: str) -> None:
         include_rtpengine = False
         include_rasa = False
-        if profile_name in ALL_PROFILES:
-            profile = profile_values(profile_name, self.run_id)
-            include_rtpengine = profile_enables_rtpengine_deployment(profile, self.args)
-            include_rasa = profile_uses_real_rasa(profile)
-        elif profile_name in OPTIONAL_B2BUA_PROFILES:
+        if profile_name in CATALOG_PROFILES:
             profile = profile_values(profile_name, self.run_id)
             include_rtpengine = profile_enables_rtpengine_deployment(profile, self.args)
             include_rasa = profile_uses_real_rasa(profile)
@@ -1339,7 +1353,7 @@ class K8sRegressionRunner:
                 returncodes, command_lines, sip_ladder = self.profile_register_contact(bundle, phases)
             elif profile == "b2bua-signalling":
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_signalling(bundle, phases)
-            elif profile in ALL_PROFILES:
+            elif profile in CATALOG_PROFILES:
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_catalog(profile, bundle, phases)
             else:
                 raise ValueError(f"Unsupported Kubernetes regression profile: {profile}")
@@ -1894,10 +1908,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--chart", default=str(ROOT / "charts" / "playsbc"))
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
     parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 47 B2BUA profiles on Kubernetes")
+    parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
     parser.add_argument("--list-profiles", action="store_true")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--output-root", default=str(ROOT / "logs" / "k8s-Regression"))
-    parser.add_argument("--report-dir", default=str(ROOT / "logs" / "k8s-reports"))
+    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--report-dir", default=DEFAULT_REPORT_DIR)
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--helm-timeout", type=int, default=180)
@@ -1909,6 +1924,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--tls-secret-name", default=LAB_TLS_SECRET_NAME)
     parser.add_argument("--no-restore-helm-values", action="store_true", help="Leave Helm on the last rendered profile instead of restoring pre-run values")
     parser.add_argument("--skip-namespace-check", action="store_true", help="Skip cluster-scoped namespace lookup, useful for in-cluster Job RBAC")
+    parser.add_argument("--keep-old-logs", action="store_true", help="Keep existing Rasa-only logs when --rasa-profiles is used")
     parser.add_argument("--options-user", default="health")
     parser.add_argument("--register-user", default="1001")
     parser.add_argument("--caller", default="1001")
@@ -1916,7 +1932,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--call-hold-ms", type=int, default=1000)
     parser.add_argument("--uas-start-delay", type=float, default=1.0)
     parser.add_argument("--keep-pods", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.rasa_profiles and (args.all_profiles or args.profile):
+        raise SystemExit("--rasa-profiles cannot be combined with --all-profiles or --profile")
+    if args.rasa_profiles:
+        if args.output_root == DEFAULT_OUTPUT_ROOT:
+            args.output_root = RASA_OUTPUT_ROOT
+        if args.report_dir == DEFAULT_REPORT_DIR:
+            args.report_dir = RASA_REPORT_DIR
+    return args
 
 
 def main() -> int:
@@ -1927,14 +1951,23 @@ def main() -> int:
         print("Available Kubernetes B2BUA profiles:")
         for profile in ALL_PROFILES:
             print(f"  {profile}: {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
+        print("\nOptional profiles:")
+        for profile in OPTIONAL_B2BUA_PROFILES:
+            print(f"  {profile}: {PROFILE_DESCRIPTIONS.get(profile, 'Optional Kubernetes profile.')}")
+        print("\nRasa shortcut:")
+        print(f"  --rasa-profiles: {', '.join(RASA_PROFILES)}")
         print("\nSmoke aliases:")
         for profile in SMOKE_PROFILES:
             print(f"  {profile}")
         return 0
-    profiles = ALL_PROFILES if args.all_profiles else tuple(args.profile or DEFAULT_PROFILES)
-    run_id = args.run_id or make_run_id()
+    profiles = selected_profiles(args)
+    run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_run_id())
     output_root = Path(args.output_root)
     report_dir = Path(args.report_dir)
+    if args.rasa_profiles and not args.keep_old_logs:
+        shutil.rmtree(output_root, ignore_errors=True)
+        if not report_dir.is_relative_to(output_root):
+            shutil.rmtree(report_dir, ignore_errors=True)
     output_root.mkdir(parents=True, exist_ok=True)
 
     runner = K8sRegressionRunner(args, run_id)

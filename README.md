@@ -360,14 +360,14 @@ Optional real Rasa lab:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
-  --profile ai-rasa-real-lab \
+  --rasa-profiles \
   --build-playsbc-image \
   --build-runner-image \
   --build-sipp-image \
   --kind-load-images
 ```
 
-The regular full suite uses mock Rasa for speed. The real Rasa profile deploys/trains a Rasa REST bot from `rasa/`; see [docs/AI_VOICE_GATEWAY.md](docs/AI_VOICE_GATEWAY.md).
+The regular full suite uses the existing `logs/k8s-job` layout. Rasa-only mode deletes old `logs/RASA-Regression` output and writes `logs/RASA-Regression/<run-id>/RASA-reports/latest.html`. It runs the mock AI profiles plus the real Rasa REST bot from `rasa/`; see [docs/AI_VOICE_GATEWAY.md](docs/AI_VOICE_GATEWAY.md).
 
 Cleanup:
 

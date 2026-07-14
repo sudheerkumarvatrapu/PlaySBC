@@ -106,17 +106,23 @@ helm upgrade --install playsbc charts/playsbc \
   -f configs/kubernetes/ai-rasa-real-values.yaml
 ```
 
-Run only the real Rasa Kubernetes profile:
+Run all Kubernetes AI/Rasa profiles:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression_job.py \
-  --profile ai-rasa-real-lab \
+  --rasa-profiles \
   --build-playsbc-image \
   --build-runner-image \
   --build-sipp-image \
   --kind-load-images \
   --kind-cluster playsbc
+```
+
+Rasa-only Kubernetes runs delete old `logs/RASA-Regression` output by default and write the latest report under:
+
+```text
+logs/RASA-Regression/<run-id>/RASA-reports/latest.html
 ```
 
 For kind clusters without DockerHub pull access, pre-pull and load the Rasa image:

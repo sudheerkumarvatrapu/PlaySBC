@@ -208,18 +208,20 @@ kubectl -n playsbc get pods,svc
 kubectl -n playsbc logs deployment/playsbc-playsbc-rasa --tail=100
 ```
 
-Run only the real Rasa AI profile:
+Run only the Kubernetes AI/Rasa profiles:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression_job.py \
-  --profile ai-rasa-real-lab \
+  --rasa-profiles \
   --build-playsbc-image \
   --build-runner-image \
   --build-sipp-image \
   --kind-load-images \
   --kind-cluster playsbc
 ```
+
+This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, and `ai-rasa-real-lab`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
 
 If the kind node cannot pull DockerHub images, load Rasa first:
 
@@ -297,6 +299,14 @@ logs/k8s-job/<run-id>/k8s-Regression/
 logs/k8s-job/<run-id>/k8s-reports/latest.html
 ```
 
+Rasa-only Job-mode outputs:
+
+```text
+logs/RASA-Regression/<run-id>/runner.log
+logs/RASA-Regression/<run-id>/RASA-Regression/
+logs/RASA-Regression/<run-id>/RASA-reports/latest.html
+```
+
 Useful live checks while the Job runs:
 
 ```bash
@@ -308,7 +318,7 @@ kubectl -n playsbc describe job/<job-name>
 
 Job defaults:
 
-- Deletes old local `logs/k8s-job` output before a new run; use `--keep-old-logs` to retain history.
+- Deletes old local `logs/k8s-job` output before a full/default run; Rasa-only mode deletes old `logs/RASA-Regression` output. Use `--keep-old-logs` to retain history.
 - Builds `playsbc:k8s-regression`, `playsbc-k8s-regression:local`, and `playsbc-sipp:local` when the build flags are used.
 - Loads local images into `kind` when `--kind-load-images` is set.
 - Creates a lab-only `playsbc-regression-tls` Secret when TLS profiles are selected.

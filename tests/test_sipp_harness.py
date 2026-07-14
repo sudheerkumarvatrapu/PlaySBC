@@ -17,6 +17,7 @@ from tools import run_regression_suite
 from tools import run_real_topology
 from tools import run_dual_realm_profile
 from tools import run_k8s_regression
+from tools import run_k8s_regression_job
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2784,6 +2785,37 @@ class RealTopologyTests(unittest.TestCase):
             runner.profile_config(profile)["ai_voice_gateway"]["rasa_webhook_url"],
             "http://playsbc-playsbc-rasa:5005/webhooks/rest/webhook",
         )
+
+    def test_kubernetes_rasa_profile_shortcut_uses_dedicated_outputs(self):
+        args = run_k8s_regression.parse_args(["--rasa-profiles"])
+        self.assertEqual(run_k8s_regression.selected_profiles(args), run_k8s_regression.RASA_PROFILES)
+        self.assertEqual(args.output_root, str(ROOT / "logs" / "RASA-Regression"))
+        self.assertEqual(args.report_dir, str(ROOT / "logs" / "RASA-Regression" / "reports"))
+
+        job_args = run_k8s_regression_job.parse_args(["--rasa-profiles"])
+        command = run_k8s_regression_job.runner_command_args(job_args)
+
+        self.assertEqual(job_args.output_dir, str(ROOT / "logs" / "RASA-Regression"))
+        self.assertEqual(job_args.remote_output_root_name, "RASA-Regression")
+        self.assertEqual(job_args.remote_report_dir_name, "RASA-reports")
+        self.assertTrue(job_args.run_id.startswith("rasa-regression-"))
+        self.assertIn("--rasa-profiles", command)
+        self.assertNotIn("--all-profiles", command)
+        self.assertIn("/workspace/logs/RASA-Regression", command)
+        self.assertIn("/workspace/logs/RASA-reports", command)
+
+    def test_kubernetes_full_suite_keeps_existing_output_layout(self):
+        args = run_k8s_regression_job.parse_args(["--all-profiles"])
+        command = run_k8s_regression_job.runner_command_args(args)
+
+        self.assertEqual(args.output_dir, str(ROOT / "logs" / "k8s-job"))
+        self.assertEqual(args.remote_output_root_name, "k8s-Regression")
+        self.assertEqual(args.remote_report_dir_name, "k8s-reports")
+        self.assertTrue(args.run_id.startswith("k8s-regression-"))
+        self.assertIn("--all-profiles", command)
+        self.assertNotIn("--rasa-profiles", command)
+        self.assertIn("/workspace/logs/k8s-Regression", command)
+        self.assertIn("/workspace/logs/k8s-reports", command)
 
     def test_kubernetes_auth_failure_ladder_matches_second_401(self):
         args = run_k8s_regression.parse_args(["--all-profiles"])
