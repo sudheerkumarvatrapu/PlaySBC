@@ -9,6 +9,9 @@
 {{- $trainOnStart = get $rasa "trainOnStart" -}}
 {{- end -}}
 {{- $resources := get $rasa "resources" | default dict -}}
+{{- $startupProbe := get $rasa "startupProbe" | default dict -}}
+{{- $readinessProbe := get $rasa "readinessProbe" | default dict -}}
+{{- $livenessProbe := get $rasa "livenessProbe" | default dict -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -69,21 +72,27 @@ spec:
                 rasa train --config config.yml --domain domain.yml --data data --out /tmp/playsbc-rasa-models
                 MODEL_ARGS="--model /tmp/playsbc-rasa-models"
               fi
-              exec rasa run --enable-api --cors "*" --host 0.0.0.0 --port {{ $servicePort }} ${MODEL_ARGS} --credentials credentials.yml --endpoints endpoints.yml
+              exec rasa run --enable-api --cors "*" -i 0.0.0.0 --port {{ $servicePort }} ${MODEL_ARGS} --credentials credentials.yml --endpoints endpoints.yml
           ports:
             - name: http
               containerPort: {{ $servicePort }}
               protocol: TCP
+          startupProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ get $startupProbe "initialDelaySeconds" | default 10 }}
+            periodSeconds: {{ get $startupProbe "periodSeconds" | default 5 }}
+            failureThreshold: {{ get $startupProbe "failureThreshold" | default 120 }}
           readinessProbe:
             tcpSocket:
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            initialDelaySeconds: {{ get $readinessProbe "initialDelaySeconds" | default 5 }}
+            periodSeconds: {{ get $readinessProbe "periodSeconds" | default 5 }}
           livenessProbe:
             tcpSocket:
               port: http
-            initialDelaySeconds: 20
-            periodSeconds: 10
+            initialDelaySeconds: {{ get $livenessProbe "initialDelaySeconds" | default 30 }}
+            periodSeconds: {{ get $livenessProbe "periodSeconds" | default 10 }}
           volumeMounts:
             - name: project
               mountPath: /project

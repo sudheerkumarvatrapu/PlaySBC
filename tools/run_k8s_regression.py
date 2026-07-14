@@ -59,6 +59,8 @@ DEFAULT_OUTPUT_ROOT = str(ROOT / "logs" / "k8s-Regression")
 DEFAULT_REPORT_DIR = str(ROOT / "logs" / "k8s-reports")
 RASA_OUTPUT_ROOT = str(ROOT / "logs" / "RASA-Regression")
 RASA_REPORT_DIR = str(ROOT / "logs" / "RASA-Regression" / "reports")
+DEFAULT_ROLLOUT_TIMEOUT = 120
+RASA_ROLLOUT_TIMEOUT = 600
 
 
 @dataclass
@@ -810,6 +812,8 @@ class K8sRegressionRunner:
             result = self.kubectl(*parts, check=False)
             (bundle / filename).write_text(result.stdout + result.stderr, encoding="utf-8")
         self.collect_playsbc_pod_evidence(bundle)
+        if include_rasa:
+            self.collect_rasa_pod_evidence(bundle)
 
     def start_packet_captures(
         self,
@@ -1077,6 +1081,33 @@ class K8sRegressionRunner:
                 logs = self.kubectl(*command, check=False)
                 evidence.append(logs.stdout + logs.stderr)
         (bundle / "playsbc-pod-evidence.log").write_text("\n".join(evidence), encoding="utf-8")
+
+    def collect_rasa_pod_evidence(self, bundle: Path) -> None:
+        selector = f"app.kubernetes.io/name=playsbc-rasa,app.kubernetes.io/instance={self.args.helm_release}"
+        result = self.kubectl("get", "pods", "-l", selector, "-o", "json", check=False)
+        evidence: list[str] = []
+        try:
+            pods = json.loads(result.stdout or "{}").get("items", [])
+        except json.JSONDecodeError:
+            pods = []
+        if result.returncode != 0:
+            evidence.append(result.stdout + result.stderr)
+        for pod in pods:
+            name = pod.get("metadata", {}).get("name", "")
+            if not name:
+                continue
+            evidence.append(f"===== describe pod/{name} =====")
+            described = self.kubectl("describe", "pod", str(name), check=False)
+            evidence.append(described.stdout + described.stderr)
+            for previous in (False, True):
+                title = f"logs pod/{name}" + (" --previous" if previous else "")
+                evidence.append(f"===== {title} =====")
+                command = ["logs", f"pod/{name}", "-c", "rasa", f"--tail={self.args.deployment_log_tail}"]
+                if previous:
+                    command.append("--previous")
+                logs = self.kubectl(*command, check=False)
+                evidence.append(logs.stdout + logs.stderr)
+        (bundle / "rasa-pod-evidence.log").write_text("\n".join(evidence), encoding="utf-8")
 
     def write_log(self, bundle: Path, filename: str, title: str, body: str = "") -> None:
         bundle.mkdir(parents=True, exist_ok=True)
@@ -1916,7 +1947,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--helm-timeout", type=int, default=180)
-    parser.add_argument("--rollout-timeout", type=int, default=120)
+    parser.add_argument("--rollout-timeout", type=int, default=DEFAULT_ROLLOUT_TIMEOUT)
     parser.add_argument("--sipp-timeout", type=int, default=60)
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--image-build-timeout", type=int, default=900)
@@ -1940,6 +1971,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             args.output_root = RASA_OUTPUT_ROOT
         if args.report_dir == DEFAULT_REPORT_DIR:
             args.report_dir = RASA_REPORT_DIR
+        if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
+            args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
     return args
 
 

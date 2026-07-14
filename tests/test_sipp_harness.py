@@ -2714,6 +2714,7 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("status.hostIP", rtpengine)
         self.assertIn("sessionAffinity", rtpengine)
         self.assertIn("rtpengine:\n  enabled: true", kind_values)
+        self.assertIn("startupProbe:", rasa)
         self.assertNotIn(".Values.rasa.enabled", configmap)
         self.assertNotIn(".Values.rasa.enabled", rasa)
         self.assertIn(".Values.rasa | default dict", configmap)
@@ -2721,6 +2722,8 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("name: {{ include \"playsbc.fullname\" . }}-rasa", rasa)
         self.assertIn("rasa train", rasa)
         self.assertIn("rasa run --enable-api", rasa)
+        self.assertIn("-i 0.0.0.0", rasa)
+        self.assertNotIn("--host 0.0.0.0", rasa)
         self.assertIn("rasa:\n  enabled: true", ai_rasa_values)
         self.assertIn("target: ai-gateway:rasa-support", ai_rasa_values)
 
@@ -2795,6 +2798,7 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(run_k8s_regression.selected_profiles(args), run_k8s_regression.RASA_PROFILES)
         self.assertEqual(args.output_root, str(ROOT / "logs" / "RASA-Regression"))
         self.assertEqual(args.report_dir, str(ROOT / "logs" / "RASA-Regression" / "reports"))
+        self.assertEqual(args.rollout_timeout, 600)
 
         job_args = run_k8s_regression_job.parse_args(["--rasa-profiles"])
         command = run_k8s_regression_job.runner_command_args(job_args)
@@ -2803,8 +2807,11 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(job_args.remote_output_root_name, "RASA-Regression")
         self.assertEqual(job_args.remote_report_dir_name, "RASA-reports")
         self.assertTrue(job_args.run_id.startswith("rasa-regression-"))
+        self.assertEqual(job_args.rollout_timeout, 600)
         self.assertIn("--rasa-profiles", command)
         self.assertNotIn("--all-profiles", command)
+        self.assertIn("--rollout-timeout", command)
+        self.assertIn("600", command)
         self.assertIn("/workspace/logs/RASA-Regression", command)
         self.assertIn("/workspace/logs/RASA-reports", command)
 
@@ -2827,6 +2834,7 @@ class RealTopologyTests(unittest.TestCase):
         command = run_k8s_regression_job.runner_command_args(args)
 
         self.assertEqual(args.output_dir, str(ROOT / "logs" / "k8s-job"))
+        self.assertEqual(args.rollout_timeout, 120)
         self.assertIn("--profile", command)
         self.assertIn("basic-signalling", command)
         self.assertFalse(run_k8s_regression_job.should_cleanup_local_logs(args))

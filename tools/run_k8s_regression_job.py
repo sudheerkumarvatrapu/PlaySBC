@@ -33,6 +33,8 @@ DEFAULT_REMOTE_OUTPUT_ROOT = "k8s-Regression"
 DEFAULT_REMOTE_REPORT_DIR = "k8s-reports"
 RASA_REMOTE_OUTPUT_ROOT = "RASA-Regression"
 RASA_REMOTE_REPORT_DIR = "RASA-reports"
+DEFAULT_ROLLOUT_TIMEOUT = 120
+RASA_ROLLOUT_TIMEOUT = 600
 
 
 @dataclass
@@ -582,7 +584,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--profile-timeout", type=int, default=180)
     parser.add_argument("--helm-timeout", type=int, default=180)
-    parser.add_argument("--rollout-timeout", type=int, default=120)
+    parser.add_argument("--rollout-timeout", type=int, default=DEFAULT_ROLLOUT_TIMEOUT)
     parser.add_argument("--sipp-timeout", type=int, default=90)
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--deployment-log-tail", type=int, default=250)
@@ -615,6 +617,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             args.remote_output_root_name = RASA_REMOTE_OUTPUT_ROOT
         if args.remote_report_dir_name == DEFAULT_REMOTE_REPORT_DIR:
             args.remote_report_dir_name = RASA_REMOTE_REPORT_DIR
+        if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
+            args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
     args.run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_run_id())
     args.job_name = args.job_name or args.run_id
     if len(args.job_name) > 63:

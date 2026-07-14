@@ -50,6 +50,16 @@ rasa:
     pullPolicy: IfNotPresent
   servicePort: 5005
   trainOnStart: true
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    failureThreshold: 120
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
   resources: {}
   project:
     config: |
