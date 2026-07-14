@@ -38,6 +38,7 @@ The Helm package contains Kubernetes manifests and PlaySBC configuration. It doe
 | Model | Best For | Needs Docker Desktop? | Needs Kubernetes? |
 | --- | --- | --- | --- |
 | Local regression suite | Development and validation on a laptop | Yes on macOS/Windows, Docker Engine is fine on Linux | No |
+| Manual SIPp experiments | Hand-run `sipp -sn` or `sipp -sf` tests | No | No |
 | Local Kubernetes with local images | kind/minikube lab | Yes | Yes |
 | Kubernetes with published images | Customer or shared lab cluster | No | Yes |
 | Kubernetes with external RTPengine | Existing RTPengine lab | No | Yes |
@@ -52,6 +53,7 @@ Install the tools for the model you want to run:
 - `helm`
 - `kubectl` for Kubernetes deployments
 - Docker Desktop on macOS/Windows, or Docker Engine on Linux, only when building images or running local regression
+- `sipp` only for manual SIPp experiments
 - `kind` or `minikube` only for local Kubernetes labs
 
 Clone the repo when you want source code, regression tests, or local chart files:
@@ -103,7 +105,96 @@ logs/b2bua-Regression/<testcase>/
 
 Every profile is rendered through Helm with HA enabled. Coverage includes B2BUA signalling, registration, digest auth, DTMF, RTP/RTCP, transcoding, RTPengine, UDP/TCP/TLS, TLS/SRTP interworking, ESBC policies, HA lab checks, AI/Rasa lab paths, negative SIP cases, small load, soak, and 5 cps / 60 second CHT load.
 
-## Model 2: Local Kubernetes With Local Images
+## Model 2: Manual SIPp Experiments
+
+Use this when you want to run your own SIPp command by hand instead of the automated Docker regression suite.
+
+Important difference:
+
+- Standard regression mode does not need host SIPp.
+- Manual SIPp mode does need SIPp installed on your host machine.
+- Manual mode is best for quick experiments. Use the regression suite for full dual-realm RTPengine, HA, PCAP, ladder, and report evidence.
+
+Install SIPp on the host only for manual mode:
+
+```bash
+# macOS
+brew install sipp
+
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install -y sipp
+```
+
+Start PlaySBC with the local B2BUA example config:
+
+```bash
+python3 mini_call_server.py --config configs/config.b2bua.example.yaml
+```
+
+Run a basic manual B2BUA call with the repo SIPp XMLs.
+
+Terminal 1: start SIPp B as UAS:
+
+```bash
+sipp -sf sipp/scenarios/b2bua_uas_b.xml \
+  -i 127.0.0.1 \
+  -p 5070 \
+  -m 1 \
+  -trace_msg \
+  -trace_err
+```
+
+Terminal 2: register SIPp B as user `1002` through PlaySBC:
+
+```bash
+sipp 127.0.0.1:25062 \
+  -sf sipp/scenarios/register_contact.xml \
+  -s 1002 \
+  -i 127.0.0.1 \
+  -p 5072 \
+  -key contact_port 5070 \
+  -m 1 \
+  -trace_msg \
+  -trace_err
+```
+
+Terminal 3: place the call from SIPp A to registered user `1002` through PlaySBC:
+
+```bash
+sipp 127.0.0.1:25062 \
+  -sf sipp/scenarios/b2bua_uac_a.xml \
+  -s 1002 \
+  -key caller 1001 \
+  -i 127.0.0.1 \
+  -p 5062 \
+  -m 1 \
+  -r 1 \
+  -d 1000 \
+  -trace_msg \
+  -trace_err
+```
+
+Built-in SIPp scenarios such as `-sn uas` and `-sn uac` can be used for quick SIP parser/transport checks, but B2BUA routing still needs a reachable callee route. Use either REGISTER as shown above or a static route in PlaySBC config.
+
+Example built-in UAS/UAC smoke shape:
+
+```bash
+sipp -sn uas -i 127.0.0.1 -p 5070
+sipp 127.0.0.1:25062 -sn uac -s 1002 -i 127.0.0.1 -p 5062
+```
+
+For media PCAP replay, install SIPp with PCAP/play support and use the repo media scenarios and files under:
+
+```text
+sipp/scenarios/*media*.xml
+sipp/scenarios/pcap/g711u_60s.pcap
+sipp/scenarios/pcap/g711a_60s.pcap
+```
+
+The automated regression suite already runs these media paths inside Docker, so host PCAP permissions are not needed for normal testing.
+
+## Model 3: Local Kubernetes With Local Images
 
 Use this when you want to deploy PlaySBC into a local Kubernetes cluster and build images on your machine.
 
@@ -177,7 +268,7 @@ kind delete cluster --name playsbc
 
 For minikube cleanup, use `minikube delete` if the cluster is only for this lab.
 
-## Model 3: Kubernetes With Published Images
+## Model 4: Kubernetes With Published Images
 
 Use this when a customer or teammate has a Kubernetes cluster and does not want to build anything locally.
 
@@ -235,7 +326,7 @@ kubectl -n playsbc patch serviceaccount default \
 
 If the GHCR packages are public, no image pull secret is required.
 
-## Model 4: Kubernetes With External RTPengine
+## Model 5: Kubernetes With External RTPengine
 
 Use this when RTPengine already runs outside the chart, for example in an existing SIP lab.
 
@@ -266,7 +357,7 @@ kubectl -n playsbc rollout status deployment/playsbc-playsbc
 kubectl -n playsbc logs deployment/playsbc-playsbc --tail=100
 ```
 
-## Model 5: Maintainer Image Build And Publish
+## Model 6: Maintainer Image Build And Publish
 
 Use this only when maintaining the PlaySBC release images.
 
