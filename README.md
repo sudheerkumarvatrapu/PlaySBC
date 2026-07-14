@@ -21,28 +21,15 @@ Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, HA st
 
 [Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md) | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) | [Kubernetes lab](docs/KUBERNETES_LOCAL.md) | [Kubernetes Helm runbook](docs/KUBERNETES_HELM_RUNBOOK.md)
 
-## Release
+## Status
 
-- Current version: `1.0.0`
+- Version: `1.0.0`
 - License: MIT
-- GitHub release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v1.0.0>
-- Helm chart package: `release/helm/playsbc-1.0.0.tgz`
-- Published images:
-  - `ghcr.io/sudheerkumarvatrapu/playsbc:1.0.0`
-  - `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.0.0`
+- Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v1.0.0>
+- Images: `ghcr.io/sudheerkumarvatrapu/playsbc:1.0.0`, `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.0.0`
+- Security: CodeQL, Dependency Review, Trivy, and Checkov run in GitHub Actions.
 
-The Helm package contains Kubernetes manifests and PlaySBC configuration. It does not contain Docker image layers. Kubernetes pulls PlaySBC and RTPengine images at deployment time.
-
-## GitHub Security Scans
-
-GitHub runs security checks on every pushed commit and pull request update:
-
-- CodeQL for Python source.
-- Dependency Review for pull requests.
-- Trivy filesystem scan for vulnerabilities, secrets, Dockerfiles, Helm, Compose, YAML, and Kubernetes-style config.
-- Checkov scan for Docker, Helm, Kubernetes, GitHub Actions, and secret patterns.
-
-Results appear under GitHub Actions and Code Scanning alerts.
+The Helm package contains Kubernetes manifests and configuration. Kubernetes pulls the PlaySBC and RTPengine images at deploy time.
 
 ## Deployment Models
 
@@ -55,19 +42,7 @@ Results appear under GitHub Actions and Code Scanning alerts.
 | Kubernetes with external RTPengine | Existing RTPengine lab | No | Yes |
 | Maintainer image build/publish | Project release maintenance | Yes, or GitHub Actions | Optional |
 
-## Common Tools
-
-Install the tools for the model you want to run:
-
-- `git`
-- `python3`
-- `helm`
-- `kubectl` for Kubernetes deployments
-- Docker Desktop on macOS/Windows, or Docker Engine on Linux, only when building images or running local regression
-- `sipp` only for manual SIPp experiments
-- `kind` or `minikube` only for local Kubernetes labs
-
-Clone the repo when you want source code, regression tests, or local chart files:
+## Quick Start
 
 ```bash
 git clone https://github.com/sudheerkumarvatrapu/PlaySBC.git
@@ -75,9 +50,10 @@ cd PlaySBC
 helm version --short
 ```
 
-## Model 1: Local Regression Suite
+Install only the tools required by your model: Docker for local regression/image builds, SIPp for host manual tests, and `kubectl` plus Helm for Kubernetes.
 
-Use this when you want to run the full PlaySBC SIPp regression on your laptop.
+<details>
+<summary><strong>Model 1: Local Regression Suite</strong></summary>
 
 Requirements:
 
@@ -114,19 +90,14 @@ logs/reports/latest.html
 logs/b2bua-Regression/<testcase>/
 ```
 
-Every profile is rendered through Helm with HA enabled. Coverage includes B2BUA signalling, registration, digest auth, DTMF, RTP/RTCP, transcoding, RTPengine, UDP/TCP/TLS, TLS/SRTP interworking, ESBC policies, HA lab checks, AI/Rasa lab paths, negative SIP cases, small load, soak, and 5 cps / 60 second CHT load.
+Every profile is rendered through Helm with HA enabled. See the generated HTML report for the full pass/fail, ladder, PCAP, SIP, RTP, RTCP, and platform evidence.
 
-## Model 2: Manual SIPp Experiments
+</details>
 
-Use this when you want to run your own SIPp command by hand instead of the automated Docker regression suite.
+<details>
+<summary><strong>Model 2: Manual SIPp Experiments</strong></summary>
 
-Important difference:
-
-- Standard regression mode does not need host SIPp.
-- Manual SIPp mode does need SIPp installed on your host machine.
-- Manual mode is best for quick experiments. Use the regression suite for full dual-realm RTPengine, HA, PCAP, ladder, and report evidence.
-- The host examples below use `127.0.0.1`. They do not exercise the real core/peer Docker networks.
-- For real dual-realm manual SIPp, run SIPp inside the Docker topology agents. Do not bind host SIPp to `172.28.0.10` or `192.168.28.30` on macOS/Windows unless you created those host interfaces yourself.
+Manual mode is for quick experiments. Host loopback uses `127.0.0.1`; real dual-realm manual SIPp runs inside the Docker topology agents.
 
 Install SIPp on the host only for manual mode:
 
@@ -190,7 +161,7 @@ sipp 127.0.0.1:25062 \
   -trace_err
 ```
 
-Built-in SIPp scenarios such as `-sn uas` and `-sn uac` can be used for quick SIP parser/transport checks, but B2BUA routing still needs a reachable callee route. Use either REGISTER as shown above or a static route in PlaySBC config.
+Built-in SIPp scenarios such as `-sn uas` and `-sn uac` can be used for quick parser/transport checks. B2BUA routing still needs a REGISTERed callee or static route.
 
 Example built-in UAS/UAC smoke shape:
 
@@ -199,7 +170,7 @@ sipp -sn uas -i 127.0.0.1 -p 5070
 sipp 127.0.0.1:25062 -sn uac -s 1002 -i 127.0.0.1 -p 5062
 ```
 
-For media PCAP replay, install SIPp with PCAP/play support and use the repo media scenarios and files under:
+For media PCAP replay, use SIPp with PCAP/play support and these repo assets:
 
 ```text
 sipp/scenarios/*media*.xml
@@ -207,7 +178,7 @@ sipp/scenarios/pcap/g711u_60s.pcap
 sipp/scenarios/pcap/g711a_60s.pcap
 ```
 
-The automated regression suite already runs these media paths inside Docker, so host PCAP permissions are not needed for normal testing.
+The automated regression suite runs media paths inside Docker, so host PCAP permissions are not needed for normal testing.
 
 ### Docker Dual-Realm Manual SIPp
 
@@ -218,7 +189,7 @@ Core realm: SIPp A 172.28.0.10 -> PlaySBC 172.28.0.20 -> RTPengine 172.28.0.40
 Peer realm: RTPengine 192.168.28.40 <- PlaySBC 192.168.28.20 <- SIPp B 192.168.28.30
 ```
 
-The addresses above live inside Docker networks. The host Mac/Windows shell normally cannot bind to them directly.
+These addresses live inside Docker networks; the host shell normally cannot bind to them directly.
 
 Bootstrap the topology:
 
@@ -302,7 +273,7 @@ docker compose -f docker-compose.topology.yml exec core-agent sh -lc '
 '
 ```
 
-This manual dual-realm example uses the static `peer-b` route from `configs/topology/helm-values.yaml`. Use the automated regression suite when you need the full evidence bundle, PCAP merge, RTCP helper, ladder, and HTML report.
+This example uses the static `peer-b` route from `configs/topology/helm-values.yaml`. Use automated regression for the full evidence bundle.
 
 Cleanup:
 
@@ -310,9 +281,10 @@ Cleanup:
 docker compose -f docker-compose.topology.yml down --remove-orphans
 ```
 
-## Model 3: Local Kubernetes With Local Images
+</details>
 
-Use this when you want to deploy PlaySBC into a local Kubernetes cluster and build images on your machine.
+<details>
+<summary><strong>Model 3: Local Kubernetes With Local Images</strong></summary>
 
 Requirements:
 
@@ -393,9 +365,10 @@ kind delete cluster --name playsbc
 
 For minikube cleanup, use `minikube delete` if the cluster is only for this lab.
 
-## Model 4: Kubernetes With Published Images
+</details>
 
-Use this when a customer or teammate has a Kubernetes cluster and does not want to build anything locally.
+<details>
+<summary><strong>Model 4: Kubernetes With Published Images</strong></summary>
 
 Requirements:
 
@@ -451,9 +424,10 @@ kubectl -n playsbc patch serviceaccount default \
 
 If the GHCR packages are public, no image pull secret is required.
 
-## Model 5: Kubernetes With External RTPengine
+</details>
 
-Use this when RTPengine already runs outside the chart, for example in an existing SIP lab.
+<details>
+<summary><strong>Model 5: Kubernetes With External RTPengine</strong></summary>
 
 Requirements:
 
@@ -482,9 +456,10 @@ kubectl -n playsbc rollout status deployment/playsbc-playsbc
 kubectl -n playsbc logs deployment/playsbc-playsbc --tail=100
 ```
 
-## Model 6: Maintainer Image Build And Publish
+</details>
 
-Use this only when maintaining the PlaySBC release images.
+<details>
+<summary><strong>Model 6: Maintainer Image Build And Publish</strong></summary>
 
 Local build:
 
@@ -495,30 +470,9 @@ docker build -f docker/rtpengine.Dockerfile -t ghcr.io/sudheerkumarvatrapu/plays
 
 GitHub Actions publishes images automatically when `main` or a `v*` tag is pushed. The `v1.0.0` tag publishes the `1.0.0` and `1.0` image tags.
 
-## Common Helm Values
+For chart values and Kubernetes operations, use [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
 
-Important values:
-
-```yaml
-image:
-  repository: ghcr.io/sudheerkumarvatrapu/playsbc
-  tag: "1.0.0"
-
-rtpengine:
-  enabled: true
-  image:
-    repository: ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine
-    tag: "1.0.0"
-
-playsbc:
-  config:
-    sip_transport: udp
-    default_codec: PCMU
-    media_backend: rtpengine
-    rtpengine_url: udp://playsbc-playsbc-rtpengine:2223
-```
-
-For real credentials, use a private values file or a Kubernetes Secret. Do not commit production passwords.
+</details>
 
 ## Uninstall
 
