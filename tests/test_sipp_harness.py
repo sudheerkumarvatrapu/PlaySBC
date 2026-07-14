@@ -2820,6 +2820,16 @@ class RealTopologyTests(unittest.TestCase):
         self.assertNotIn("--rasa-profiles", command)
         self.assertIn("/workspace/logs/k8s-Regression", command)
         self.assertIn("/workspace/logs/k8s-reports", command)
+        self.assertTrue(run_k8s_regression_job.should_cleanup_local_logs(args))
+
+    def test_kubernetes_specific_profile_keeps_existing_job_output(self):
+        args = run_k8s_regression_job.parse_args(["--profile", "basic-signalling"])
+        command = run_k8s_regression_job.runner_command_args(args)
+
+        self.assertEqual(args.output_dir, str(ROOT / "logs" / "k8s-job"))
+        self.assertIn("--profile", command)
+        self.assertIn("basic-signalling", command)
+        self.assertFalse(run_k8s_regression_job.should_cleanup_local_logs(args))
 
     def test_kubernetes_auth_failure_ladder_matches_second_401(self):
         args = run_k8s_regression.parse_args(["--all-profiles"])

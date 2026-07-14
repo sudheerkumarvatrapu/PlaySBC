@@ -452,6 +452,12 @@ def collect_job_outputs(args: argparse.Namespace, pod_name: str, logs_text: str)
     return output_root
 
 
+def should_cleanup_local_logs(args: argparse.Namespace) -> bool:
+    if args.keep_old_logs:
+        return False
+    return bool(args.rasa_profiles or args.all_profiles or not args.profile)
+
+
 def wait_for_runner(args: argparse.Namespace) -> tuple[str, str, str]:
     deadline = time.monotonic() + args.job_timeout
     pod_name = ""
@@ -484,7 +490,7 @@ def wait_for_runner(args: argparse.Namespace) -> tuple[str, str, str]:
 
 def run_job(args: argparse.Namespace) -> int:
     ensure_binary(args.kubectl_bin)
-    if not args.keep_old_logs:
+    if should_cleanup_local_logs(args):
         shutil.rmtree(Path(args.output_dir), ignore_errors=True)
     if args.build_playsbc_image or args.build_runner_image or args.build_sipp_image or args.kind_load_images:
         build_images(args)
