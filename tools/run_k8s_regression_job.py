@@ -198,6 +198,8 @@ def runner_command_args(args: argparse.Namespace) -> list[str]:
         str(args.pod_ready_timeout),
         "--deployment-log-tail",
         str(args.deployment_log_tail),
+        "--tls-secret-name",
+        args.tls_secret_name,
         "--output-root",
         "/workspace/logs/k8s-Regression",
         "--report-dir",
@@ -214,6 +216,8 @@ def runner_command_args(args: argparse.Namespace) -> list[str]:
         command.append("--no-rtpengine-enabled")
     if args.keep_sipp_pods:
         command.append("--keep-pods")
+    if args.no_restore_helm_values:
+        command.append("--no-restore-helm-values")
     return command
 
 
@@ -275,6 +279,21 @@ def apply_manifest(args: argparse.Namespace, manifest: dict[str, object]) -> Com
 
 
 def build_images(args: argparse.Namespace) -> None:
+    if args.build_playsbc_image:
+        ensure_binary("docker")
+        run_command(
+            [
+                "docker",
+                "build",
+                "-f",
+                str(ROOT / "docker" / "playsbc.Dockerfile"),
+                "-t",
+                args.playsbc_image,
+                ".",
+            ],
+            timeout=args.image_build_timeout,
+            check=True,
+        )
     if args.build_runner_image:
         ensure_binary("docker")
         run_command(
@@ -300,6 +319,8 @@ def build_images(args: argparse.Namespace) -> None:
     if args.kind_load_images:
         ensure_binary("kind")
         images = [args.runner_image]
+        if args.load_playsbc_image:
+            images.append(args.playsbc_image)
         if args.load_sipp_image:
             images.append(args.sipp_image)
         run_command(
@@ -307,6 +328,51 @@ def build_images(args: argparse.Namespace) -> None:
             timeout=args.kubectl_timeout,
             check=True,
         )
+
+
+def split_image_name(image: str) -> tuple[str, str]:
+    if ":" not in image.rsplit("/", 1)[-1]:
+        return image, "latest"
+    repository, tag = image.rsplit(":", 1)
+    return repository, tag
+
+
+def prepare_playsbc_image_values(args: argparse.Namespace) -> None:
+    if not args.set_playsbc_image:
+        return
+    repository, tag = split_image_name(args.playsbc_image)
+    run_command(
+        [
+            args.helm_bin,
+            "upgrade",
+            args.helm_release,
+            str(ROOT / "charts" / "playsbc"),
+            "--namespace",
+            args.namespace,
+            "--reuse-values",
+            "--set",
+            f"image.repository={repository}",
+            "--set-string",
+            f"image.tag={tag}",
+            "--set",
+            "image.pullPolicy=IfNotPresent",
+        ],
+        timeout=args.kubectl_timeout,
+        check=True,
+    )
+    run_command(
+        [
+            args.kubectl_bin,
+            "-n",
+            args.namespace,
+            "rollout",
+            "status",
+            f"deployment/{args.deployment}",
+            f"--timeout={args.rollout_timeout}s",
+        ],
+        timeout=args.kubectl_timeout,
+        check=True,
+    )
 
 
 def job_pod_name(args: argparse.Namespace) -> str:
@@ -402,8 +468,11 @@ def wait_for_runner(args: argparse.Namespace) -> tuple[str, str, str]:
 
 def run_job(args: argparse.Namespace) -> int:
     ensure_binary(args.kubectl_bin)
-    if args.build_runner_image or args.build_sipp_image or args.kind_load_images:
+    if not args.keep_old_logs:
+        shutil.rmtree(Path(args.output_dir), ignore_errors=True)
+    if args.build_playsbc_image or args.build_runner_image or args.build_sipp_image or args.kind_load_images:
         build_images(args)
+    prepare_playsbc_image_values(args)
 
     manifests = [service_account_manifest(args), role_manifest(args), role_binding_manifest(args), job_manifest(args)]
     if args.dry_run:
@@ -464,13 +533,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--service-account", default="playsbc-regression-runner")
     parser.add_argument("--rbac-name", default="playsbc-regression-runner")
     parser.add_argument("--runner-image", default="playsbc-k8s-regression:local")
+    parser.add_argument("--playsbc-image", default="playsbc:k8s-regression")
     parser.add_argument("--runner-image-pull-policy", default="IfNotPresent")
     parser.add_argument("--sipp-image", default="playsbc-sipp:local")
     parser.add_argument("--sipp-image-pull-policy", default="IfNotPresent")
+    parser.add_argument("--build-playsbc-image", action="store_true")
     parser.add_argument("--build-runner-image", action="store_true")
     parser.add_argument("--build-sipp-image", action="store_true")
     parser.add_argument("--kind-load-images", action="store_true")
     parser.add_argument("--load-sipp-image", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--load-playsbc-image", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--set-playsbc-image", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--kind-cluster", default="playsbc")
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
     parser.add_argument("--all-profiles", action="store_true", help="Run all canonical B2BUA profiles; default when --profile is omitted")
@@ -482,6 +555,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rtpengine-service", default="playsbc-playsbc-rtpengine")
     parser.add_argument("--rtpengine-deployment", default="playsbc-playsbc-rtpengine")
     parser.add_argument("--helm-release", default="playsbc")
+    parser.add_argument("--helm-bin", default="helm")
     parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--profile-timeout", type=int, default=180)
     parser.add_argument("--helm-timeout", type=int, default=180)
@@ -489,6 +563,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sipp-timeout", type=int, default=90)
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--deployment-log-tail", type=int, default=250)
+    parser.add_argument("--tls-secret-name", default="playsbc-regression-tls")
     parser.add_argument("--job-timeout", type=int, default=10800)
     parser.add_argument("--job-poll-interval", type=float, default=5.0)
     parser.add_argument("--active-deadline-seconds", type=int, default=12000)
@@ -497,6 +572,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--copy-timeout", type=int, default=600)
     parser.add_argument("--image-build-timeout", type=int, default=1200)
     parser.add_argument("--output-dir", default=str(ROOT / "logs" / "k8s-job"))
+    parser.add_argument("--keep-old-logs", action="store_true", help="Keep existing local logs/k8s-job runs before launching")
+    parser.add_argument("--no-restore-helm-values", action="store_true", help="Leave Helm on the last profile after the in-cluster run")
     parser.add_argument("--keep-job", action="store_true")
     parser.add_argument("--keep-sipp-pods", action="store_true")
     parser.add_argument("--print-runner-log", action="store_true")
@@ -508,6 +585,8 @@ def parse_args() -> argparse.Namespace:
     args.job_name = args.job_name or args.run_id
     if len(args.job_name) > 63:
         args.job_name = args.job_name[:63].rstrip("-")
+    if args.build_playsbc_image:
+        args.set_playsbc_image = True
     return args
 
 

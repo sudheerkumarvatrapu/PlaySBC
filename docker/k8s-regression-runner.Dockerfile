@@ -8,6 +8,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         gzip \
+        openssl \
         tar \
     && rm -rf /var/lib/apt/lists/*
 

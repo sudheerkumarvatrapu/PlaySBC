@@ -367,40 +367,22 @@ kubectl -n playsbc rollout status deployment/playsbc-playsbc
 minikube service -n playsbc playsbc-playsbc --url
 ```
 
-Health check:
+Health and full Kubernetes regression:
 
 ```bash
 kubectl -n playsbc port-forward service/playsbc-playsbc 8080:8080
 curl http://127.0.0.1:8080/readyz
 curl http://127.0.0.1:8080/metrics
-```
 
-Kubernetes shell regression runs from your shell and creates temporary SIPp A/core and SIPp B/peer pods in the `playsbc` namespace. `--all-profiles` runs the 47-profile canonical B2BUA catalog through the Kubernetes Service and rewrites PlaySBC config through Helm per profile.
-
-```bash
-docker build -f docker/sipp.Dockerfile -t playsbc-sipp:local .
-kind load docker-image playsbc-sipp:local --name playsbc
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression.py --all-profiles
-```
-
-Kubernetes Job regression runs one regression-controller pod inside the `playsbc` namespace. That pod drives all configured SIPp profiles and creates the temporary SIPp core/peer pods from inside the cluster:
-
-```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --all-profiles \
+  --build-playsbc-image \
   --build-runner-image \
   --build-sipp-image \
   --kind-load-images
 ```
 
-Reports:
-
-```text
-logs/k8s-reports/latest.html
-logs/k8s-job/<run-id>/k8s-reports/latest.html
-```
-
-These modes do not affect the local Docker regression suite. Full Kubernetes commands and the logical dual-realm caveat are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
+The in-cluster Job runner creates temporary SIPp core/peer pods in the `playsbc` namespace, runs the 47-profile B2BUA catalog, restores Helm values, and writes `logs/k8s-job/<run-id>/k8s-reports/latest.html`. Full Kubernetes commands are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
 
 Cleanup:
 

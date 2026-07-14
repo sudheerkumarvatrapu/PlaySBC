@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +34,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
     call_limit,
     dump_simple_yaml,
     is_transcoding_profile,
+    registration_ladder_text,
     render_harness_config_templates,
     sipp_timeout_seconds,
     uas_media_codec,
@@ -44,10 +47,12 @@ from tools.run_regression_suite import (  # noqa: E402
     ReportRow,
     write_reports,
 )
+from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 ALL_PROFILES = ALL_B2BUA_PROFILES
 SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES)
+LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
 
 
 @dataclass
@@ -167,10 +172,18 @@ def b2bua_routes_for(profile: SimpleNamespace) -> dict[str, object]:
 
 def transport_args(transport: str, role: str) -> list[str]:
     name = str(transport or "udp").lower()
+    tls_material = [
+        "-tls_cert",
+        "/tmp/playsbc-tls/tls.crt",
+        "-tls_key",
+        "/tmp/playsbc-tls/tls.key",
+        "-tls_ca",
+        "/tmp/playsbc-tls/ca.crt",
+    ]
     if name == "tcp":
         return ["-t", "t1"] if role == "server" else ["-t", "tn", "-max_socket", "1024"]
     if name == "tls":
-        return ["-t", "l1"] if role == "server" else ["-t", "ln"]
+        return [*(["-t", "l1"] if role == "server" else ["-t", "ln"]), *tls_material]
     return []
 
 
@@ -228,6 +241,24 @@ def is_load_profile(profile: SimpleNamespace) -> bool:
     return int(getattr(profile, "calls", 1)) > 1
 
 
+def profile_transport_tokens(profile: SimpleNamespace) -> set[str]:
+    tokens: set[str] = set()
+    for attr in ("sip_transport", "uac_transport", "uas_transport"):
+        for token in str(getattr(profile, attr, "") or "").split(","):
+            token = token.strip().lower()
+            if token:
+                tokens.add(token)
+    return tokens
+
+
+def profile_uses_tls(profile: SimpleNamespace) -> bool:
+    return "tls" in profile_transport_tokens(profile)
+
+
+def profile_uses_rtpengine(profile: SimpleNamespace) -> bool:
+    return str(getattr(profile, "media_backend", "internal")) == "rtpengine"
+
+
 def scenario_configmap_manifest(name: str) -> dict[str, object]:
     data = {}
     for path in sorted(SCENARIO_DIR.glob("*.xml")):
@@ -255,6 +286,7 @@ def pod_manifest(
     configmap: str,
     run_id: str,
     realm: str = "",
+    tls_secret: str = "",
 ) -> dict[str, object]:
     labels = {
         "app.kubernetes.io/name": "playsbc-k8s-regression",
@@ -263,6 +295,11 @@ def pod_manifest(
     }
     if realm:
         labels["playsbc.openai.com/realm"] = realm
+    volume_mounts = [{"name": "scenario-overrides", "mountPath": "/scenario-overrides", "readOnly": True}]
+    volumes: list[dict[str, object]] = [{"name": "scenario-overrides", "configMap": {"name": configmap}}]
+    if tls_secret:
+        volume_mounts.append({"name": "tls-secret", "mountPath": "/tmp/playsbc-tls", "readOnly": True})
+        volumes.append({"name": "tls-secret", "secret": {"secretName": tls_secret}})
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -275,13 +312,13 @@ def pod_manifest(
                     "image": image,
                     "imagePullPolicy": pull_policy,
                     "command": ["sleep", "3600"],
-                    "volumeMounts": [{"name": "scenario-overrides", "mountPath": "/scenario-overrides", "readOnly": True}],
+                    "volumeMounts": volume_mounts,
                     "securityContext": {
                         "capabilities": {"add": ["NET_RAW"]},
                     },
                 }
             ],
-            "volumes": [{"name": "scenario-overrides", "configMap": {"name": configmap}}],
+            "volumes": volumes,
         },
     }
 
@@ -306,6 +343,8 @@ class K8sRegressionRunner:
         self.args = args
         self.run_id = run_id
         self.image_prepared = False
+        self.original_values: Optional[dict[str, Any]] = None
+        self.tls_secret_prepared = False
 
     def kubectl(self, *parts: str, timeout: Optional[int] = None, input_text: Optional[str] = None, check: bool = False) -> CommandResult:
         command = [self.args.kubectl_bin]
@@ -317,6 +356,128 @@ class K8sRegressionRunner:
     def kubectl_cluster(self, *parts: str, timeout: Optional[int] = None, input_text: Optional[str] = None, check: bool = False) -> CommandResult:
         command = [self.args.kubectl_bin, *parts]
         return run_command(command, timeout=timeout or self.args.timeout, input_text=input_text, check=check)
+
+    def helm_values(self) -> dict[str, Any]:
+        result = run_command(
+            [
+                self.args.helm_bin,
+                "get",
+                "values",
+                self.args.helm_release,
+                "--namespace",
+                self.args.namespace,
+                "--all",
+                "-o",
+                "json",
+            ],
+            timeout=self.args.helm_timeout,
+            check=True,
+        )
+        return json.loads(result.stdout or "{}")
+
+    def capture_original_values(self) -> None:
+        if self.original_values is None:
+            self.original_values = self.helm_values()
+
+    def restore_original_values(self, report_dir: Path) -> Optional[str]:
+        if self.args.no_restore_helm_values or self.original_values is None:
+            return None
+        restore_path = report_dir / f"{self.run_id}-helm-restore-values.json"
+        restore_path.parent.mkdir(parents=True, exist_ok=True)
+        restore_path.write_text(json.dumps(self.original_values, indent=2, sort_keys=True), encoding="utf-8")
+        result = run_command(
+            [
+                self.args.helm_bin,
+                "upgrade",
+                self.args.helm_release,
+                self.args.chart,
+                "--namespace",
+                self.args.namespace,
+                "-f",
+                str(restore_path),
+            ],
+            timeout=self.args.helm_timeout,
+            check=False,
+        )
+        (report_dir / f"{self.run_id}-helm-restore.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        if result.returncode != 0:
+            return f"Helm restore failed: {result.stderr.strip() or result.stdout.strip()}"
+        rollout = self.kubectl(
+            "rollout",
+            "status",
+            f"deployment/{self.args.deployment}",
+            f"--timeout={self.args.rollout_timeout}s",
+            check=False,
+        )
+        (report_dir / f"{self.run_id}-helm-restore-rollout.log").write_text(
+            rollout.stdout + rollout.stderr,
+            encoding="utf-8",
+        )
+        if rollout.returncode != 0:
+            return f"Helm restore rollout failed: {rollout.stderr.strip() or rollout.stdout.strip()}"
+        return None
+
+    def ensure_tls_secret(self, bundle: Path) -> None:
+        if self.tls_secret_prepared:
+            return
+        cert_text, key_text = self.generate_lab_tls_pair(bundle)
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": self.args.tls_secret_name,
+                "labels": {
+                    "app.kubernetes.io/name": "playsbc-k8s-regression",
+                    "app.kubernetes.io/part-of": "playsbc",
+                    "playsbc-regression-run": self.run_id,
+                },
+            },
+            "type": "kubernetes.io/tls",
+            "stringData": {
+                "tls.crt": cert_text,
+                "tls.key": key_text,
+                "ca.crt": cert_text,
+            },
+        }
+        result = self.kubectl("apply", "-f", "-", input_text=json.dumps(manifest), check=True)
+        self.write_log(bundle, "log.platform", "TLS REGRESSION SECRET READY", result.stdout + result.stderr)
+        self.tls_secret_prepared = True
+
+    def generate_lab_tls_pair(self, bundle: Path) -> tuple[str, str]:
+        ensure_binary("openssl")
+        with tempfile.TemporaryDirectory(prefix="playsbc-k8s-tls-") as tmp:
+            tmp_path = Path(tmp)
+            cert_path = tmp_path / "tls.crt"
+            key_path = tmp_path / "tls.key"
+            san = (
+                f"DNS:{self.args.service},"
+                f"DNS:{self.args.service}.{self.args.namespace}.svc,"
+                "DNS:localhost,IP:127.0.0.1"
+            )
+            result = run_command(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-keyout",
+                    str(key_path),
+                    "-out",
+                    str(cert_path),
+                    "-days",
+                    "30",
+                    "-subj",
+                    f"/CN={self.args.service}",
+                    "-addext",
+                    f"subjectAltName={san}",
+                ],
+                timeout=30,
+                check=True,
+            )
+            self.write_log(bundle, "log.platform", "TLS REGRESSION CERT GENERATED", result.stdout + result.stderr)
+            return cert_path.read_text(encoding="utf-8"), key_path.read_text(encoding="utf-8")
 
     def prepare_common(self, bundle: Path, phases: PhaseLog) -> None:
         started = time.monotonic()
@@ -374,8 +535,16 @@ class K8sRegressionRunner:
         )
         self.image_prepared = True
 
-    def create_agent(self, name: str, bundle: Path, realm: str = "") -> str:
-        manifest = pod_manifest(name, self.args.sipp_image, self.args.image_pull_policy, self.args.configmap, self.run_id, realm=realm)
+    def create_agent(self, name: str, bundle: Path, realm: str = "", tls_secret: str = "") -> str:
+        manifest = pod_manifest(
+            name,
+            self.args.sipp_image,
+            self.args.image_pull_policy,
+            self.args.configmap,
+            self.run_id,
+            realm=realm,
+            tls_secret=tls_secret,
+        )
         self.kubectl("apply", "-f", "-", input_text=json.dumps(manifest), check=True)
         self.kubectl("wait", "--for=condition=Ready", f"pod/{name}", f"--timeout={self.args.pod_ready_timeout}s", check=True)
         ip_result = self.kubectl("get", "pod", name, "-o", "jsonpath={.status.podIP}", check=True)
@@ -466,6 +635,33 @@ class K8sRegressionRunner:
         for filename, parts in commands.items():
             result = self.kubectl(*parts, check=False)
             (bundle / filename).write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.collect_playsbc_pod_evidence(bundle)
+
+    def collect_playsbc_pod_evidence(self, bundle: Path) -> None:
+        result = self.kubectl("get", "pods", "-l", "app.kubernetes.io/name=playsbc", "-o", "json", check=False)
+        evidence: list[str] = []
+        try:
+            pods = json.loads(result.stdout or "{}").get("items", [])
+        except json.JSONDecodeError:
+            pods = []
+        if result.returncode != 0:
+            evidence.append(result.stdout + result.stderr)
+        for pod in pods:
+            name = pod.get("metadata", {}).get("name", "")
+            if not name:
+                continue
+            evidence.append(f"===== describe pod/{name} =====")
+            described = self.kubectl("describe", "pod", str(name), check=False)
+            evidence.append(described.stdout + described.stderr)
+            for previous in (False, True):
+                title = f"logs pod/{name}" + (" --previous" if previous else "")
+                evidence.append(f"===== {title} =====")
+                command = ["logs", f"pod/{name}", f"--tail={self.args.deployment_log_tail}"]
+                if previous:
+                    command.append("--previous")
+                logs = self.kubectl(*command, check=False)
+                evidence.append(logs.stdout + logs.stderr)
+        (bundle / "playsbc-pod-evidence.log").write_text("\n".join(evidence), encoding="utf-8")
 
     def write_log(self, bundle: Path, filename: str, title: str, body: str = "") -> None:
         bundle.mkdir(parents=True, exist_ok=True)
@@ -524,10 +720,11 @@ class K8sRegressionRunner:
         return uac_path, uas_path, register_path
 
     def profile_config(self, profile: SimpleNamespace) -> dict[str, object]:
+        advertised_ip = "$POD_IP" if profile_uses_rtpengine(profile) else self.args.service
         return {
             "sip_ip": "0.0.0.0",
-            "sip_advertised_ip": self.args.service,
-            "b2bua_advertised_ip": self.args.service,
+            "sip_advertised_ip": advertised_ip,
+            "b2bua_advertised_ip": advertised_ip,
             "sip_port": self.args.sip_port,
             "tls_port": self.args.tls_port,
             "sip_transport": getattr(profile, "sip_transport", "udp"),
@@ -565,30 +762,25 @@ class K8sRegressionRunner:
 
     def apply_profile_config(self, profile: SimpleNamespace, bundle: Path, phases: PhaseLog) -> None:
         started = time.monotonic()
-        current_values = run_command(
-            [
-                self.args.helm_bin,
-                "get",
-                "values",
-                self.args.helm_release,
-                "--namespace",
-                self.args.namespace,
-                "--all",
-                "-o",
-                "json",
-            ],
-            timeout=self.args.helm_timeout,
-            check=True,
-        )
-        values = json.loads(current_values.stdout or "{}")
+        self.capture_original_values()
+        values = copy.deepcopy(self.original_values or {})
+        advertised_ip = "$POD_IP" if profile_uses_rtpengine(profile) else self.args.service
         values.setdefault("playsbc", {})["config"] = self.profile_config(profile)
         values.setdefault("rtpengine", {})["enabled"] = bool(
             self.args.rtpengine_enabled
             and getattr(profile, "media_backend", "internal") == "rtpengine"
             and profile.profile != "rtpengine-control-failure"
         )
+        if profile_uses_tls(profile):
+            self.ensure_tls_secret(bundle)
+            values.setdefault("tls", {})["enabled"] = True
+            values.setdefault("tls", {})["existingSecret"] = self.args.tls_secret_name
+        elif not (self.original_values or {}).get("tls", {}).get("enabled", False):
+            values.setdefault("tls", {})["enabled"] = False
+            values.setdefault("tls", {})["existingSecret"] = ""
         values_path = bundle / "helm-profile-values.yaml"
         values_path.write_text(dump_simple_yaml(values), encoding="utf-8")
+        helm_started = time.monotonic()
         result = run_command(
             [
                 self.args.helm_bin,
@@ -603,10 +795,13 @@ class K8sRegressionRunner:
             timeout=self.args.helm_timeout,
             check=True,
         )
+        helm_seconds = time.monotonic() - helm_started
         self.write_log(bundle, "log.platform", "HELM PROFILE UPGRADE", result.stdout + result.stderr)
         restart = self.kubectl("rollout", "restart", f"deployment/{self.args.deployment}", check=True)
         self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT RESTART", restart.stdout + restart.stderr)
+        rollout_started = time.monotonic()
         rollout = self.kubectl("rollout", "status", f"deployment/{self.args.deployment}", f"--timeout={self.args.rollout_timeout}s", check=True)
+        rollout_seconds = time.monotonic() - rollout_started
         self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT READY", rollout.stdout + rollout.stderr)
         phases.append(
             "Configuration",
@@ -615,6 +810,8 @@ class K8sRegressionRunner:
             (
                 f"Rendered and applied Helm config for profile={profile.profile}; "
                 f"media_backend={getattr(profile, 'media_backend', 'internal')}; "
+                f"advertised_ip={advertised_ip}; tls_secret={self.args.tls_secret_name if profile_uses_tls(profile) else 'not-required'}; "
+                f"helm_upgrade_seconds={helm_seconds:.3f}; rollout_seconds={rollout_seconds:.3f}; "
                 f"core_realm=pod-label:core peer_realm=pod-label:peer."
             ),
         )
@@ -776,8 +973,11 @@ class K8sRegressionRunner:
         stem = short_name(f"{self.run_id}-{profile_name}", limit=48)
         core_pod = f"{stem}-core"
         peer_pod = f"{stem}-peer"
-        core_ip = self.create_agent(core_pod, bundle, realm="core")
-        peer_ip = self.create_agent(peer_pod, bundle, realm="peer")
+        tls_secret = self.args.tls_secret_name if profile_uses_tls(profile) else ""
+        if tls_secret:
+            self.ensure_tls_secret(bundle)
+        core_ip = self.create_agent(core_pod, bundle, realm="core", tls_secret=tls_secret)
+        peer_ip = self.create_agent(peer_pod, bundle, realm="peer", tls_secret=tls_secret)
         profile.host = peer_ip
         profile.server_host = self.args.service
         profile.server_port = self.args.sip_port
@@ -879,32 +1079,144 @@ class K8sRegressionRunner:
         return returncodes or [0], commands, ladder
 
     def dual_realm_ladder(self, profile: SimpleNamespace) -> str:
+        sections: list[str] = []
+        if getattr(profile, "register_callee", True):
+            auth_outcome = str(getattr(profile, "registration_auth_expected", "") or "")
+            sections.append(registration_ladder_text("Peer SIPp B", str(getattr(profile, "callee", self.args.callee)), auth_outcome))
+        if getattr(profile, "register_caller", False):
+            sections.append(registration_ladder_text("Core SIPp A", str(getattr(profile, "caller", self.args.caller))))
         if not getattr(profile, "run_call", True):
-            return (
-                "KUBERNETES DUAL-REALM LADDER\n"
-                "Core SIPp A        PlaySBC Service        Peer SIPp B/RTPengine\n"
-                "    |                    |                         |\n"
-                "    | profile setup/control only                    |\n"
-            )
-        return (
-            "KUBERNETES DUAL-REALM SIP LADDER\n"
-            "Core SIPp A             PlaySBC Service             Peer SIPp B\n"
-            "    |                         |                         |\n"
-            "    |                         | REGISTER                |\n"
-            "    |                         |<------------------------|\n"
-            "    |                         | 200 OK                   |\n"
-            "    |                         |------------------------>|\n"
-            "    | INVITE                  |                         |\n"
-            "    |------------------------>|                         |\n"
-            "    | 100 Trying              |                         |\n"
-            "    |<------------------------|                         |\n"
-            "    |                         | INVITE                  |\n"
-            "    |                         |------------------------>|\n"
-            "    |                         | final/provisional reply |\n"
-            "    | final/provisional reply |                         |\n"
-            "    |<------------------------|                         |\n"
-            "    | ACK/BYE as scenario requires                       |\n"
+            sections.append(self.setup_only_ladder(profile))
+        elif "ai-rasa" in str(getattr(profile, "profile", "")):
+            sections.append(self.ai_gateway_ladder(profile))
+        else:
+            sections.append(self.call_ladder(profile))
+        return "\n\n".join(section for section in sections if section)
+
+    def route_for_ladder(self, profile: SimpleNamespace) -> RouteResult:
+        callee = str(getattr(profile, "callee", self.args.callee))
+        return RouteResult(
+            target=SipUri(callee, "peer-sipp-b", 5060, str(getattr(profile, "uas_transport", "udp"))),
+            policy_name="k8s-regression",
+            source="kubernetes-dual-realm",
+            original_user=callee,
+            routed_user=callee,
         )
+
+    def setup_only_ladder(self, profile: SimpleNamespace) -> str:
+        flow = B2BUAFlowLog(None, "k8s-setup", str(getattr(profile, "callee", self.args.callee)), self.route_for_ladder(profile), enabled=False)
+        flow.enabled = True
+        flow.sip("Core SIPp A", "PlaySBC", "OPTIONS" if "options" in profile.profile else "profile check")
+        if "options" in profile.profile:
+            flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+        else:
+            flow.sip("PlaySBC", "Core SIPp A", "expected response")
+        return "KUBERNETES DUAL-REALM CONTROL LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
+
+    def ai_gateway_ladder(self, profile: SimpleNamespace) -> str:
+        flow = B2BUAFlowLog(None, "k8s-ai", str(getattr(profile, "callee", "ai-bot")), self.route_for_ladder(profile), enabled=False, participants=("Core SIPp A", "PlaySBC", "RTPengine"))
+        flow.enabled = True
+        flow.sip("Core SIPp A", "PlaySBC", "INVITE")
+        flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
+        flow.sip("PlaySBC", "Core SIPp A", "180 Ringing")
+        if profile_uses_rtpengine(profile):
+            flow.sip("PlaySBC", "RTPengine", "OFFER")
+            flow.sip("RTPengine", "PlaySBC", "ok OFFER")
+            flow.sip("PlaySBC", "RTPengine", "ANSWER")
+            flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
+        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+        flow.sip("Core SIPp A", "PlaySBC", "ACK")
+        flow.sip("Core SIPp A", "PlaySBC", "BYE")
+        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+        sections = ["AI VOICE SIP/RTPENGINE LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])]
+
+        for title, peer, request, response in (
+            ("AI VOICE STT ADAPTER LADDER", "STT Adapter", "scripted STT", "intent text"),
+            ("AI VOICE RASA ADAPTER LADDER", "Rasa Bot", "REST turn", "bot response"),
+            ("AI VOICE TTS ADAPTER LADDER", "TTS Adapter", "scripted TTS", "speech frame"),
+        ):
+            adapter_flow = B2BUAFlowLog(
+                None,
+                f"k8s-ai-{peer}",
+                str(getattr(profile, "callee", "ai-bot")),
+                self.route_for_ladder(profile),
+                enabled=False,
+                participants=("PlaySBC", peer),
+            )
+            adapter_flow.enabled = True
+            adapter_flow.sip("PlaySBC", peer, request)
+            adapter_flow.sip(peer, "PlaySBC", response)
+            sections.append(title + "\n" + "\n".join(adapter_flow.render_ladder_text().splitlines()[1:]))
+        return "\n\n".join(sections)
+
+    def call_ladder(self, profile: SimpleNamespace) -> str:
+        flow = B2BUAFlowLog(None, "k8s-call", str(getattr(profile, "callee", self.args.callee)), self.route_for_ladder(profile), enabled=False, participants=("Core SIPp A", "PlaySBC", "Peer SIPp B"))
+        flow.enabled = True
+        expect_failure = str(getattr(profile, "uac_scenario", "")).endswith("expect_488.xml") or profile.profile in {
+            "unknown-route",
+            "esbc-call-admission",
+            "rtpengine-control-failure",
+            "rtpengine-port-exhaustion",
+            "rtpengine-interface-failure",
+        }
+        cancel_flow = "cancel" in profile.profile
+        outbound_failure = "failed-outbound" in profile.profile or "trunk-failure" in profile.profile
+        flow.sip("Core SIPp A", "PlaySBC", "INVITE")
+        flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
+        if expect_failure:
+            flow.sip("PlaySBC", "Core SIPp A", "final rejection")
+            flow.sip("Core SIPp A", "PlaySBC", "ACK")
+            sections = ["KUBERNETES DUAL-REALM SIP LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])]
+            if profile_uses_rtpengine(profile):
+                sections.append(self.rtpengine_control_ladder(profile, failed=True))
+            return "\n\n".join(sections)
+        flow.sip("PlaySBC", "Peer SIPp B", "INVITE")
+        flow.sip("Peer SIPp B", "PlaySBC", "100 Trying")
+        flow.sip("Peer SIPp B", "PlaySBC", "180 Ringing")
+        flow.sip("PlaySBC", "Core SIPp A", "180 Ringing")
+        if cancel_flow:
+            flow.sip("Core SIPp A", "PlaySBC", "CANCEL")
+            flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+            flow.sip("PlaySBC", "Peer SIPp B", "CANCEL")
+            flow.sip("Peer SIPp B", "PlaySBC", "200 OK")
+            flow.sip("Peer SIPp B", "PlaySBC", "487 Request Terminated")
+            flow.sip("PlaySBC", "Core SIPp A", "487 Request Terminated")
+            flow.sip("Core SIPp A", "PlaySBC", "ACK")
+            return "KUBERNETES DUAL-REALM CANCEL LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
+        final_label = "503 Service Unavailable" if outbound_failure else "200 OK"
+        flow.sip("Peer SIPp B", "PlaySBC", final_label)
+        if outbound_failure:
+            flow.sip("PlaySBC", "Core SIPp A", final_label)
+            flow.sip("Core SIPp A", "PlaySBC", "ACK")
+            return "KUBERNETES DUAL-REALM FAILURE LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
+        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+        flow.sip("Core SIPp A", "PlaySBC", "ACK")
+        flow.sip("PlaySBC", "Peer SIPp B", "ACK")
+        flow.sip("Core SIPp A", "PlaySBC", "BYE")
+        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+        flow.sip("PlaySBC", "Peer SIPp B", "BYE")
+        flow.sip("Peer SIPp B", "PlaySBC", "200 OK")
+        sections = ["KUBERNETES DUAL-REALM SIP LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])]
+        if profile_uses_rtpengine(profile):
+            sections.append(self.rtpengine_control_ladder(profile))
+        return "\n\n".join(sections)
+
+    def rtpengine_control_ladder(self, profile: SimpleNamespace, failed: bool = False) -> str:
+        flow = B2BUAFlowLog(
+            None,
+            "k8s-rtpengine",
+            str(getattr(profile, "callee", self.args.callee)),
+            self.route_for_ladder(profile),
+            enabled=False,
+            participants=("PlaySBC", "RTPengine"),
+        )
+        flow.enabled = True
+        flow.sip("PlaySBC", "RTPengine", "OFFER")
+        flow.sip("RTPengine", "PlaySBC", "failed OFFER" if failed else "ok OFFER")
+        if not failed:
+            flow.sip("PlaySBC", "RTPengine", "ANSWER")
+            flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
+        return "KUBERNETES RTPENGINE CONTROL LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
 
     def profile_options(self, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
         setup_started = time.monotonic()
@@ -1127,6 +1439,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--image-build-timeout", type=int, default=900)
     parser.add_argument("--deployment-log-tail", type=int, default=200)
+    parser.add_argument("--tls-secret-name", default=LAB_TLS_SECRET_NAME)
+    parser.add_argument("--no-restore-helm-values", action="store_true", help="Leave Helm on the last rendered profile instead of restoring pre-run values")
     parser.add_argument("--skip-namespace-check", action="store_true", help="Skip cluster-scoped namespace lookup, useful for in-cluster Job RBAC")
     parser.add_argument("--options-user", default="health")
     parser.add_argument("--register-user", default="1001")
@@ -1157,13 +1471,22 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
 
     runner = K8sRegressionRunner(args, run_id)
-    rows = [runner.run_profile(profile, output_root) for profile in profiles]
+    rows: list[ReportRow] = []
+    restore_error = ""
+    try:
+        runner.capture_original_values()
+        rows = [runner.run_profile(profile, output_root) for profile in profiles]
+    finally:
+        restore_error = runner.restore_original_values(report_dir) or ""
     cleanup_old_reports(report_dir, run_id)
     report_path = write_reports(rows, report_dir, run_id)
     print(f"Kubernetes regression report: {report_path}")
     print(f"Latest report: {report_dir / 'latest.html'}")
     for row in rows:
         print(f"{row.suite} / {row.name}: {row.status}")
+    if restore_error:
+        print(restore_error, file=sys.stderr)
+        return 1
     return 1 if any(row.status != "passed" for row in rows) else 0
 
 

@@ -190,40 +190,17 @@ Startup complete
 
 ## Run Kubernetes Regression
 
-Use this after PlaySBC and RTPengine are already deployed by Helm. The runner executes the canonical B2BUA regression catalog against the Kubernetes Service and writes the same robot-style HTML report format as the local B2BUA suite.
+Use this after PlaySBC and RTPengine are deployed by Helm. The preferred Kubernetes path is the in-cluster Job runner: one controller pod starts inside the `playsbc` namespace, applies each profile through Helm, creates temporary SIPp core/peer pods, runs the canonical B2BUA catalog, copies reports back to the repo, and restores the Helm release afterward.
 
 Execution model:
 
-- The Python runner starts from your Mac or Linux shell.
-- Each profile creates temporary SIPp pods in the `playsbc` namespace.
-- SIPp A runs as the logical `core` realm pod.
-- SIPp B runs as the logical `peer` realm pod.
-- PlaySBC is reconfigured through Helm before each profile.
-- RTPengine-backed profiles use the in-cluster RTPengine Service.
-- Temporary SIPp pods are deleted after each profile unless `--keep-pods` is used.
+- Runner Job pod: `playsbc` namespace.
+- SIPp A/core and SIPp B/peer: temporary pods created per profile.
+- PlaySBC config: rendered by Helm before each profile.
+- RTPengine profiles: use the in-cluster RTPengine Service.
+- Reports: robot-style HTML with setup, config, execution, teardown, evidence, and ladders.
 
-This does not replace or alter the local Docker regression command. The Docker dual-realm suite still uses real Docker network addresses such as `172.28.x.x` and `192.168.x.x`. In a default `kind` or `minikube` cluster, Kubernetes regression uses logical core/peer pods and labels inside one pod network. Hard secondary realm interfaces such as a true `172.x` core pod NIC and `192.x` peer pod NIC require a future Multus or multi-network CNI enhancement.
-
-One-time SIPp image prep for `kind`:
-
-```bash
-docker build -f docker/sipp.Dockerfile -t playsbc-sipp:local .
-kind load docker-image playsbc-sipp:local --name playsbc
-```
-
-If you are validating current local source changes instead of a published PlaySBC image, rebuild and roll the PlaySBC pod too:
-
-```bash
-docker build -f docker/playsbc.Dockerfile -t playsbc:k8s-regression .
-kind load docker-image playsbc:k8s-regression --name playsbc
-helm upgrade playsbc charts/playsbc \
-  --namespace playsbc \
-  --reuse-values \
-  --set image.repository=playsbc \
-  --set-string image.tag=k8s-regression \
-  --set image.pullPolicy=IfNotPresent
-kubectl -n playsbc rollout status deployment/playsbc-playsbc
-```
+Kubernetes regression does not alter the local Docker regression command. In `kind` or `minikube`, Kubernetes profiles use logical core/peer pods inside one pod network. True separate core and peer pod interfaces, for example `172.x` and `192.x`, need a future Multus or multi-network CNI enhancement.
 
 List the Kubernetes profile catalog:
 
@@ -232,51 +209,44 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression.py --list-profiles
 ```
 
-Run all 47 canonical Kubernetes B2BUA profiles:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
-python3 tools/run_k8s_regression.py \
-  --all-profiles \
-  --namespace playsbc \
-  --service playsbc-playsbc \
-  --sipp-image playsbc-sipp:local
-```
-
-Or let the runner build and load the SIPp image before the first profile:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
-python3 tools/run_k8s_regression.py \
-  --all-profiles \
-  --build-sipp-image \
-  --kind-load-image \
-  --kind-cluster playsbc
-```
-
-### In-Cluster Regression Job
-
-Use this when you want the full regression controller itself to run inside Kubernetes. This creates reusable runner RBAC plus one Job pod in the `playsbc` namespace. That runner pod then creates the temporary SIPp A/core and SIPp B/peer pods, applies each profile through Helm, runs the regression catalog, collects evidence, and writes the same HTML report style.
-
-The namespace is intentionally fixed to `playsbc` for this mode.
-
-Build and load the runner plus SIPp images, then launch the Job:
+Run the full 47-profile in-cluster Kubernetes suite:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression_job.py \
   --all-profiles \
+  --build-playsbc-image \
   --build-runner-image \
   --build-sipp-image \
   --kind-load-images \
   --kind-cluster playsbc
 ```
 
-If the images are already available in the cluster:
+Run one Kubernetes profile:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
-python3 tools/run_k8s_regression_job.py --all-profiles
+python3 tools/run_k8s_regression_job.py \
+  --profile tls-srtp-to-udp-rtp \
+  --build-playsbc-image \
+  --build-runner-image \
+  --build-sipp-image \
+  --kind-load-images \
+  --kind-cluster playsbc
+```
+
+If all required images are already available in the cluster, skip local builds:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.0.0 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.0.0 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.0.0 \
+  --set-playsbc-image \
+  --no-load-playsbc-image \
+  --no-load-sipp-image
 ```
 
 Job-mode outputs copied back to the repo:
@@ -287,20 +257,24 @@ logs/k8s-job/<run-id>/k8s-Regression/
 logs/k8s-job/<run-id>/k8s-reports/latest.html
 ```
 
-Useful Job-mode checks:
+Useful live checks while the Job runs:
 
 ```bash
-kubectl -n playsbc get job,pod -l app.kubernetes.io/name=playsbc-k8s-regression-runner
-kubectl -n playsbc get serviceaccount,role,rolebinding playsbc-regression-runner
-kubectl -n playsbc logs job/<job-name>
+kubectl -n playsbc get job,pod
+kubectl -n playsbc get pods -o wide
+kubectl -n playsbc logs job/<job-name> -c regression-runner --tail=100
 kubectl -n playsbc describe job/<job-name>
 ```
 
-Keep the Job object for debugging:
+Job defaults:
 
-```bash
-python3 tools/run_k8s_regression_job.py --profile basic-signalling --keep-job
-```
+- Deletes old local `logs/k8s-job` output before a new run; use `--keep-old-logs` to retain history.
+- Builds `playsbc:k8s-regression`, `playsbc-k8s-regression:local`, and `playsbc-sipp:local` when the build flags are used.
+- Loads local images into `kind` when `--kind-load-images` is set.
+- Creates a lab-only `playsbc-regression-tls` Secret when TLS profiles are selected.
+- Uses PlaySBC pod IP for RTPengine-facing SDP while SIPp still targets the stable PlaySBC Service.
+- Collects deployment logs, pod descriptions, and current/previous pod logs for CrashLoopBackOff evidence.
+- Restores the Helm release to pre-run values unless `--no-restore-helm-values` is used.
 
 Coverage:
 
@@ -314,21 +288,21 @@ Coverage:
 
 The three smoke aliases are still available for quick Kubernetes checks: `options`, `register-contact`, and `b2bua-signalling`.
 
-Outputs:
-
-```text
-logs/k8s-Regression/<run-id>-<profile>/
-logs/k8s-reports/<run-id>.html
-logs/k8s-reports/latest.html
-```
-
-Useful single-profile commands:
+Advanced shell-driven runner, useful only when you do not want an in-cluster controller Job:
 
 ```bash
-python3 tools/run_k8s_regression.py --profile basic-signalling
-python3 tools/run_k8s_regression.py --profile basic-media
-python3 tools/run_k8s_regression.py --profile rtpengine
-python3 tools/run_k8s_regression.py --profile register-auth-success
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression.py \
+  --all-profiles \
+  --build-sipp-image \
+  --kind-load-image \
+  --kind-cluster playsbc
+```
+
+Keep Kubernetes evidence for debugging:
+
+```bash
+python3 tools/run_k8s_regression_job.py --profile basic-signalling --keep-job --keep-old-logs
 ```
 
 ## Inspect Helm Release

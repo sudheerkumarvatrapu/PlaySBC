@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 import tempfile
 import time
 import unittest
@@ -561,6 +562,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(protocol.sip_advertised_ip, "172.28.0.20")
         self.assertEqual(protocol.rtpengine_directions, ("core", "peer"))
         self.assertEqual(protocol.rtpengine_interfaces, frozenset(("core", "peer")))
+
+    def test_runtime_advertised_ip_can_use_pod_ip_environment(self):
+        previous = os.environ.get("POD_IP")
+        os.environ["POD_IP"] = "10.244.0.25"
+        try:
+            config = server.ServerConfig(sip_advertised_ip="$POD_IP", b2bua_advertised_ip="${POD_IP}")
+            server.resolve_runtime_config(config)
+        finally:
+            if previous is None:
+                os.environ.pop("POD_IP", None)
+            else:
+                os.environ["POD_IP"] = previous
+
+        self.assertEqual(config.sip_advertised_ip, "10.244.0.25")
+        self.assertEqual(config.b2bua_advertised_ip, "10.244.0.25")
 
     def test_load_yaml_config_file(self):
         config = server.load_config_file(str(Path(__file__).resolve().parents[1] / "configs" / "config.b2bua.example.yaml"))

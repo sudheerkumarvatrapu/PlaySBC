@@ -23,6 +23,7 @@ import fnmatch
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import secrets
@@ -4512,6 +4513,18 @@ def coerce_config_value(key: str, value: Any) -> Any:
     return value
 
 
+def resolve_runtime_advertised_ip(value: str) -> str:
+    if value in {"$POD_IP", "${POD_IP}", "pod-ip"}:
+        return os.environ.get("POD_IP", "")
+    return value
+
+
+def resolve_runtime_config(config: ServerConfig) -> ServerConfig:
+    config.sip_advertised_ip = resolve_runtime_advertised_ip(config.sip_advertised_ip)
+    config.b2bua_advertised_ip = resolve_runtime_advertised_ip(config.b2bua_advertised_ip)
+    return config
+
+
 def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> ServerConfig:
     overrides = {
         "sip_ip": getattr(args, "sip_ip", None),
@@ -4531,6 +4544,7 @@ def apply_cli_overrides(config: ServerConfig, args: argparse.Namespace) -> Serve
     for key, value in overrides.items():
         if value is not None:
             setattr(config, key, coerce_config_value(key, value))
+    resolve_runtime_config(config)
     validate_config(config)
     return config
 
@@ -4742,6 +4756,7 @@ def create_tls_contexts(config: ServerConfig) -> Tuple[Optional[ssl.SSLContext],
 
     client_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=config.tls_cafile or None)
     client_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    client_context.load_cert_chain(config.tls_certfile, config.tls_keyfile)
     if not config.tls_verify_peer:
         client_context.check_hostname = False
         client_context.verify_mode = ssl.CERT_NONE
