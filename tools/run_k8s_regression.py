@@ -63,6 +63,21 @@ class CommandResult:
     stderr: str
 
 
+@dataclass
+class CaptureProcess:
+    role: str
+    pod: str
+    remote_path: str
+    local_path: Path
+    process: subprocess.Popen[str]
+
+
+@dataclass
+class RtcpTarget:
+    target_ip: str
+    target_port: int
+
+
 def make_run_id() -> str:
     return time.strftime("k8s-regression-%Y%m%d-%H%M%S", time.localtime())
 
@@ -256,6 +271,94 @@ def profile_uses_tls(profile: SimpleNamespace) -> bool:
 
 def profile_uses_rtpengine(profile: SimpleNamespace) -> bool:
     return str(getattr(profile, "media_backend", "internal")) == "rtpengine"
+
+
+def profile_enables_rtpengine_deployment(profile: SimpleNamespace, args: argparse.Namespace) -> bool:
+    return bool(
+        args.rtpengine_enabled
+        and profile_uses_rtpengine(profile)
+        and str(getattr(profile, "profile", "")) != "rtpengine-control-failure"
+    )
+
+
+def should_capture_k8s_pcap(profile: SimpleNamespace) -> bool:
+    return not is_load_profile(profile)
+
+
+def should_run_k8s_rtcp(profile: SimpleNamespace) -> bool:
+    return bool(
+        getattr(profile, "rtcp_enabled", True)
+        and getattr(profile, "media_enabled", False)
+        and getattr(profile, "run_call", True)
+        and int(getattr(profile, "calls", 1)) == 1
+        and int(getattr(profile, "rate", 1)) == 1
+        and int(getattr(profile, "hold_ms", 0)) >= 5000
+    )
+
+
+def rtcp_expected_senders(profile: SimpleNamespace) -> tuple[str, ...]:
+    if not bool(getattr(profile, "start_uas", True)):
+        return ("core",)
+    return ("core", "peer")
+
+
+def should_expect_rtcp_reply(profile: SimpleNamespace) -> bool:
+    return not ("ai-rasa" in str(getattr(profile, "profile", "")) and profile_uses_rtpengine(profile))
+
+
+def normalize_sipp_stderr(text: str) -> tuple[str, int]:
+    filtered: list[str] = []
+    suppressed = 0
+    for line in text.splitlines():
+        if "SSL_ERROR_WANT_READ" in line:
+            suppressed += 1
+            continue
+        filtered.append(line)
+    if suppressed:
+        filtered.append(
+            f"[playsbc] suppressed {suppressed} non-fatal SIPp TLS SSL_ERROR_WANT_READ retry notice(s)"
+        )
+    return ("\n".join(filtered) + ("\n" if filtered else "")), suppressed
+
+
+def sdp_rtcp_target_from_block(block: str) -> Optional[RtcpTarget]:
+    rtp_match = re.search(r"(?m)^m=audio\s+(\d+)", block)
+    if not rtp_match:
+        return None
+    connection_matches = re.findall(r"(?m)^c=IN\s+IP4\s+([^\s]+)", block)
+    rtcp_match = re.search(r"(?m)^a=rtcp:(\d+)(?:\s+IN\s+IP4\s+([^\s]+))?", block)
+    target_ip = rtcp_match.group(2) if rtcp_match and rtcp_match.group(2) else (connection_matches[-1] if connection_matches else "")
+    if not target_ip:
+        return None
+    target_port = int(rtcp_match.group(1)) if rtcp_match else int(rtp_match.group(1)) + 1
+    return RtcpTarget(target_ip=target_ip, target_port=target_port)
+
+
+def extract_received_sdp_rtcp_target(trace_text: str, *, sip_start: str) -> Optional[RtcpTarget]:
+    for block in reversed(re.split(r"-{20,}", trace_text)):
+        if "message received" not in block:
+            continue
+        if f"\n{sip_start}" not in block and not block.lstrip().startswith(sip_start):
+            continue
+        target = sdp_rtcp_target_from_block(block)
+        if target:
+            return target
+    return None
+
+
+def merge_pcap_files(paths: list[Path], destination: Path) -> int:
+    existing = [path for path in paths if path.exists() and path.stat().st_size > 24]
+    if not existing:
+        return 0
+    header = existing[0].read_bytes()[:24]
+    with destination.open("wb") as output:
+        output.write(header)
+        for path in existing:
+            data = path.read_bytes()
+            if data[:24] != header:
+                raise ValueError(f"K8s PCAP link-layer/header mismatch for {path.name}")
+            output.write(data[24:])
+    return destination.stat().st_size
 
 
 def scenario_configmap_manifest(name: str) -> dict[str, object]:
@@ -572,7 +675,7 @@ class K8sRegressionRunner:
         step_dir.mkdir(parents=True, exist_ok=True)
         (step_dir / "command.txt").write_text(command_text(command) + "\n", encoding="utf-8")
         (step_dir / "stdout.log").write_text(result.stdout, encoding="utf-8")
-        (step_dir / "stderr.log").write_text(result.stderr, encoding="utf-8")
+        self.write_sipp_stderr(step_dir, result.stderr)
         self.write_log(bundle, "log.sipp", f"{step_name.upper()} COMMAND", command_text(command))
         self.write_log(
             bundle,
@@ -596,6 +699,19 @@ class K8sRegressionRunner:
         process._playsbc_stderr = stderr  # type: ignore[attr-defined]
         process._playsbc_step_dir = step_dir  # type: ignore[attr-defined]
         return process
+
+    def write_sipp_stderr(self, step_dir: Path, stderr_text: str) -> None:
+        filtered, suppressed = normalize_sipp_stderr(stderr_text)
+        if suppressed:
+            (step_dir / "stderr.raw.log").write_text(stderr_text, encoding="utf-8")
+        (step_dir / "stderr.log").write_text(filtered, encoding="utf-8")
+
+    def finalize_sipp_step_logs(self, step_dir: Path) -> None:
+        stderr_path = step_dir / "stderr.log"
+        if not stderr_path.exists():
+            return
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        self.write_sipp_stderr(step_dir, stderr_text)
 
     def close_process_files(self, process: subprocess.Popen[str]) -> None:
         for attr in ("_playsbc_stdout", "_playsbc_stderr"):
@@ -623,18 +739,267 @@ class K8sRegressionRunner:
         result = run_command(trace_command, timeout=20)
         (step_dir / "sipp-traces.log").write_text(result.stdout + result.stderr, encoding="utf-8")
 
-    def collect_k8s_evidence(self, bundle: Path) -> None:
+    def collect_k8s_evidence(self, bundle: Path, profile_name: str) -> None:
+        include_rtpengine = False
+        if profile_name in ALL_PROFILES:
+            include_rtpengine = profile_enables_rtpengine_deployment(profile_values(profile_name, self.run_id), self.args)
         commands = {
             "kubectl-pods.log": ["get", "pods", "-o", "wide"],
             "kubectl-services.log": ["get", "svc", "-o", "wide"],
             "kubectl-events.log": ["get", "events", "--sort-by=.lastTimestamp"],
             "playsbc.log": ["logs", f"deployment/{self.args.deployment}", f"--tail={self.args.deployment_log_tail}"],
-            "rtpengine.log": ["logs", f"deployment/{self.args.rtpengine_deployment}", f"--tail={self.args.deployment_log_tail}"],
         }
+        if include_rtpengine:
+            commands["rtpengine.log"] = ["logs", f"deployment/{self.args.rtpengine_deployment}", f"--tail={self.args.deployment_log_tail}"]
+        else:
+            (bundle / "rtpengine.log").write_text(
+                f"RTPengine evidence not applicable for profile={profile_name}; deployment not expected for this profile.\n",
+                encoding="utf-8",
+            )
         for filename, parts in commands.items():
             result = self.kubectl(*parts, check=False)
             (bundle / filename).write_text(result.stdout + result.stderr, encoding="utf-8")
         self.collect_playsbc_pod_evidence(bundle)
+
+    def start_packet_captures(
+        self,
+        profile: SimpleNamespace,
+        bundle: Path,
+        pods: list[tuple[str, str]],
+    ) -> list[CaptureProcess]:
+        if not should_capture_k8s_pcap(profile):
+            self.write_log(bundle, "log.networking", "K8S PCAP CAPTURE SKIPPED", "reason=load_profile")
+            return []
+        captures: list[CaptureProcess] = []
+        for role, pod in pods:
+            remote_path = f"/tmp/{short_name(profile.profile)}-{role}.pcap"
+            local_path = bundle / f"capture-{role}.pcap"
+            step_dir = bundle / f"k8s-pcap-{role}"
+            step_dir.mkdir(parents=True, exist_ok=True)
+            capture_filter = "udp or tcp"
+            shell_command = (
+                f"rm -f {shlex.quote(remote_path)}; "
+                f"tcpdump -i any -U -n -s 0 -w {shlex.quote(remote_path)} {shlex.quote(capture_filter)}"
+            )
+            command = [self.args.kubectl_bin, "-n", self.args.namespace, "exec", pod, "--", "sh", "-lc", shell_command]
+            (step_dir / "command.txt").write_text(command_text(command) + "\n", encoding="utf-8")
+            stdout = (step_dir / "stdout.log").open("w", encoding="utf-8")
+            stderr = (step_dir / "stderr.log").open("w", encoding="utf-8")
+            process = subprocess.Popen(command, cwd=ROOT, text=True, stdout=stdout, stderr=stderr)
+            process._playsbc_stdout = stdout  # type: ignore[attr-defined]
+            process._playsbc_stderr = stderr  # type: ignore[attr-defined]
+            captures.append(CaptureProcess(role=role, pod=pod, remote_path=remote_path, local_path=local_path, process=process))
+        time.sleep(0.8)
+        failed = [capture.role for capture in captures if capture.process.poll() is not None]
+        if failed:
+            self.stop_packet_captures(captures)
+            raise RuntimeError(f"K8s tcpdump capture exited early for role(s): {', '.join(failed)}")
+        self.write_log(
+            bundle,
+            "log.networking",
+            "K8S PCAP CAPTURE STARTED",
+            " ".join(f"{capture.role}={capture.pod}:{capture.remote_path}" for capture in captures),
+        )
+        return captures
+
+    def stop_packet_captures(self, captures: list[CaptureProcess]) -> None:
+        for capture in captures:
+            if capture.process.poll() is None:
+                self.kubectl("exec", capture.pod, "--", "sh", "-lc", "pkill -INT tcpdump || true", check=False)
+                capture.process.terminate()
+                try:
+                    capture.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    capture.process.kill()
+                    capture.process.wait(timeout=5)
+            self.close_process_files(capture.process)
+
+    def collect_packet_captures(self, captures: list[CaptureProcess], bundle: Path) -> bool:
+        if not captures:
+            return True
+        ok = True
+        copied: list[Path] = []
+        for capture in captures:
+            result = run_command(
+                [
+                    self.args.kubectl_bin,
+                    "-n",
+                    self.args.namespace,
+                    "cp",
+                    f"{capture.pod}:{capture.remote_path}",
+                    str(capture.local_path),
+                    "-c",
+                    "sipp-agent",
+                ],
+                timeout=60,
+                check=False,
+            )
+            (bundle / f"k8s-pcap-{capture.role}" / "copy.log").write_text(
+                result.stdout + result.stderr,
+                encoding="utf-8",
+            )
+            if result.returncode != 0 or not capture.local_path.exists() or capture.local_path.stat().st_size <= 24:
+                ok = False
+                continue
+            copied.append(capture.local_path)
+        try:
+            merged_bytes = merge_pcap_files(copied, bundle / "capture.pcap")
+        except Exception as exc:
+            ok = False
+            merged_bytes = 0
+            self.write_log(bundle, "log.networking", "K8S PCAP MERGE FAILED", f"{type(exc).__name__}: {exc}")
+        self.write_log(
+            bundle,
+            "log.networking",
+            "K8S PCAP CAPTURE COLLECTED",
+            (
+                f"status={'passed' if ok and merged_bytes > 0 else 'failed'} "
+                f"files={','.join(path.name for path in copied) or 'none'} "
+                f"merged_file=capture.pcap merged_bytes={merged_bytes}"
+            ),
+        )
+        return ok and merged_bytes > 0
+
+    def collect_tmp_messages(self, pod: str) -> str:
+        result = run_command(
+            [
+                self.args.kubectl_bin,
+                "-n",
+                self.args.namespace,
+                "exec",
+                pod,
+                "--",
+                "sh",
+                "-lc",
+                "cat /tmp/*_messages.log 2>/dev/null || true",
+            ],
+            timeout=10,
+            check=False,
+        )
+        return result.stdout + result.stderr
+
+    def discover_rtcp_targets(self, profile: SimpleNamespace, core_pod: str, peer_pod: str, bundle: Path) -> dict[str, RtcpTarget]:
+        deadline = time.monotonic() + 8.0
+        expected = set(rtcp_expected_senders(profile))
+        targets: dict[str, RtcpTarget] = {}
+        while time.monotonic() < deadline:
+            if "core" in expected and "core" not in targets:
+                core_trace = self.collect_tmp_messages(core_pod)
+                core_target = extract_received_sdp_rtcp_target(core_trace, sip_start="SIP/2.0 200")
+                if core_target:
+                    targets["core"] = core_target
+            if "peer" in expected and "peer" not in targets:
+                peer_trace = self.collect_tmp_messages(peer_pod)
+                peer_target = extract_received_sdp_rtcp_target(peer_trace, sip_start="INVITE ")
+                if peer_target:
+                    targets["peer"] = peer_target
+            if expected.issubset(targets):
+                self.write_log(
+                    bundle,
+                    "log.media",
+                    "K8S RTCP TARGETS DISCOVERED",
+                    " ".join(f"{role}={target.target_ip}:{target.target_port}" for role, target in sorted(targets.items())),
+                )
+                return targets
+            time.sleep(0.2)
+        missing = ",".join(sorted(expected - set(targets)))
+        raise RuntimeError(f"Could not discover K8s RTCP target(s) from SIPp traces: {missing}")
+
+    def start_rtcp_process(
+        self,
+        role: str,
+        pod: str,
+        pod_ip: str,
+        target: RtcpTarget,
+        profile: SimpleNamespace,
+        bundle: Path,
+    ) -> subprocess.Popen[str]:
+        step_name = f"rtcp-{role}"
+        step_dir = bundle / step_name
+        step_dir.mkdir(parents=True, exist_ok=True)
+        duration = max(1.0, (int(getattr(profile, "hold_ms", 1000)) / 1000.0) - float(getattr(profile, "media_start_delay", 1.0)) - 0.5)
+        command_args = [
+            "python3",
+            "/app/tools/send_rtcp_reports.py",
+            "--local-ip",
+            pod_ip,
+            "--source-port",
+            "6001",
+            "--target-ip",
+            target.target_ip,
+            "--target-port",
+            str(target.target_port),
+            "--ssrc",
+            "0xC0DEC0DE",
+            "--cname",
+            f"{role}@playsbc-k8s",
+            "--duration-seconds",
+            f"{duration:.3f}",
+            "--interval-seconds",
+            "5",
+        ]
+        if bool(getattr(profile, "rtcp_receiver_reports", False)):
+            command_args.append("--receiver-report")
+        if should_expect_rtcp_reply(profile):
+            command_args.append("--expect-reply")
+        shell_command = f"cd /tmp && {shlex.join(command_args)}"
+        command = [self.args.kubectl_bin, "-n", self.args.namespace, "exec", pod, "--", "sh", "-lc", shell_command]
+        (step_dir / "command.txt").write_text(command_text(command) + "\n", encoding="utf-8")
+        stdout = (step_dir / "stdout.log").open("w", encoding="utf-8")
+        stderr = (step_dir / "stderr.log").open("w", encoding="utf-8")
+        process = subprocess.Popen(command, cwd=ROOT, text=True, stdout=stdout, stderr=stderr)
+        process._playsbc_stdout = stdout  # type: ignore[attr-defined]
+        process._playsbc_stderr = stderr  # type: ignore[attr-defined]
+        process._playsbc_step_dir = step_dir  # type: ignore[attr-defined]
+        self.write_log(bundle, "log.sipp", f"{step_name.upper()} COMMAND", command_text(command))
+        return process
+
+    def start_rtcp_processes(
+        self,
+        profile: SimpleNamespace,
+        core_pod: str,
+        core_ip: str,
+        peer_pod: str,
+        peer_ip: str,
+        bundle: Path,
+    ) -> list[tuple[str, subprocess.Popen[str]]]:
+        if not should_run_k8s_rtcp(profile):
+            return []
+        targets = self.discover_rtcp_targets(profile, core_pod, peer_pod, bundle)
+        processes: list[tuple[str, subprocess.Popen[str]]] = []
+        if "core" in targets:
+            processes.append(("rtcp-core", self.start_rtcp_process("core", core_pod, core_ip, targets["core"], profile, bundle)))
+        if "peer" in targets:
+            processes.append(("rtcp-peer", self.start_rtcp_process("peer", peer_pod, peer_ip, targets["peer"], profile, bundle)))
+        return processes
+
+    def wait_for_rtcp_processes(self, profile: SimpleNamespace, processes: list[tuple[str, subprocess.Popen[str]]], bundle: Path) -> list[int]:
+        returncodes: list[int] = []
+        if not processes:
+            return returncodes
+        lines = [f"expected=True profile={profile.profile}"]
+        for name, process in processes:
+            try:
+                rc = process.wait(timeout=max(10, int(getattr(profile, "hold_ms", 1000)) // 1000 + 15))
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                rc = 124
+            finally:
+                self.close_process_files(process)
+            returncodes.append(int(rc))
+            step_dir = bundle / name
+            stdout_text = (step_dir / "stdout.log").read_text(encoding="utf-8", errors="replace") if (step_dir / "stdout.log").exists() else ""
+            stderr_text = (step_dir / "stderr.log").read_text(encoding="utf-8", errors="replace") if (step_dir / "stderr.log").exists() else ""
+            lines.append(f"{name}=returncode:{rc} {stdout_text.strip() or stderr_text.strip() or 'no-output'}")
+            self.write_log(bundle, "log.sipp", f"{name.upper()} RESULT", f"returncode={rc}")
+        ok = bool(returncodes) and all(code == 0 for code in returncodes)
+        self.write_log(
+            bundle,
+            "log.media",
+            "K8S RTCP OBSERVATION",
+            "\n".join([f"status={'observed' if ok else 'failed'}", *lines]),
+        )
+        return returncodes
 
     def collect_playsbc_pod_evidence(self, bundle: Path) -> None:
         result = self.kubectl("get", "pods", "-l", "app.kubernetes.io/name=playsbc", "-o", "json", check=False)
@@ -719,7 +1084,7 @@ class K8sRegressionRunner:
         return uac_path, uas_path, register_path
 
     def profile_config(self, profile: SimpleNamespace) -> dict[str, object]:
-        advertised_ip = "$POD_IP" if profile_uses_rtpengine(profile) else self.args.service
+        advertised_ip = "$POD_IP"
         return {
             "sip_ip": "0.0.0.0",
             "sip_advertised_ip": advertised_ip,
@@ -763,13 +1128,9 @@ class K8sRegressionRunner:
         started = time.monotonic()
         self.capture_original_values()
         values = copy.deepcopy(self.original_values or {})
-        advertised_ip = "$POD_IP" if profile_uses_rtpengine(profile) else self.args.service
+        advertised_ip = "$POD_IP"
         values.setdefault("playsbc", {})["config"] = self.profile_config(profile)
-        values.setdefault("rtpengine", {})["enabled"] = bool(
-            self.args.rtpengine_enabled
-            and getattr(profile, "media_backend", "internal") == "rtpengine"
-            and profile.profile != "rtpengine-control-failure"
-        )
+        values.setdefault("rtpengine", {})["enabled"] = profile_enables_rtpengine_deployment(profile, self.args)
         if profile_uses_tls(profile):
             self.ensure_tls_secret(bundle)
             values.setdefault("tls", {})["enabled"] = True
@@ -945,7 +1306,7 @@ class K8sRegressionRunner:
                 "Deleted temporary SIPp regression pods." if not self.args.keep_pods else "Kept temporary SIPp pods for debugging.",
             )
             evidence_started = time.monotonic()
-            self.collect_k8s_evidence(bundle)
+            self.collect_k8s_evidence(bundle, profile)
             phases.append(
                 "Evidence Validation",
                 "passed" if status == "passed" else "failed",
@@ -1004,8 +1365,12 @@ class K8sRegressionRunner:
         returncodes: list[int] = []
         commands: list[str] = []
         processes: list[tuple[str, str, subprocess.Popen[str]]] = []
+        rtcp_processes: list[tuple[str, subprocess.Popen[str]]] = []
+        captures: list[CaptureProcess] = []
+        capture_ok = True
 
         try:
+            captures = self.start_packet_captures(profile, bundle, [("core", core_pod), ("peer", peer_pod)])
             if getattr(profile, "start_uas", True):
                 uas_args = self.b2bua_uas_args(profile, uas_scenario, peer_ip)
                 uas_process = self.start_sipp_process(peer_pod, "peer-sipp-b-uas", uas_args, bundle)
@@ -1040,9 +1405,29 @@ class K8sRegressionRunner:
             if getattr(profile, "run_call", True):
                 uac_args = self.b2bua_uac_args(profile, uac_scenario, core_ip)
                 timeout = max(self.args.sipp_timeout, sipp_timeout_seconds(int(getattr(profile, "calls", 1)), int(getattr(profile, "rate", 1)), int(getattr(profile, "hold_ms", self.args.call_hold_ms))) + 30)
-                result = self.run_sipp_step(core_pod, "core-sipp-a-uac", uac_args, bundle, timeout=timeout)
-                returncodes.append(result.returncode)
-                commands.append(command_text(result.command))
+                if should_run_k8s_rtcp(profile):
+                    uac_process = self.start_sipp_process(core_pod, "core-sipp-a-uac", uac_args, bundle)
+                    commands.append(command_text(self.sipp_exec_command(core_pod, uac_args)))
+                    time.sleep(float(getattr(profile, "media_start_delay", 1.0)))
+                    rtcp_processes = self.start_rtcp_processes(profile, core_pod, core_ip, peer_pod, peer_ip, bundle)
+                    try:
+                        uac_rc = uac_process.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        uac_process.terminate()
+                        uac_rc = 124
+                    finally:
+                        self.close_process_files(uac_process)
+                    returncodes.append(int(uac_rc))
+                    self.write_log(bundle, "log.sipp", "CORE-SIPP-A-UAC RESULT", f"returncode={uac_rc}")
+                    self.finalize_sipp_step_logs(bundle / "core-sipp-a-uac")
+                    self.collect_sipp_traces(core_pod, bundle / "core-sipp-a-uac")
+                else:
+                    result = self.run_sipp_step(core_pod, "core-sipp-a-uac", uac_args, bundle, timeout=timeout)
+                    returncodes.append(result.returncode)
+                    commands.append(command_text(result.command))
+
+            returncodes.extend(self.wait_for_rtcp_processes(profile, rtcp_processes, bundle))
+            rtcp_processes = []
 
             for step_name, pod, process in processes:
                 try:
@@ -1054,8 +1439,17 @@ class K8sRegressionRunner:
                     self.close_process_files(process)
                 returncodes.append(int(rc))
                 self.write_log(bundle, "log.sipp", f"{step_name.upper()} RESULT", f"returncode={rc}")
+                self.finalize_sipp_step_logs(bundle / step_name)
                 self.collect_sipp_traces(pod, bundle / step_name)
         finally:
+            for _name, process in rtcp_processes:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                self.close_process_files(process)
             for _step_name, _pod, process in processes:
                 if process.poll() is None:
                     process.terminate()
@@ -1064,6 +1458,11 @@ class K8sRegressionRunner:
                     except subprocess.TimeoutExpired:
                         process.kill()
                 self.close_process_files(process)
+            self.stop_packet_captures(captures)
+            capture_ok = self.collect_packet_captures(captures, bundle)
+
+        if not capture_ok:
+            returncodes.append(1)
 
         phases.append(
             "Test Execution",
@@ -1414,7 +1813,7 @@ class K8sRegressionRunner:
         return returncodes, commands, ladder
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", default="", help="Run/report identifier; defaults to a timestamp")
     parser.add_argument("--namespace", default="playsbc")
@@ -1457,7 +1856,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--call-hold-ms", type=int, default=1000)
     parser.add_argument("--uas-start-delay", type=float, default=1.0)
     parser.add_argument("--keep-pods", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:

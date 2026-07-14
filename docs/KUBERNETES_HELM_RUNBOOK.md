@@ -273,6 +273,9 @@ Job defaults:
 - Loads local images into `kind` when `--kind-load-images` is set.
 - Creates a lab-only `playsbc-regression-tls` Secret when TLS profiles are selected.
 - Uses PlaySBC pod IP for RTPengine-facing SDP while SIPp still targets the stable PlaySBC Service.
+- Uses PlaySBC pod IP in SDP for all K8s profiles so SIPp media targets a numeric, routable pod address instead of the Service DNS name.
+- Captures `capture-core.pcap`, `capture-peer.pcap`, and merged `capture.pcap` for non-load profiles. Load profiles skip PCAP by design.
+- Sends RTCP helper reports for eligible single-call media profiles and records `K8S RTCP OBSERVATION` in `log.media`.
 - Collects deployment logs, pod descriptions, and current/previous pod logs for CrashLoopBackOff evidence.
 - Restores the Helm release to pre-run values unless `--no-restore-helm-values` is used.
 

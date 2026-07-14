@@ -16,6 +16,7 @@ from tools import run_b2bua_sipp_smoke
 from tools import run_regression_suite
 from tools import run_real_topology
 from tools import run_dual_realm_profile
+from tools import run_k8s_regression
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2677,6 +2678,8 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("SIPP_VERSION=v3.7.7", dockerfile)
         self.assertIn("-DUSE_SSL=1", dockerfile)
         self.assertIn("-DUSE_PCAP=1", dockerfile)
+        self.assertIn("python3", dockerfile)
+        self.assertIn("send_rtcp_reports.py", dockerfile)
 
     def test_kubernetes_chart_has_health_secret_rtpengine_and_affinity_lab(self):
         chart = ROOT / "charts" / "playsbc"
@@ -2714,6 +2717,48 @@ class RealTopologyTests(unittest.TestCase):
 
             self.assertTrue(run_dual_realm_profile.cleanup_work_dir(work))
             self.assertFalse(work.exists())
+
+    def test_kubernetes_profiles_advertise_pod_ip_for_media_sdp(self):
+        args = run_k8s_regression.parse_args(["--all-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+
+        internal = run_k8s_regression.profile_values("basic-media", "unit-k8s")
+        rtpengine = run_k8s_regression.profile_values("rtpengine-media", "unit-k8s")
+
+        self.assertEqual(runner.profile_config(internal)["sip_advertised_ip"], "$POD_IP")
+        self.assertEqual(runner.profile_config(internal)["b2bua_advertised_ip"], "$POD_IP")
+        self.assertEqual(runner.profile_config(rtpengine)["sip_advertised_ip"], "$POD_IP")
+
+    def test_kubernetes_extracts_rtcp_target_from_received_sdp(self):
+        trace = """
+----------------------------------------------- 2026-07-14T10:45:49Z
+UDP message received [603] bytes:
+
+SIP/2.0 200 OK
+Content-Type: application/sdp
+
+v=0
+c=IN IP4 10.244.0.12
+m=audio 25100 RTP/AVP 0 101
+a=rtcp:25101
+"""
+
+        target = run_k8s_regression.extract_received_sdp_rtcp_target(trace, sip_start="SIP/2.0 200")
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.target_ip, "10.244.0.12")
+        self.assertEqual(target.target_port, 25101)
+
+    def test_kubernetes_sipp_tls_retry_noise_is_summarized(self):
+        filtered, count = run_k8s_regression.normalize_sipp_stderr(
+            "first line\nSSL_ERROR_WANT_READ temporary retry\nlast line\n"
+        )
+
+        self.assertEqual(count, 1)
+        self.assertIn("first line", filtered)
+        self.assertIn("last line", filtered)
+        self.assertIn("suppressed 1 non-fatal", filtered)
+        self.assertNotIn("temporary retry", filtered)
 
     def test_topology_pcaps_merge_in_timestamp_order(self):
         with tempfile.TemporaryDirectory() as tmp:

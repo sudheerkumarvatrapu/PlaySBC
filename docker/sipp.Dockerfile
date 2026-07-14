@@ -31,10 +31,17 @@ RUN apt-get update \
         libnet1 \
         libpcap0.8 \
         libssl3 \
+        procps \
+        python3 \
+        tar \
         tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/sipp/build/sipp /usr/local/bin/sipp
 COPY sipp/scenarios /scenarios
+COPY rtp /app/rtp
+COPY tools/send_rtcp_reports.py /app/tools/send_rtcp_reports.py
+
+ENV PYTHONPATH=/app
 
 ENTRYPOINT ["sipp"]
