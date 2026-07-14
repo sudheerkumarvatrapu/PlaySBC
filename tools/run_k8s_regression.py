@@ -320,7 +320,8 @@ class K8sRegressionRunner:
 
     def prepare_common(self, bundle: Path, phases: PhaseLog) -> None:
         started = time.monotonic()
-        self.kubectl_cluster("get", "namespace", self.args.namespace, check=True)
+        if not self.args.skip_namespace_check:
+            self.kubectl_cluster("get", "namespace", self.args.namespace, check=True)
         self.kubectl("get", "service", self.args.service, check=True)
         self.kubectl("get", "service", self.args.rtpengine_service, check=False)
         manifest = scenario_configmap_manifest(self.args.configmap)
@@ -332,7 +333,8 @@ class K8sRegressionRunner:
             started,
             (
                 f"Verified namespace={self.args.namespace}, service={self.args.service}:{self.args.sip_port}, "
-                f"and applied ConfigMap={self.args.configmap} with SIPp XML scenarios."
+                f"namespace_check={not self.args.skip_namespace_check}, and applied ConfigMap={self.args.configmap} "
+                "with SIPp XML scenarios."
             ),
         )
 
@@ -1125,6 +1127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--image-build-timeout", type=int, default=900)
     parser.add_argument("--deployment-log-tail", type=int, default=200)
+    parser.add_argument("--skip-namespace-check", action="store_true", help="Skip cluster-scoped namespace lookup, useful for in-cluster Job RBAC")
     parser.add_argument("--options-user", default="health")
     parser.add_argument("--register-user", default="1001")
     parser.add_argument("--caller", default="1001")

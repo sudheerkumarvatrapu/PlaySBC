@@ -254,6 +254,54 @@ python3 tools/run_k8s_regression.py \
   --kind-cluster playsbc
 ```
 
+### In-Cluster Regression Job
+
+Use this when you want the full regression controller itself to run inside Kubernetes. This creates reusable runner RBAC plus one Job pod in the `playsbc` namespace. That runner pod then creates the temporary SIPp A/core and SIPp B/peer pods, applies each profile through Helm, runs the regression catalog, collects evidence, and writes the same HTML report style.
+
+The namespace is intentionally fixed to `playsbc` for this mode.
+
+Build and load the runner plus SIPp images, then launch the Job:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --build-runner-image \
+  --build-sipp-image \
+  --kind-load-images \
+  --kind-cluster playsbc
+```
+
+If the images are already available in the cluster:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression_job.py --all-profiles
+```
+
+Job-mode outputs copied back to the repo:
+
+```text
+logs/k8s-job/<run-id>/runner.log
+logs/k8s-job/<run-id>/k8s-Regression/
+logs/k8s-job/<run-id>/k8s-reports/latest.html
+```
+
+Useful Job-mode checks:
+
+```bash
+kubectl -n playsbc get job,pod -l app.kubernetes.io/name=playsbc-k8s-regression-runner
+kubectl -n playsbc get serviceaccount,role,rolebinding playsbc-regression-runner
+kubectl -n playsbc logs job/<job-name>
+kubectl -n playsbc describe job/<job-name>
+```
+
+Keep the Job object for debugging:
+
+```bash
+python3 tools/run_k8s_regression_job.py --profile basic-signalling --keep-job
+```
+
 Coverage:
 
 - B2BUA signalling, media, transcoding, and RTPengine anchoring.
