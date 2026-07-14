@@ -24,6 +24,10 @@ jobs:
             dockerfile: docker/playsbc.Dockerfile
           - image: playsbc-rtpengine
             dockerfile: docker/rtpengine.Dockerfile
+          - image: playsbc-k8s-regression
+            dockerfile: docker/k8s-regression-runner.Dockerfile
+          - image: playsbc-sipp
+            dockerfile: docker/sipp.Dockerfile
 
     steps:
       - name: Checkout

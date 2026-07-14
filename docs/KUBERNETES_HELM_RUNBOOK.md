@@ -82,11 +82,11 @@ helm upgrade --install playsbc charts/playsbc \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.0.0 \
+  --set-string image.tag=1.1.0 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.0.0 \
+  --set-string rtpengine.image.tag=1.1.0 \
   --set rtpengine.image.pullPolicy=Always \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
@@ -96,15 +96,15 @@ Deploy from the GitHub release Helm package:
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.0.0/playsbc-1.0.0.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.1.0/playsbc-1.1.0.tgz \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.0.0 \
+  --set-string image.tag=1.1.0 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.0.0 \
+  --set-string rtpengine.image.tag=1.1.0 \
   --set rtpengine.image.pullPolicy=Always \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
@@ -283,9 +283,9 @@ If all required images are already available in the cluster, skip local builds:
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.0.0 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.0.0 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.0.0 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.1.0 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.1.0 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.1.0 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image
@@ -375,7 +375,7 @@ helm lint charts/playsbc
 helm template playsbc charts/playsbc \
   --namespace playsbc \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.0.0 \
+  --set-string image.tag=1.1.0 \
   --set rtpengine.enabled=true
 ```
 
