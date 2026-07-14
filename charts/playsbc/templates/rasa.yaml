@@ -1,4 +1,14 @@
-{{- if .Values.rasa.enabled }}
+{{- $rasa := .Values.rasa | default dict -}}
+{{- $rasaEnabled := get $rasa "enabled" | default false -}}
+{{- if $rasaEnabled }}
+{{- $image := get $rasa "image" | default dict -}}
+{{- $project := get $rasa "project" | default dict -}}
+{{- $servicePort := get $rasa "servicePort" | default 5005 -}}
+{{- $trainOnStart := true -}}
+{{- if hasKey $rasa "trainOnStart" -}}
+{{- $trainOnStart = get $rasa "trainOnStart" -}}
+{{- end -}}
+{{- $resources := get $rasa "resources" | default dict -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,17 +17,17 @@ metadata:
 {{ include "playsbc.labels" . | indent 4 }}
 data:
   config.yml: |
-{{ .Values.rasa.project.config | indent 4 }}
+{{ get $project "config" | default "" | indent 4 }}
   domain.yml: |
-{{ .Values.rasa.project.domain | indent 4 }}
+{{ get $project "domain" | default "" | indent 4 }}
   nlu.yml: |
-{{ .Values.rasa.project.nlu | indent 4 }}
+{{ get $project "nlu" | default "" | indent 4 }}
   rules.yml: |
-{{ .Values.rasa.project.rules | indent 4 }}
+{{ get $project "rules" | default "" | indent 4 }}
   credentials.yml: |
-{{ .Values.rasa.project.credentials | indent 4 }}
+{{ get $project "credentials" | default "rest:\n" | indent 4 }}
   endpoints.yml: |
-{{ .Values.rasa.project.endpoints | indent 4 }}
+{{ get $project "endpoints" | default "action_endpoint:\n  url: \"\"\n" | indent 4 }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -39,8 +49,8 @@ spec:
     spec:
       containers:
         - name: rasa
-          image: "{{ .Values.rasa.image.repository }}:{{ .Values.rasa.image.tag }}"
-          imagePullPolicy: {{ .Values.rasa.image.pullPolicy }}
+          image: "{{ get $image "repository" | default "rasa/rasa" }}:{{ get $image "tag" | default "3.6.20-full" }}"
+          imagePullPolicy: {{ get $image "pullPolicy" | default "IfNotPresent" }}
           command: ["/bin/sh", "-ec"]
           args:
             - |-
@@ -55,14 +65,14 @@ spec:
               cp /project/rules.yml /tmp/playsbc-rasa-lab/data/rules.yml
               cd /tmp/playsbc-rasa-lab
               MODEL_ARGS=""
-              if [ "{{ .Values.rasa.trainOnStart }}" = "true" ]; then
+              if [ "{{ $trainOnStart }}" = "true" ]; then
                 rasa train --config config.yml --domain domain.yml --data data --out /tmp/playsbc-rasa-models
                 MODEL_ARGS="--model /tmp/playsbc-rasa-models"
               fi
-              exec rasa run --enable-api --cors "*" --host 0.0.0.0 --port {{ .Values.rasa.servicePort }} ${MODEL_ARGS} --credentials credentials.yml --endpoints endpoints.yml
+              exec rasa run --enable-api --cors "*" --host 0.0.0.0 --port {{ $servicePort }} ${MODEL_ARGS} --credentials credentials.yml --endpoints endpoints.yml
           ports:
             - name: http
-              containerPort: {{ .Values.rasa.servicePort }}
+              containerPort: {{ $servicePort }}
               protocol: TCP
           readinessProbe:
             tcpSocket:
@@ -79,7 +89,7 @@ spec:
               mountPath: /project
               readOnly: true
           resources:
-{{ toYaml .Values.rasa.resources | indent 12 }}
+{{ toYaml $resources | indent 12 }}
       volumes:
         - name: project
           configMap:
@@ -98,7 +108,7 @@ spec:
     app.kubernetes.io/instance: {{ .Release.Name }}
   ports:
     - name: http
-      port: {{ .Values.rasa.servicePort }}
+      port: {{ $servicePort }}
       targetPort: http
       protocol: TCP
 {{- end }}
