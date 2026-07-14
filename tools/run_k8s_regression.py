@@ -34,7 +34,6 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
     call_limit,
     dump_simple_yaml,
     is_transcoding_profile,
-    registration_ladder_text,
     render_harness_config_templates,
     sipp_timeout_seconds,
     uas_media_codec,
@@ -1079,19 +1078,63 @@ class K8sRegressionRunner:
         return returncodes or [0], commands, ladder
 
     def dual_realm_ladder(self, profile: SimpleNamespace) -> str:
-        sections: list[str] = []
+        participants = self.ladder_participants(profile)
+        flow = B2BUAFlowLog(
+            None,
+            "k8s-unified",
+            str(getattr(profile, "callee", self.args.callee)),
+            self.route_for_ladder(profile),
+            enabled=False,
+            participants=participants,
+        )
+        flow.enabled = True
+        self.add_registration_events(flow, profile)
+        if not getattr(profile, "run_call", True):
+            self.add_setup_only_events(flow, profile)
+        elif "ai-rasa" in str(getattr(profile, "profile", "")):
+            self.add_ai_gateway_events(flow, profile)
+        else:
+            self.add_call_events(flow, profile)
+        return self.render_unified_ladder(flow, profile)
+
+    def ladder_participants(self, profile: SimpleNamespace) -> tuple[str, ...]:
+        profile_name = str(getattr(profile, "profile", ""))
+        if "ai-rasa" in profile_name:
+            participants = ["Core SIPp A", "PlaySBC"]
+            if profile_uses_rtpengine(profile):
+                participants.append("RTPengine")
+            participants.extend(["STT Adapter", "Rasa Bot", "TTS Adapter"])
+            return tuple(participants)
+        participants = ["Core SIPp A", "PlaySBC", "Peer SIPp B"]
+        if profile_uses_rtpengine(profile):
+            participants.append("RTPengine")
+        return tuple(participants)
+
+    def render_unified_ladder(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> str:
+        profile_name = str(getattr(profile, "profile", "k8s"))
+        body = "\n".join(flow.render_ladder_text().splitlines()[1:])
+        return f"KUBERNETES SINGLE LADDER\nprofile={profile_name}\n{body}"
+
+    def add_registration_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         if getattr(profile, "register_callee", True):
             auth_outcome = str(getattr(profile, "registration_auth_expected", "") or "")
-            sections.append(registration_ladder_text("Peer SIPp B", str(getattr(profile, "callee", self.args.callee)), auth_outcome))
+            self.add_registration_flow(flow, "Peer SIPp B", auth_outcome)
         if getattr(profile, "register_caller", False):
-            sections.append(registration_ladder_text("Core SIPp A", str(getattr(profile, "caller", self.args.caller))))
-        if not getattr(profile, "run_call", True):
-            sections.append(self.setup_only_ladder(profile))
-        elif "ai-rasa" in str(getattr(profile, "profile", "")):
-            sections.append(self.ai_gateway_ladder(profile))
-        else:
-            sections.append(self.call_ladder(profile))
-        return "\n\n".join(section for section in sections if section)
+            self.add_registration_flow(flow, "Core SIPp A", "")
+
+    def add_registration_flow(self, flow: B2BUAFlowLog, endpoint: str, auth_outcome: str) -> None:
+        if auth_outcome:
+            flow.sip(endpoint, "PlaySBC", "REGISTER")
+            flow.sip("PlaySBC", endpoint, "401 Unauthorized")
+            if auth_outcome == "success":
+                flow.sip(endpoint, "PlaySBC", "REGISTER + digest")
+                flow.sip("PlaySBC", endpoint, "200 OK")
+            else:
+                flow.sip(endpoint, "PlaySBC", "REGISTER + bad digest")
+                flow.sip("PlaySBC", endpoint, "403 Forbidden")
+            return
+        flow.sip(endpoint, "PlaySBC", "REGISTER")
+        flow.sip("PlaySBC", endpoint, "200 OK")
 
     def route_for_ladder(self, profile: SimpleNamespace) -> RouteResult:
         callee = str(getattr(profile, "callee", self.args.callee))
@@ -1103,19 +1146,15 @@ class K8sRegressionRunner:
             routed_user=callee,
         )
 
-    def setup_only_ladder(self, profile: SimpleNamespace) -> str:
-        flow = B2BUAFlowLog(None, "k8s-setup", str(getattr(profile, "callee", self.args.callee)), self.route_for_ladder(profile), enabled=False)
-        flow.enabled = True
-        flow.sip("Core SIPp A", "PlaySBC", "OPTIONS" if "options" in profile.profile else "profile check")
+    def add_setup_only_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         if "options" in profile.profile:
+            flow.sip("Core SIPp A", "PlaySBC", "OPTIONS")
             flow.sip("PlaySBC", "Core SIPp A", "200 OK")
-        else:
+        elif not flow.events:
+            flow.sip("Core SIPp A", "PlaySBC", "profile check")
             flow.sip("PlaySBC", "Core SIPp A", "expected response")
-        return "KUBERNETES DUAL-REALM CONTROL LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
 
-    def ai_gateway_ladder(self, profile: SimpleNamespace) -> str:
-        flow = B2BUAFlowLog(None, "k8s-ai", str(getattr(profile, "callee", "ai-bot")), self.route_for_ladder(profile), enabled=False, participants=("Core SIPp A", "PlaySBC", "RTPengine"))
-        flow.enabled = True
+    def add_ai_gateway_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         flow.sip("Core SIPp A", "PlaySBC", "INVITE")
         flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
         flow.sip("PlaySBC", "Core SIPp A", "180 Ringing")
@@ -1126,32 +1165,16 @@ class K8sRegressionRunner:
             flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
+        flow.sip("PlaySBC", "STT Adapter", "scripted STT")
+        flow.sip("STT Adapter", "PlaySBC", "intent text")
+        flow.sip("PlaySBC", "Rasa Bot", "REST turn")
+        flow.sip("Rasa Bot", "PlaySBC", "bot response")
+        flow.sip("PlaySBC", "TTS Adapter", "scripted TTS")
+        flow.sip("TTS Adapter", "PlaySBC", "speech frame")
         flow.sip("Core SIPp A", "PlaySBC", "BYE")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
-        sections = ["AI VOICE SIP/RTPENGINE LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])]
 
-        for title, peer, request, response in (
-            ("AI VOICE STT ADAPTER LADDER", "STT Adapter", "scripted STT", "intent text"),
-            ("AI VOICE RASA ADAPTER LADDER", "Rasa Bot", "REST turn", "bot response"),
-            ("AI VOICE TTS ADAPTER LADDER", "TTS Adapter", "scripted TTS", "speech frame"),
-        ):
-            adapter_flow = B2BUAFlowLog(
-                None,
-                f"k8s-ai-{peer}",
-                str(getattr(profile, "callee", "ai-bot")),
-                self.route_for_ladder(profile),
-                enabled=False,
-                participants=("PlaySBC", peer),
-            )
-            adapter_flow.enabled = True
-            adapter_flow.sip("PlaySBC", peer, request)
-            adapter_flow.sip(peer, "PlaySBC", response)
-            sections.append(title + "\n" + "\n".join(adapter_flow.render_ladder_text().splitlines()[1:]))
-        return "\n\n".join(sections)
-
-    def call_ladder(self, profile: SimpleNamespace) -> str:
-        flow = B2BUAFlowLog(None, "k8s-call", str(getattr(profile, "callee", self.args.callee)), self.route_for_ladder(profile), enabled=False, participants=("Core SIPp A", "PlaySBC", "Peer SIPp B"))
-        flow.enabled = True
+    def add_call_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         expect_failure = str(getattr(profile, "uac_scenario", "")).endswith("expect_488.xml") or profile.profile in {
             "unknown-route",
             "esbc-call-admission",
@@ -1164,12 +1187,15 @@ class K8sRegressionRunner:
         flow.sip("Core SIPp A", "PlaySBC", "INVITE")
         flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
         if expect_failure:
+            if profile_uses_rtpengine(profile):
+                flow.sip("PlaySBC", "RTPengine", "OFFER")
+                flow.sip("RTPengine", "PlaySBC", "failed OFFER")
             flow.sip("PlaySBC", "Core SIPp A", "final rejection")
             flow.sip("Core SIPp A", "PlaySBC", "ACK")
-            sections = ["KUBERNETES DUAL-REALM SIP LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])]
-            if profile_uses_rtpengine(profile):
-                sections.append(self.rtpengine_control_ladder(profile, failed=True))
-            return "\n\n".join(sections)
+            return
+        if profile_uses_rtpengine(profile):
+            flow.sip("PlaySBC", "RTPengine", "OFFER")
+            flow.sip("RTPengine", "PlaySBC", "ok OFFER")
         flow.sip("PlaySBC", "Peer SIPp B", "INVITE")
         flow.sip("Peer SIPp B", "PlaySBC", "100 Trying")
         flow.sip("Peer SIPp B", "PlaySBC", "180 Ringing")
@@ -1182,13 +1208,16 @@ class K8sRegressionRunner:
             flow.sip("Peer SIPp B", "PlaySBC", "487 Request Terminated")
             flow.sip("PlaySBC", "Core SIPp A", "487 Request Terminated")
             flow.sip("Core SIPp A", "PlaySBC", "ACK")
-            return "KUBERNETES DUAL-REALM CANCEL LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
+            return
         final_label = "503 Service Unavailable" if outbound_failure else "200 OK"
         flow.sip("Peer SIPp B", "PlaySBC", final_label)
         if outbound_failure:
             flow.sip("PlaySBC", "Core SIPp A", final_label)
             flow.sip("Core SIPp A", "PlaySBC", "ACK")
-            return "KUBERNETES DUAL-REALM FAILURE LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
+            return
+        if profile_uses_rtpengine(profile):
+            flow.sip("PlaySBC", "RTPengine", "ANSWER")
+            flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
         flow.sip("PlaySBC", "Peer SIPp B", "ACK")
@@ -1196,27 +1225,6 @@ class K8sRegressionRunner:
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("PlaySBC", "Peer SIPp B", "BYE")
         flow.sip("Peer SIPp B", "PlaySBC", "200 OK")
-        sections = ["KUBERNETES DUAL-REALM SIP LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])]
-        if profile_uses_rtpengine(profile):
-            sections.append(self.rtpengine_control_ladder(profile))
-        return "\n\n".join(sections)
-
-    def rtpengine_control_ladder(self, profile: SimpleNamespace, failed: bool = False) -> str:
-        flow = B2BUAFlowLog(
-            None,
-            "k8s-rtpengine",
-            str(getattr(profile, "callee", self.args.callee)),
-            self.route_for_ladder(profile),
-            enabled=False,
-            participants=("PlaySBC", "RTPengine"),
-        )
-        flow.enabled = True
-        flow.sip("PlaySBC", "RTPengine", "OFFER")
-        flow.sip("RTPengine", "PlaySBC", "failed OFFER" if failed else "ok OFFER")
-        if not failed:
-            flow.sip("PlaySBC", "RTPengine", "ANSWER")
-            flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
-        return "KUBERNETES RTPENGINE CONTROL LADDER\n" + "\n".join(flow.render_ladder_text().splitlines()[1:])
 
     def profile_options(self, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
         setup_started = time.monotonic()
