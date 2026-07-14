@@ -40,6 +40,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
 )
 from tools.run_regression_suite import (  # noqa: E402
     ALL_B2BUA_PROFILES,
+    OPTIONAL_B2BUA_PROFILES,
     REAL_TOPOLOGY_PROFILE,
     cleanup_old_reports,
     ReportPhase,
@@ -50,7 +51,7 @@ from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 ALL_PROFILES = ALL_B2BUA_PROFILES
-SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES)
+SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES, *OPTIONAL_B2BUA_PROFILES)
 LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
 
 
@@ -271,6 +272,16 @@ def profile_uses_tls(profile: SimpleNamespace) -> bool:
 
 def profile_uses_rtpengine(profile: SimpleNamespace) -> bool:
     return str(getattr(profile, "media_backend", "internal")) == "rtpengine"
+
+
+def profile_uses_real_rasa(profile: SimpleNamespace) -> bool:
+    config = getattr(profile, "ai_voice_gateway", {}) or {}
+    return bool(
+        isinstance(config, dict)
+        and config.get("enabled")
+        and str(config.get("provider", "rasa")).lower() == "rasa"
+        and str(getattr(profile, "rasa_deployment", "")).lower() == "real"
+    )
 
 
 def profile_enables_rtpengine_deployment(profile: SimpleNamespace, args: argparse.Namespace) -> bool:
@@ -752,8 +763,15 @@ class K8sRegressionRunner:
 
     def collect_k8s_evidence(self, bundle: Path, profile_name: str) -> None:
         include_rtpengine = False
+        include_rasa = False
         if profile_name in ALL_PROFILES:
-            include_rtpengine = profile_enables_rtpengine_deployment(profile_values(profile_name, self.run_id), self.args)
+            profile = profile_values(profile_name, self.run_id)
+            include_rtpengine = profile_enables_rtpengine_deployment(profile, self.args)
+            include_rasa = profile_uses_real_rasa(profile)
+        elif profile_name in OPTIONAL_B2BUA_PROFILES:
+            profile = profile_values(profile_name, self.run_id)
+            include_rtpengine = profile_enables_rtpengine_deployment(profile, self.args)
+            include_rasa = profile_uses_real_rasa(profile)
         commands = {
             "kubectl-pods.log": ["get", "pods", "-o", "wide"],
             "kubectl-services.log": ["get", "svc", "-o", "wide"],
@@ -765,6 +783,13 @@ class K8sRegressionRunner:
         else:
             (bundle / "rtpengine.log").write_text(
                 f"RTPengine evidence not applicable for profile={profile_name}; deployment not expected for this profile.\n",
+                encoding="utf-8",
+            )
+        if include_rasa:
+            commands["rasa.log"] = ["logs", f"deployment/{self.args.service}-rasa", f"--tail={self.args.deployment_log_tail}"]
+        else:
+            (bundle / "rasa.log").write_text(
+                f"Real Rasa evidence not applicable for profile={profile_name}; deployment not expected for this profile.\n",
                 encoding="utf-8",
             )
         for filename, parts in commands.items():
@@ -1150,6 +1175,10 @@ class K8sRegressionRunner:
         elif not (self.original_values or {}).get("tls", {}).get("enabled", False):
             values.setdefault("tls", {})["enabled"] = False
             values.setdefault("tls", {})["existingSecret"] = ""
+        if profile_uses_real_rasa(profile):
+            values.setdefault("rasa", {})["enabled"] = True
+        elif not (self.original_values or {}).get("rasa", {}).get("enabled", False):
+            values.setdefault("rasa", {})["enabled"] = False
         values_path = bundle / "helm-profile-values.yaml"
         values_path.write_text(dump_simple_yaml(values), encoding="utf-8")
         helm_started = time.monotonic()
@@ -1175,6 +1204,19 @@ class K8sRegressionRunner:
         rollout = self.kubectl("rollout", "status", f"deployment/{self.args.deployment}", f"--timeout={self.args.rollout_timeout}s", check=True)
         rollout_seconds = time.monotonic() - rollout_started
         self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT READY", rollout.stdout + rollout.stderr)
+        rasa_detail = "not-required"
+        if profile_uses_real_rasa(profile):
+            rasa_deployment = f"{self.args.service}-rasa"
+            rasa_started = time.monotonic()
+            rasa_rollout = self.kubectl(
+                "rollout",
+                "status",
+                f"deployment/{rasa_deployment}",
+                f"--timeout={self.args.rollout_timeout}s",
+                check=True,
+            )
+            rasa_detail = f"{rasa_deployment} ready in {time.monotonic() - rasa_started:.3f}s"
+            self.write_log(bundle, "log.platform", "RASA ROLLOUT READY", rasa_rollout.stdout + rasa_rollout.stderr)
         phases.append(
             "Configuration",
             "passed",
@@ -1184,7 +1226,7 @@ class K8sRegressionRunner:
                 f"media_backend={getattr(profile, 'media_backend', 'internal')}; "
                 f"advertised_ip={advertised_ip}; tls_secret={self.args.tls_secret_name if profile_uses_tls(profile) else 'not-required'}; "
                 f"helm_upgrade_seconds={helm_seconds:.3f}; rollout_seconds={rollout_seconds:.3f}; "
-                f"core_realm=pod-label:core peer_realm=pod-label:peer."
+                f"rasa={rasa_detail}; core_realm=pod-label:core peer_realm=pod-label:peer."
             ),
         )
 
@@ -1359,6 +1401,10 @@ class K8sRegressionRunner:
         profile.caller_register_port = 5070
         if getattr(profile, "rtpengine_url", "") == "udp://playsbc-playsbc-rtpengine:2223":
             profile.rtpengine_url = f"udp://{self.args.rtpengine_service}:2223"
+        if profile_uses_real_rasa(profile):
+            ai_config = dict(getattr(profile, "ai_voice_gateway", {}) or {})
+            ai_config["rasa_webhook_url"] = f"http://{self.args.service}-rasa:5005/webhooks/rest/webhook"
+            profile.ai_voice_gateway = ai_config
         phases.append(
             "Test Setup",
             "passed",

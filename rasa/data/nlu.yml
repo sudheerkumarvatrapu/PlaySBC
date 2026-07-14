@@ -1,0 +1,58 @@
+version: "3.1"
+
+nlu:
+  - intent: greet
+    examples: |
+      - hello
+      - hi
+      - hey
+      - hello from playsbc voice
+      - hello from playsbc rtpengine voice
+      - hello from playsbc real rasa
+
+  - intent: support
+    examples: |
+      - support
+      - I need support
+      - technical support
+      - help me with a service issue
+      - connect me to support
+
+  - intent: sales
+    examples: |
+      - sales
+      - I want sales
+      - talk to sales
+      - connect me to sales
+      - new service enquiry
+
+  - intent: billing
+    examples: |
+      - billing
+      - billing question
+      - invoice help
+      - payment issue
+      - connect me to billing
+
+  - intent: agent
+    examples: |
+      - agent
+      - human agent
+      - representative
+      - talk to a person
+      - transfer me to an agent
+
+  - intent: repeat
+    examples: |
+      - repeat
+      - say that again
+      - can you repeat
+      - what did you say
+
+  - intent: confirm
+    examples: |
+      - yes
+      - confirm
+      - okay
+      - correct
+      - that is right

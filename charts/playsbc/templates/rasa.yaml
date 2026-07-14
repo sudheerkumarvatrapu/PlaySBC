@@ -1,0 +1,104 @@
+{{- if .Values.rasa.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "playsbc.fullname" . }}-rasa-project
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+data:
+  config.yml: |
+{{ .Values.rasa.project.config | indent 4 }}
+  domain.yml: |
+{{ .Values.rasa.project.domain | indent 4 }}
+  nlu.yml: |
+{{ .Values.rasa.project.nlu | indent 4 }}
+  rules.yml: |
+{{ .Values.rasa.project.rules | indent 4 }}
+  credentials.yml: |
+{{ .Values.rasa.project.credentials | indent 4 }}
+  endpoints.yml: |
+{{ .Values.rasa.project.endpoints | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "playsbc.fullname" . }}-rasa
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "playsbc.name" . }}-rasa
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "playsbc.name" . }}-rasa
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: rasa
+          image: "{{ .Values.rasa.image.repository }}:{{ .Values.rasa.image.tag }}"
+          imagePullPolicy: {{ .Values.rasa.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |-
+              set -eu
+              rm -rf /tmp/playsbc-rasa-lab
+              mkdir -p /tmp/playsbc-rasa-lab/data
+              cp /project/config.yml /tmp/playsbc-rasa-lab/config.yml
+              cp /project/domain.yml /tmp/playsbc-rasa-lab/domain.yml
+              cp /project/credentials.yml /tmp/playsbc-rasa-lab/credentials.yml
+              cp /project/endpoints.yml /tmp/playsbc-rasa-lab/endpoints.yml
+              cp /project/nlu.yml /tmp/playsbc-rasa-lab/data/nlu.yml
+              cp /project/rules.yml /tmp/playsbc-rasa-lab/data/rules.yml
+              cd /tmp/playsbc-rasa-lab
+              MODEL_ARGS=""
+              if [ "{{ .Values.rasa.trainOnStart }}" = "true" ]; then
+                rasa train --config config.yml --domain domain.yml --data data --out /tmp/playsbc-rasa-models
+                MODEL_ARGS="--model /tmp/playsbc-rasa-models"
+              fi
+              exec rasa run --enable-api --cors "*" --host 0.0.0.0 --port {{ .Values.rasa.servicePort }} ${MODEL_ARGS} --credentials credentials.yml --endpoints endpoints.yml
+          ports:
+            - name: http
+              containerPort: {{ .Values.rasa.servicePort }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: project
+              mountPath: /project
+              readOnly: true
+          resources:
+{{ toYaml .Values.rasa.resources | indent 12 }}
+      volumes:
+        - name: project
+          configMap:
+            name: {{ include "playsbc.fullname" . }}-rasa-project
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}-rasa
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}-rasa
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.rasa.servicePort }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

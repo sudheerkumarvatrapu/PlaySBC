@@ -11,6 +11,11 @@
 {{- $_ := set $config "media_backend" "rtpengine" -}}
 {{- $_ := set $config "rtpengine_url" (printf "udp://%s-rtpengine:%v" (include "playsbc.fullname" .) .Values.rtpengine.controlPort) -}}
 {{- end -}}
+{{- if and .Values.rasa.enabled (hasKey $config "ai_voice_gateway") -}}
+{{- $ai := deepCopy (get $config "ai_voice_gateway") -}}
+{{- $_ := set $ai "rasa_webhook_url" (printf "http://%s-rasa:%v/webhooks/rest/webhook" (include "playsbc.fullname" .) .Values.rasa.servicePort) -}}
+{{- $_ := set $config "ai_voice_gateway" $ai -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

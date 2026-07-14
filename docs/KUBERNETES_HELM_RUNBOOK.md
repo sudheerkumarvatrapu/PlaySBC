@@ -188,6 +188,46 @@ Expected RTPengine line:
 Startup complete
 ```
 
+## Optional Real Rasa Lab
+
+The default regression uses a lightweight mock Rasa service. Use this optional values file when you want PlaySBC to talk to a real Rasa REST bot inside Kubernetes:
+
+```bash
+helm upgrade --install playsbc charts/playsbc \
+  --namespace playsbc \
+  --create-namespace \
+  -f configs/kubernetes/kind-values.yaml \
+  -f configs/kubernetes/ai-rasa-real-values.yaml
+```
+
+Verify the extra pod and service:
+
+```bash
+kubectl -n playsbc rollout status deployment/playsbc-playsbc-rasa
+kubectl -n playsbc get pods,svc
+kubectl -n playsbc logs deployment/playsbc-playsbc-rasa --tail=100
+```
+
+Run only the real Rasa AI profile:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --profile ai-rasa-real-lab \
+  --build-playsbc-image \
+  --build-runner-image \
+  --build-sipp-image \
+  --kind-load-images \
+  --kind-cluster playsbc
+```
+
+If the kind node cannot pull DockerHub images, load Rasa first:
+
+```bash
+docker pull rasa/rasa:3.6.20-full
+kind load docker-image rasa/rasa:3.6.20-full --name playsbc
+```
+
 ## Run Kubernetes Regression
 
 Use this after PlaySBC and RTPengine are deployed by Helm. The preferred Kubernetes path is the in-cluster Job runner: one controller pod starts inside the `playsbc` namespace, applies each profile through Helm, creates temporary SIPp core/peer pods, runs the canonical B2BUA catalog, copies reports back to the repo, and restores the Helm release afterward.
@@ -285,7 +325,7 @@ Coverage:
 - UDP, TCP, TLS/SRTP interworking, RTCP, and DTMF profiles.
 - REGISTER, digest auth success/failure, registered inbound/outbound calls.
 - ESBC route policy, trunk, failover, normalization, admission, health, and metrics profiles.
-- AI/Rasa lab profiles.
+- AI/Rasa lab profiles. The default catalog uses mock Rasa; run `--profile ai-rasa-real-lab` for real Rasa.
 - Negative SIP cases such as invalid BYE, unknown route, failed outbound leg, CANCEL, and retransmission.
 - Small load, soak, and 5 cps / 60 second CHT load profiles.
 

@@ -31,7 +31,8 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Rasa REST supports multi-message responses; custom bot actions can request join, transfer, or release and are logged as control-plane actions.
 - Regression includes `ai-rasa-lab`: SIPp A calls `ai-bot`, PlaySBC answers, sends a Rasa REST turn, logs `log.ai`, and captures SIP/RTP/HTTP evidence.
 - Regression includes `ai-rasa-rtpengine`: RTP/RTCP is anchored by RTPengine while PlaySBC handles SIP/control and the Rasa turn.
-- Real Rasa can replace the mock by changing `ai_voice_gateway.rasa_webhook_url`.
+- Optional real Rasa lab is wired for local config, Docker dual-realm, Helm, and Kubernetes via `ai-rasa-real-lab`.
+- Real Rasa project assets live under `rasa/`, with `tools/check_rasa.py` as the readiness gate.
 
 ### Lab Platform
 
@@ -67,7 +68,7 @@ Target PR scope:
 - Speech PCAP playback: add real G.711u/G.711a speech PCAP assets and an `ai-rasa-rtpengine-speech` regression profile.
 - RTP audio extraction: assemble inbound RTP, decode G.711 to PCM/WAV, and feed Whisper/Vosk through the current STT adapter boundary.
 - TTS back to RTP: generate Piper/Coqui WAV, convert to G.711 RTP, and send the prompt back through RTPengine.
-- E2E validation: prove speech input, STT transcript, Rasa response, TTS RTP output, RTPengine query evidence, PCAP evidence, and AI ladder/report output.
+- E2E validation: prove speech input, STT transcript, real Rasa response, TTS RTP output, RTPengine query evidence, PCAP evidence, and AI ladder/report output.
 
 Estimated lab-quality timeline: 4 to 8 working days.
 

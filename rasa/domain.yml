@@ -1,0 +1,49 @@
+version: "3.1"
+
+intents:
+  - greet
+  - support
+  - sales
+  - billing
+  - agent
+  - repeat
+  - confirm
+  - nlu_fallback
+
+responses:
+  utter_greet:
+    - text: "PlaySBC real Rasa bot is online. You can ask for support, sales, billing, or an agent."
+  utter_support:
+    - text: "Support path is ready. I can keep the call in the support queue."
+      custom:
+        playsbc_action: join
+        target: support
+        reason: support intent
+  utter_sales:
+    - text: "Sales path is ready. I can transfer this call to the sales trunk."
+      custom:
+        playsbc_action: transfer
+        target: sip:sales@peer.example
+        reason: sales intent
+  utter_billing:
+    - text: "Billing path is ready. I can transfer this call to the billing trunk."
+      custom:
+        playsbc_action: transfer
+        target: sip:billing@peer.example
+        reason: billing intent
+  utter_agent:
+    - text: "I will try to transfer this call to a human agent."
+      custom:
+        playsbc_action: transfer
+        target: sip:agent@peer.example
+        reason: agent requested
+  utter_repeat:
+    - text: "Sure. PlaySBC is connected to real Rasa over the REST channel."
+  utter_confirm:
+    - text: "Confirmed. The AI control path is alive."
+  utter_default:
+    - text: "I heard you, but I am not sure where to route this yet."
+
+session_config:
+  session_expiration_time: 60
+  carry_over_slots_to_new_session: true

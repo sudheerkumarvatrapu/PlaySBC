@@ -2160,12 +2160,15 @@ Content-Length: 0
     def test_regression_suite_can_target_all_b2bua_profiles(self):
         self.assertEqual(
             len(run_regression_suite.ALL_B2BUA_PROFILES),
-            len(run_b2bua_sipp_smoke.B2BUA_PROFILES) + 1,
+            len(run_b2bua_sipp_smoke.B2BUA_PROFILES) - len(run_regression_suite.OPTIONAL_B2BUA_PROFILES) + 1,
         )
         self.assertEqual(
             set(run_regression_suite.ALL_B2BUA_PROFILES),
-            set(run_b2bua_sipp_smoke.B2BUA_PROFILES) | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
+            (set(run_b2bua_sipp_smoke.B2BUA_PROFILES) - set(run_regression_suite.OPTIONAL_B2BUA_PROFILES))
+            | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
         )
+        self.assertIn("ai-rasa-real-lab", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
+        self.assertNotIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2188,6 +2191,7 @@ Content-Length: 0
         self.assertIn("load-5cps-60s-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-real-lab", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2599,6 +2603,16 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(args.rasa_mock_action, "transfer")
         self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
 
+    def test_dual_realm_real_rasa_profile_uses_optional_real_service(self):
+        args = run_dual_realm_profile.profile_args("ai-rasa-real-lab", "ai-real", "b2bua-Regression")
+
+        self.assertEqual(args.rasa_deployment, "real")
+        self.assertTrue(run_dual_realm_profile.needs_real_rasa(args))
+        self.assertFalse(run_dual_realm_profile.needs_ai_mock(args))
+        self.assertIn("172.28.0.61:5005", args.ai_voice_gateway["rasa_webhook_url"])
+        self.assertEqual(args.route_policies[0]["target"], "ai-gateway:rasa-support")
+        self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
+
     def test_dual_realm_ha_profiles_render_shared_state_and_pairing(self):
         basic = run_dual_realm_profile.profile_args("basic-signalling", "ha-all-basic", "b2bua-Regression")
         self.assertTrue(basic.ha["enabled"])
@@ -2686,7 +2700,11 @@ class RealTopologyTests(unittest.TestCase):
         deployment = (chart / "templates" / "deployment.yaml").read_text(encoding="utf-8")
         configmap = (chart / "templates" / "configmap.yaml").read_text(encoding="utf-8")
         rtpengine = (chart / "templates" / "rtpengine.yaml").read_text(encoding="utf-8")
+        rasa = (chart / "templates" / "rasa.yaml").read_text(encoding="utf-8")
         kind_values = (ROOT / "configs" / "kubernetes" / "kind-values.yaml").read_text(encoding="utf-8")
+        ai_rasa_values = (ROOT / "configs" / "kubernetes" / "ai-rasa-real-values.yaml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("readinessProbe:", deployment)
         self.assertIn("livenessProbe:", deployment)
@@ -2695,6 +2713,11 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("status.hostIP", rtpengine)
         self.assertIn("sessionAffinity", rtpengine)
         self.assertIn("rtpengine:\n  enabled: true", kind_values)
+        self.assertIn("name: {{ include \"playsbc.fullname\" . }}-rasa", rasa)
+        self.assertIn("rasa train", rasa)
+        self.assertIn("rasa run --enable-api", rasa)
+        self.assertIn("rasa:\n  enabled: true", ai_rasa_values)
+        self.assertIn("target: ai-gateway:rasa-support", ai_rasa_values)
 
     def test_dual_realm_load_profiles_use_bounded_media_capture(self):
         internal = run_dual_realm_profile.profile_args("load-5cps-60s", "internal-load", "b2bua-Regression")
@@ -2743,6 +2766,24 @@ class RealTopologyTests(unittest.TestCase):
             with self.subTest(profile=profile_name):
                 profile = run_k8s_regression.profile_values(profile_name, "unit-k8s")
                 self.assertEqual(run_k8s_regression.k8s_pcap_capture_roles(profile), expected)
+
+    def test_kubernetes_real_rasa_profile_is_selectable_and_rewrites_webhook(self):
+        self.assertIn("ai-rasa-real-lab", run_k8s_regression.SELECTABLE_PROFILES)
+        self.assertNotIn("ai-rasa-real-lab", run_k8s_regression.ALL_PROFILES)
+
+        args = run_k8s_regression.parse_args(["--profile", "ai-rasa-real-lab"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("ai-rasa-real-lab", "unit-k8s")
+        profile.ai_voice_gateway = {
+            **profile.ai_voice_gateway,
+            "rasa_webhook_url": f"http://{args.service}-rasa:5005/webhooks/rest/webhook",
+        }
+
+        self.assertTrue(run_k8s_regression.profile_uses_real_rasa(profile))
+        self.assertEqual(
+            runner.profile_config(profile)["ai_voice_gateway"]["rasa_webhook_url"],
+            "http://playsbc-playsbc-rasa:5005/webhooks/rest/webhook",
+        )
 
     def test_kubernetes_auth_failure_ladder_matches_second_401(self):
         args = run_k8s_regression.parse_args(["--all-profiles"])

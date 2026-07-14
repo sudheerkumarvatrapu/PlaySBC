@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from ai_gateway import AiVoiceConfig, AiVoiceGateway, DtmfIntentMapper, RasaRestClient, RasaRestConfig, TextToSpeechAdapter
+from tools import check_rasa
 
 
 class FakeHttpResponse:
@@ -49,6 +50,28 @@ class RasaRestClientTests(unittest.TestCase):
         self.assertEqual(captured["body"]["message"], "hello")
         self.assertEqual(captured["body"]["metadata"]["caller"], "alice")
         self.assertEqual(captured["content_type"], "application/json")
+
+    def test_check_rasa_posts_contract_message(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["timeout"] = timeout
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeHttpResponse([{"text": "rasa ok"}])
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            responses = check_rasa.post_rasa(
+                "http://rasa.example/webhooks/rest/webhook",
+                "sender-1",
+                "support",
+                2.5,
+            )
+
+        self.assertEqual(responses[0]["text"], "rasa ok")
+        self.assertEqual(captured["timeout"], 2.5)
+        self.assertEqual(captured["body"]["sender"], "sender-1")
+        self.assertEqual(captured["body"]["message"], "support")
+        self.assertEqual(captured["body"]["metadata"]["source"], "playsbc-check-rasa")
 
     def test_ai_voice_gateway_returns_rasa_turn_result(self):
         async def fake_send(_client, sender, message, metadata):

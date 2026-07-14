@@ -1,0 +1,43 @@
+sip_ip: 0.0.0.0
+sip_advertised_ip: 127.0.0.1
+b2bua_advertised_ip: 127.0.0.1
+sip_port: 5062
+tls_port: 5061
+sip_transport: udp
+rtp_min: 30000
+rtp_max: 30100
+default_codec: PCMU
+auth_realm: playsbc
+
+route_policies:
+  - name: ai-rasa-real-lab
+    match: ai-bot
+    target: ai-gateway:rasa-support
+    priority: 5
+  - name: registered-endpoints
+    match: "*"
+    target: registration
+    priority: 100
+
+ai_voice_gateway:
+  enabled: true
+  provider: rasa
+  bot_name: rasa-support
+  rasa_webhook_url: http://127.0.0.1:5005/webhooks/rest/webhook
+  rasa_timeout: 3.0
+  input_mode: scripted
+  initial_message: hello from playsbc real rasa
+  stt_provider: lab-scripted
+  stt_command: ""
+  tts_provider: text-only
+  tts_command: ""
+  response_mode: rest
+  bot_actions_enabled: true
+  fallback_text: Real Rasa lab bot is unavailable
+
+media_backend: internal
+rtpengine_url: udp://127.0.0.1:2223
+rtpengine_timeout: 3.0
+b2bua_ladder_logs: true
+reject_unknown_routes: false
+debug: true

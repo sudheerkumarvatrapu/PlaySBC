@@ -356,6 +356,19 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regressio
 
 The in-cluster Job runner creates temporary SIPp core/peer pods in the `playsbc` namespace, runs the 47-profile B2BUA catalog, restores Helm values, and writes `logs/k8s-job/<run-id>/k8s-reports/latest.html`. Full Kubernetes commands are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
 
+Optional real Rasa lab:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
+  --profile ai-rasa-real-lab \
+  --build-playsbc-image \
+  --build-runner-image \
+  --build-sipp-image \
+  --kind-load-images
+```
+
+The regular full suite uses mock Rasa for speed. The real Rasa profile deploys/trains a Rasa REST bot from `rasa/`; see [docs/AI_VOICE_GATEWAY.md](docs/AI_VOICE_GATEWAY.md).
+
 Cleanup:
 
 ```bash

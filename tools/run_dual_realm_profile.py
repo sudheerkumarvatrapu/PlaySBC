@@ -76,6 +76,7 @@ PEER_SBC_IP = "192.168.28.20"
 PEER_UA_IP = "192.168.28.30"
 PEER_RTPENGINE_IP = "192.168.28.40"
 RASA_MOCK_IP = "172.28.0.60"
+RASA_REAL_IP = "172.28.0.61"
 CORE_SUBNET = "172.28.0.0/24"
 PEER_SUBNET = "192.168.28.0/24"
 SIP_PORT = 5060
@@ -299,6 +300,17 @@ def needs_ai_mock(args: SimpleNamespace) -> bool:
         config.get("enabled")
         and str(config.get("provider", "rasa")).lower() == "rasa"
         and RASA_MOCK_IP in str(config.get("rasa_webhook_url", ""))
+    )
+
+
+def needs_real_rasa(args: SimpleNamespace) -> bool:
+    config = getattr(args, "ai_voice_gateway", {}) or {}
+    if not isinstance(config, dict):
+        return False
+    return bool(
+        config.get("enabled")
+        and str(config.get("provider", "rasa")).lower() == "rasa"
+        and str(getattr(args, "rasa_deployment", "")).lower() == "real"
     )
 
 
@@ -617,6 +629,27 @@ def wait_for_rasa_mock(env: dict[str, str], timeout: float = 15.0) -> None:
             return
         time.sleep(0.5)
     raise RuntimeError("Rasa mock did not become ready inside the core realm")
+
+
+def wait_for_real_rasa(env: dict[str, str], timeout: float = 90.0) -> None:
+    deadline = time.monotonic() + timeout
+    command = exec_command(
+        "playsbc",
+        "/app",
+        [
+            "python3",
+            "/app/tools/check_rasa.py",
+            "--url",
+            f"http://{RASA_REAL_IP}:5005/webhooks/rest/webhook",
+            "--timeout",
+            "2",
+        ],
+    )
+    while time.monotonic() < deadline:
+        if run(command, env=env, check=False).returncode == 0:
+            return
+        time.sleep(1.0)
+    raise RuntimeError("Real Rasa did not become ready inside the core realm")
 
 
 def capture_services(args: SimpleNamespace) -> list[str]:
@@ -1033,10 +1066,14 @@ def main() -> int:
         services = ["rtpengine", "playsbc", "core-agent", "peer-agent", "core-tools", "peer-tools", *captures]
         if needs_ai_mock(profile):
             services.insert(2, "rasa-mock")
+        if needs_real_rasa(profile):
+            services.insert(2, "rasa-real")
         run(compose_command("up", "-d", *services), env=env)
         wait_for_server(env)
         if needs_ai_mock(profile):
             wait_for_rasa_mock(env)
+        if needs_real_rasa(profile):
+            wait_for_real_rasa(env)
         if profile.media_backend == "rtpengine":
             wait_for_rtpengine(env)
         append_robot_phase(bundle, phase_records, active_phase, "passed", phase_started, phase_detail)
