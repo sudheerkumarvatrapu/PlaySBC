@@ -69,10 +69,26 @@ class RtpengineClient:
         loop = asyncio.get_running_loop()
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setblocking(False)
-            sock.connect((self.host, self.port))
-            await loop.sock_sendall(sock, packet)
-            response = await asyncio.wait_for(loop.sock_recv(sock, 65535), timeout=self.timeout)
+            await self._sendto(sock, packet, (self.host, self.port))
+            deadline = loop.time() + self.timeout
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                response = await asyncio.wait_for(loop.sock_recv(sock, 65535), timeout=remaining)
+                prefix, separator, _payload = response.partition(b" ")
+                if separator and prefix.decode("ascii", errors="replace") != cookie:
+                    continue
+                break
         return self.decode_response(response, cookie=cookie)
+
+    async def _sendto(self, sock: socket.socket, packet: bytes, address: Tuple[str, int]) -> None:
+        while True:
+            try:
+                sock.sendto(packet, address)
+                return
+            except (BlockingIOError, InterruptedError):
+                await asyncio.sleep(0)
 
     async def ping(self) -> Dict[str, Any]:
         return await self.request("ping", {})

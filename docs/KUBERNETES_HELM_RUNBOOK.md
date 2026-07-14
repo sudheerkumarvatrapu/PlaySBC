@@ -188,6 +188,77 @@ Expected RTPengine line:
 Startup complete
 ```
 
+## Run Kubernetes Regression
+
+Use this after PlaySBC and RTPengine are already deployed by Helm. The runner creates temporary SIPp pods inside the `playsbc` namespace, mounts the repo SIPp XMLs with a ConfigMap, executes the profiles against the Kubernetes Service, collects pod/deployment evidence, and writes the same robot-style HTML report format as the local B2BUA suite.
+
+One-time SIPp image prep for `kind`:
+
+```bash
+docker build -f docker/sipp.Dockerfile -t playsbc-sipp:local .
+kind load docker-image playsbc-sipp:local --name playsbc
+```
+
+If you are validating current local source changes instead of a published PlaySBC image, rebuild and roll the PlaySBC pod too:
+
+```bash
+docker build -f docker/playsbc.Dockerfile -t playsbc:k8s-regression .
+kind load docker-image playsbc:k8s-regression --name playsbc
+helm upgrade playsbc charts/playsbc \
+  --namespace playsbc \
+  --reuse-values \
+  --set image.repository=playsbc \
+  --set-string image.tag=k8s-regression \
+  --set image.pullPolicy=IfNotPresent
+kubectl -n playsbc rollout status deployment/playsbc-playsbc
+```
+
+Run all Kubernetes profiles:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression.py \
+  --all-profiles \
+  --namespace playsbc \
+  --service playsbc-playsbc \
+  --sipp-image playsbc-sipp:local
+```
+
+Or let the runner build and load the SIPp image before the first profile:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression.py \
+  --all-profiles \
+  --build-sipp-image \
+  --kind-load-image \
+  --kind-cluster playsbc
+```
+
+Current Kubernetes profiles:
+
+| Profile | What It Checks |
+| --- | --- |
+| `options` | SIPp pod sends OPTIONS to the PlaySBC Kubernetes Service and expects `200 OK`. |
+| `register-contact` | SIPp pod registers a contact through PlaySBC and expects registrar `200 OK`. |
+| `b2bua-signalling` | SIPp B registers in-cluster, SIPp A calls through PlaySBC B2BUA, and SIPp B answers the call. |
+
+Outputs:
+
+```text
+logs/k8s-Regression/<run-id>-<profile>/
+logs/k8s-reports/<run-id>.html
+logs/k8s-reports/latest.html
+```
+
+Useful single-profile commands:
+
+```bash
+python3 tools/run_k8s_regression.py --profile options
+python3 tools/run_k8s_regression.py --profile register-contact
+python3 tools/run_k8s_regression.py --profile b2bua-signalling
+```
+
 ## Inspect Helm Release
 
 ```bash

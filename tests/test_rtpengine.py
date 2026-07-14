@@ -1,3 +1,6 @@
+import asyncio
+import socket
+import threading
 import unittest
 
 from rtp.rtpengine import RtpengineClient, bdecode, bencode, decode_bytes, parse_rtpengine_url
@@ -132,6 +135,34 @@ class RtpengineEncodingTests(unittest.TestCase):
         self.assertIn(b"7:command5:query", packet)
         self.assertIn(b"8:from-tag6:from-a", packet)
         self.assertIn(b"6:to-tag4:to-b", packet)
+
+    def test_client_accepts_udp_service_reply_from_different_source(self):
+        request_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        request_socket.bind(("127.0.0.1", 0))
+        request_socket.settimeout(2)
+        port = request_socket.getsockname()[1]
+
+        def server():
+            try:
+                data, client_address = request_socket.recvfrom(65535)
+                cookie = data.partition(b" ")[0]
+                reply_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    reply_socket.sendto(cookie + b" " + bencode({"result": "pong"}), client_address)
+                finally:
+                    reply_socket.close()
+            finally:
+                request_socket.close()
+
+        thread = threading.Thread(target=server)
+        thread.start()
+        try:
+            client = RtpengineClient(f"udp://127.0.0.1:{port}", timeout=2)
+            response = asyncio.run(client.ping())
+        finally:
+            thread.join(timeout=2)
+
+        self.assertEqual(response["result"], "pong")
 
     def test_parse_url_requires_udp_host_and_port(self):
         endpoint = parse_rtpengine_url("udp://127.0.0.1:2223")

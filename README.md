@@ -375,6 +375,16 @@ curl http://127.0.0.1:8080/readyz
 curl http://127.0.0.1:8080/metrics
 ```
 
+Kubernetes regression:
+
+```bash
+docker build -f docker/sipp.Dockerfile -t playsbc-sipp:local .
+kind load docker-image playsbc-sipp:local --name playsbc
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression.py --all-profiles
+```
+
+Report: `logs/k8s-reports/latest.html`. Full Kubernetes commands are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
+
 Cleanup:
 
 ```bash
