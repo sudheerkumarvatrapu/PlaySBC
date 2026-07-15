@@ -32,7 +32,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Regression includes `ai-rasa-lab`: SIPp A calls `ai-bot`, PlaySBC answers, sends a Rasa REST turn, logs `log.ai`, and captures SIP/RTP/HTTP evidence.
 - Regression includes `ai-rasa-rtpengine`: RTP/RTCP is anchored by RTPengine while PlaySBC handles SIP/control and the Rasa turn.
 - Optional real Rasa lab is wired for local config, Docker dual-realm, Helm, and Kubernetes via `ai-rasa-real-lab`.
-- Branch `codex/ai-voice-real-speech-stt-tts` adds `ai-rasa-rtpengine-speech`: SIPp plays real Piper-generated G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, PlaySBC posts the transcript to real Rasa, Piper generates the bot-response WAV/RTP prompt, and RTP/RTCP stay anchored by RTPengine.
+- Version `1.2.0` adds `ai-rasa-rtpengine-speech`: SIPp plays real G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, PlaySBC posts the transcript to real Rasa, Piper generates the bot-response WAV/RTP prompt, and RTP/RTCP stay anchored by RTPengine.
 - Real Rasa project assets live under `rasa/`, with `tools/check_rasa.py` as the readiness gate.
 
 ### Lab Platform
@@ -41,7 +41,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Dual-homed PlaySBC and RTPengine with Docker-based SIPp agents
 - Helm-rendered configuration for every regression profile
 - Every dual-realm regression profile runs with HA enabled by default
-- SBC category logs, combined live PCAP, and Robot-style HTML report with single-call ladders
+- SBC category logs, combined live PCAP, and Robot-style HTML report with unified ladders and AI speech WAV playback evidence
 - Signalling, media, auth, routing, negative, soak, and 5 cps / 60-second CHT profiles
 - Kubernetes Helm lab with health probes, Secret-backed SIP users, RTPengine pairing, kind/minikube values, and a dialog-affinity experiment
 - HA regression profiles: `ha-shared-state-rtpengine`, `ha-options-health-recovery`, and `ha-node-draining`
