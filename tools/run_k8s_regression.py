@@ -40,6 +40,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
 )
 from tools.run_regression_suite import (  # noqa: E402
     ALL_B2BUA_PROFILES,
+    B2BUA_LOG_FILES,
     RASA_B2BUA_PROFILES,
     REAL_TOPOLOGY_PROFILE,
     cleanup_old_reports,
@@ -893,6 +894,7 @@ class K8sRegressionRunner:
             result = self.kubectl(*parts, check=False)
             (bundle / filename).write_text(result.stdout + result.stderr, encoding="utf-8")
         self.collect_playsbc_pod_evidence(bundle)
+        self.collect_playsbc_persistent_logs(bundle)
         if include_rasa:
             self.collect_rasa_pod_evidence(bundle)
 
@@ -1163,6 +1165,46 @@ class K8sRegressionRunner:
                 evidence.append(logs.stdout + logs.stderr)
         (bundle / "playsbc-pod-evidence.log").write_text("\n".join(evidence), encoding="utf-8")
 
+    def collect_playsbc_persistent_logs(self, bundle: Path) -> None:
+        selector = f"app.kubernetes.io/name=playsbc,app.kubernetes.io/instance={self.args.helm_release}"
+        result = self.kubectl("get", "pods", "-l", selector, "-o", "json", check=False)
+        try:
+            pods = json.loads(result.stdout or "{}").get("items", [])
+        except json.JSONDecodeError:
+            pods = []
+        copy_root = bundle / "playsbc-persistent-logs"
+        copy_root.mkdir(parents=True, exist_ok=True)
+        copy_log: list[str] = []
+        for pod in pods:
+            name = str(pod.get("metadata", {}).get("name", ""))
+            if not name:
+                continue
+            destination = copy_root / name
+            command = [
+                self.args.kubectl_bin,
+                "-n",
+                self.args.namespace,
+                "cp",
+                f"{name}:/tmp/playsbc-logs",
+                str(destination),
+                "-c",
+                "playsbc",
+            ]
+            completed = run_command(command, timeout=30)
+            copy_log.append(
+                f"{name}=returncode:{completed.returncode} stdout={completed.stdout.strip()} stderr={completed.stderr.strip()}"
+            )
+            if completed.returncode != 0:
+                continue
+            for filename in B2BUA_LOG_FILES:
+                source = destination / filename
+                if not source.exists():
+                    continue
+                with (bundle / filename).open("a", encoding="utf-8") as handle:
+                    handle.write(f"\n===== persistent pod/{name} {filename} =====\n")
+                    handle.write(source.read_text(encoding="utf-8", errors="replace").rstrip() + "\n")
+        (copy_root / "copy.log").write_text("\n".join(copy_log) + ("\n" if copy_log else ""), encoding="utf-8")
+
     def collect_rasa_pod_evidence(self, bundle: Path) -> None:
         selector = f"app.kubernetes.io/name=playsbc-rasa,app.kubernetes.io/instance={self.args.helm_release}"
         result = self.kubectl("get", "pods", "-l", selector, "-o", "json", check=False)
@@ -1250,6 +1292,7 @@ class K8sRegressionRunner:
         advertised_ip = "$POD_IP"
         return {
             "sip_ip": "0.0.0.0",
+            "log_dir": "/tmp/playsbc-logs",
             "sip_advertised_ip": advertised_ip,
             "b2bua_advertised_ip": advertised_ip,
             "sip_port": self.args.sip_port,

@@ -2777,6 +2777,8 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(runner.profile_config(internal)["sip_advertised_ip"], "$POD_IP")
         self.assertEqual(runner.profile_config(internal)["b2bua_advertised_ip"], "$POD_IP")
         self.assertEqual(runner.profile_config(rtpengine)["sip_advertised_ip"], "$POD_IP")
+        self.assertEqual(runner.profile_config(internal)["log_dir"], "/tmp/playsbc-logs")
+        self.assertEqual(runner.profile_config(rtpengine)["log_dir"], "/tmp/playsbc-logs")
 
     def test_kubernetes_pcap_capture_roles_follow_expected_traffic(self):
         cases = {
