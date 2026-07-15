@@ -2,6 +2,7 @@
 .DS_Store
 .pytest_cache
 .venv
+.models
 __pycache__
 *.pyc
 logs

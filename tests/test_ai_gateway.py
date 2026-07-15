@@ -139,7 +139,7 @@ class RasaRestClientTests(unittest.TestCase):
 
             self.assertTrue(wav.exists())
             self.assertGreater(extraction.packets, 0)
-            self.assertEqual(extraction.transcript, "support")
+            self.assertEqual(extraction.transcript, "I need support")
             self.assertEqual(extraction.payload_type, 0)
 
     def test_tts_adapter_generates_lab_rtp_prompt_when_real_engine_missing(self):

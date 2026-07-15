@@ -1,0 +1,4 @@
+transcript=I need support
+source=piper-tts en_US-lessac-low spoken phrase: I need support
+codec_outputs=PCMU,PCMA
+sample_rate=8000

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic G.711 speech PCAP fixtures for AI/Rasa regression."""
+"""Generate G.711 speech PCAP fixtures for AI/Rasa regression."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ if str(ROOT) not in sys.path:
 from ai_gateway.speech import lab_speech_pcm, pcm16_to_g711, read_wav_pcm, rtp_packet, write_rtp_pcap, write_wav  # noqa: E402
 
 
-def generate(output_dir: Path, transcript: str, seconds: float, source_wav: str = "") -> None:
+def generate(output_dir: Path, transcript: str, seconds: float, source_wav: str = "", source_label: str = "") -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    fixture_source = source_label or "deterministic_lab_speech"
     if source_wav:
-        pcm, sample_rate = read_wav_pcm(Path(source_wav))
-        if sample_rate != 8000:
-            raise ValueError("source WAV must be mono PCM16 at 8000 Hz")
+        pcm, sample_rate = read_wav_pcm(Path(source_wav), target_rate=8000)
+        fixture_source = source_label or str(Path(source_wav))
     else:
         pcm = lab_speech_pcm(transcript, seconds=seconds)
     wav_path = output_dir / "ai_rasa_speech_prompt.wav"
@@ -46,16 +46,29 @@ def generate(output_dir: Path, transcript: str, seconds: float, source_wav: str 
         write_rtp_pcap(pcap_path, packets, src_ip="10.10.10.10", src_port=36000, dst_ip="10.10.10.40", dst_port=30000)
         pcap_path.with_suffix(pcap_path.suffix + ".txt").write_text(transcript + "\n", encoding="utf-8")
     wav_path.with_suffix(wav_path.suffix + ".txt").write_text(transcript + "\n", encoding="utf-8")
+    (output_dir / "ai_rasa_speech_fixture.meta").write_text(
+        "\n".join(
+            [
+                f"transcript={transcript}",
+                f"source={fixture_source}",
+                "codec_outputs=PCMU,PCMA",
+                "sample_rate=8000",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate PlaySBC AI speech RTP PCAP fixtures")
     parser.add_argument("--output-dir", default=str(ROOT / "sipp" / "scenarios" / "pcap"))
-    parser.add_argument("--transcript", default="support")
+    parser.add_argument("--transcript", default="I need support")
     parser.add_argument("--seconds", type=float, default=1.6)
-    parser.add_argument("--source-wav", default="", help="Optional mono PCM16 8 kHz WAV speech source")
+    parser.add_argument("--source-wav", default="", help="Optional PCM16 WAV speech source; resampled/mixed to mono 8 kHz")
+    parser.add_argument("--source-label", default="", help="Human-readable source label for fixture metadata")
     args = parser.parse_args()
-    generate(Path(args.output_dir), args.transcript, args.seconds, args.source_wav)
+    generate(Path(args.output_dir), args.transcript, args.seconds, args.source_wav, args.source_label)
     return 0
 
 

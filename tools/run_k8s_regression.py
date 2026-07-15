@@ -90,9 +90,9 @@ RASA_PROFILE_LABELS = {
         "title": "AI Voice Gateway - Speech STT/TTS + Real Rasa",
         "suite": "Kubernetes AI/Rasa Speech RTPengine",
         "rasa_node": "Real Rasa Pod",
-        "stt_node": "Whisper/Vosk STT Boundary",
-        "tts_node": "Piper/Coqui TTS Boundary",
-        "mode": "SIPp G.711 speech PCAP, RTPengine RTP/RTCP anchor, decoded WAV into STT boundary, real Rasa REST response, and generated TTS RTP prompt evidence",
+        "stt_node": "Vosk STT",
+        "tts_node": "Piper TTS",
+        "mode": "SIPp plays real G.711 speech, RTPengine anchors RTP/RTCP, PlaySBC decodes RTP to WAV, Vosk transcribes, real Rasa responds, and Piper generates RTP prompt evidence",
     },
 }
 
@@ -1770,7 +1770,7 @@ class K8sRegressionRunner:
         if profile_name == "ai-rasa-rtpengine-speech":
             flow.sip("Core SIPp A", "RTPengine", "G.711 speech RTP")
             flow.sip("RTPengine", stt_node, "decode PCAP to WAV")
-            flow.sip(stt_node, "PlaySBC", "transcript: support")
+            flow.sip(stt_node, "PlaySBC", "transcript: i need support")
         else:
             flow.sip("PlaySBC", stt_node, "scripted STT")
             flow.sip(stt_node, "PlaySBC", "intent text")
@@ -1784,7 +1784,7 @@ class K8sRegressionRunner:
             flow.sip("PlaySBC", rasa_node, "REST POST /mock")
             flow.sip(rasa_node, "PlaySBC", "single reply")
         if profile_name == "ai-rasa-rtpengine-speech":
-            flow.sip("PlaySBC", tts_node, "bot text to Piper/Coqui")
+            flow.sip("PlaySBC", tts_node, "bot text to Piper")
             flow.sip(tts_node, "RTPengine", "G.711 TTS RTP prompt")
         else:
             flow.sip("PlaySBC", tts_node, "text-only TTS")

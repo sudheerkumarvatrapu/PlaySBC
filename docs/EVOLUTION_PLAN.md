@@ -32,7 +32,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Regression includes `ai-rasa-lab`: SIPp A calls `ai-bot`, PlaySBC answers, sends a Rasa REST turn, logs `log.ai`, and captures SIP/RTP/HTTP evidence.
 - Regression includes `ai-rasa-rtpengine`: RTP/RTCP is anchored by RTPengine while PlaySBC handles SIP/control and the Rasa turn.
 - Optional real Rasa lab is wired for local config, Docker dual-realm, Helm, and Kubernetes via `ai-rasa-real-lab`.
-- Branch `codex/ai-voice-real-speech-stt-tts` adds `ai-rasa-rtpengine-speech`: SIPp plays G.711 speech PCAP, PlaySBC decodes RTP to WAV for the STT boundary, posts the transcript to real Rasa, generates TTS WAV/RTP prompt evidence, and keeps media anchored by RTPengine.
+- Branch `codex/ai-voice-real-speech-stt-tts` adds `ai-rasa-rtpengine-speech`: SIPp plays real Piper-generated G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, PlaySBC posts the transcript to real Rasa, Piper generates the bot-response WAV/RTP prompt, and RTP/RTCP stay anchored by RTPengine.
 - Real Rasa project assets live under `rasa/`, with `tools/check_rasa.py` as the readiness gate.
 
 ### Lab Platform
@@ -56,7 +56,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Optional StatefulSet lab mode for scaled pods: provide stable identities such as `playsbc-0`/`playsbc-1` and `rtpengine-0`/`rtpengine-1` for deterministic PlaySBC-to-RTPengine pairing, ordered rollout tests, and fixed-node HA experiments.
 - External shared state backend option such as Redis/PostgreSQL after the SQLite lab store proves the behavior
 
-- Installable real STT/TTS engines in lab images: Whisper or Vosk for STT and Piper or Coqui for TTS. The adapter boundary and regression artifacts are present; bundled engine images and model management are next.
+- Add optional Whisper and Coqui image variants beside the current Vosk/Piper speech lab path.
 
 ## Later
 

@@ -144,11 +144,57 @@ def write_wav(path: Path, pcm16: bytes, sample_rate: int = SAMPLE_RATE) -> None:
         wav.writeframes(pcm16)
 
 
-def read_wav_pcm(path: Path) -> tuple[bytes, int]:
+def resample_pcm16_mono(pcm16: bytes, source_rate: int, target_rate: int = SAMPLE_RATE) -> bytes:
+    if source_rate <= 0 or target_rate <= 0:
+        raise ValueError("sample rates must be positive")
+    if source_rate == target_rate:
+        return pcm16
+    samples = [sample for (sample,) in struct.iter_unpack("<h", pcm16)]
+    if not samples:
+        return b""
+    if len(samples) == 1:
+        return struct.pack("<h", samples[0])
+
+    target_count = max(1, round(len(samples) * target_rate / source_rate))
+    output = bytearray()
+    for index in range(target_count):
+        source_position = index * source_rate / target_rate
+        left = min(int(source_position), len(samples) - 1)
+        right = min(left + 1, len(samples) - 1)
+        fraction = source_position - left
+        value = int(round(samples[left] + ((samples[right] - samples[left]) * fraction)))
+        value = max(-32768, min(32767, value))
+        output.extend(struct.pack("<h", value))
+    return bytes(output)
+
+
+def mixdown_pcm16(raw: bytes, channels: int) -> bytes:
+    if channels <= 0:
+        raise ValueError("speech WAV must have at least one channel")
+    if channels == 1:
+        return raw
+    frame_size = channels * 2
+    if len(raw) % frame_size:
+        raw = raw[: len(raw) - (len(raw) % frame_size)]
+    output = bytearray()
+    for frame_index in range(0, len(raw), frame_size):
+        frame = raw[frame_index : frame_index + frame_size]
+        values = [sample for (sample,) in struct.iter_unpack("<h", frame)]
+        mixed = int(round(sum(values) / len(values)))
+        output.extend(struct.pack("<h", mixed))
+    return bytes(output)
+
+
+def read_wav_pcm(path: Path, target_rate: Optional[int] = None) -> tuple[bytes, int]:
     with wave.open(str(path), "rb") as wav:
-        if wav.getnchannels() != 1 or wav.getsampwidth() != 2:
-            raise ValueError("speech WAV must be mono PCM16")
-        return wav.readframes(wav.getnframes()), wav.getframerate()
+        if wav.getsampwidth() != 2:
+            raise ValueError("speech WAV must be PCM16")
+        sample_rate = wav.getframerate()
+        pcm = mixdown_pcm16(wav.readframes(wav.getnframes()), wav.getnchannels())
+        if target_rate is not None and sample_rate != target_rate:
+            pcm = resample_pcm16_mono(pcm, sample_rate, target_rate)
+            sample_rate = target_rate
+        return pcm, sample_rate
 
 
 def pcap_records(path: Path) -> Iterator[tuple[float, bytes]]:
@@ -329,7 +375,7 @@ def wav_to_rtp_packets(
     timestamp_base: int = 88000,
     ssrc: int = 0xA1775001,
 ) -> list[bytes]:
-    pcm, sample_rate = read_wav_pcm(wav_path)
+    pcm, sample_rate = read_wav_pcm(wav_path, target_rate=SAMPLE_RATE)
     if sample_rate != SAMPLE_RATE:
         raise ValueError(f"speech WAV sample rate must be {SAMPLE_RATE}, got {sample_rate}")
     payload_type = codec_payload_type(codec)

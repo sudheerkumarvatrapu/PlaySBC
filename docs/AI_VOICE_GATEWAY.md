@@ -6,9 +6,9 @@ PlaySBC now has an AI Voice Gateway path for lab calls.
 SIPp A / caller
   -> PlaySBC SIP route policy: ai-gateway:rasa-support
      -> PlaySBC answers the SIP call and owns the RTP session
-        -> STT/intent adapter stage: lab-scripted, Whisper, or Vosk boundary
+        -> STT/intent adapter stage: lab-scripted, Whisper, or Vosk
            -> Rasa REST webhook
-              -> TTS adapter stage: text-only, Piper, or Coqui boundary
+              -> TTS adapter stage: text-only, Piper, or Coqui
                  -> voice/media response stage
 ```
 
@@ -18,13 +18,13 @@ SIPp A / caller
 - **Routing:** `route_policies[].target` can use `ai-gateway:<bot-name>`.
 - **Media:** AI calls can use internal RTP input or RTPengine anchoring. The RTPengine profile keeps RTP/RTCP on RTPengine and leaves PlaySBC as SIP/control plus AI orchestration.
 - **Rasa integration:** PlaySBC posts `sender`, `message`, and call metadata to the Rasa REST webhook. The default regression uses a deterministic mock; real-Rasa profiles start a real Rasa REST bot.
-- **STT/TTS boundary:** Real engine adapters are named in config. `lab-scripted` and `text-only` keep regression portable; `whisper`/`vosk` and `piper`/`coqui` can be enabled with local command wrappers. When those commands are not installed, the speech regression uses deterministic lab fallback artifacts and logs `engine_ready=false`.
-- **Speech evidence:** The speech profile decodes G.711 RTP PCAP to PCM/WAV before STT and generates a G.711 RTP prompt PCAP after TTS.
+- **STT/TTS engines:** `ai-rasa-rtpengine-speech` uses Vosk STT and Piper TTS through wrapper commands. Mock profiles still use portable scripted/text modes.
+- **Speech evidence:** The speech profile plays a real Piper-generated G.711 speech PCAP saying `I need support`, decodes RTP to PCM/WAV for Vosk, sends the transcript to Rasa, and generates a G.711 RTP prompt PCAP from Piper's bot-response WAV.
 - **Long replies:** Rasa multi-message responses are preserved and shown as response chunks in the AI ladder.
 - **Bot actions:** Rasa `custom` payloads can request `join`, `transfer`, or `release`. Today these are accepted and logged as control-plane actions; SIP REFER/re-INVITE/conference execution is the next deeper step.
 - **Logging:** `log.ai` records AI call start/end, STT input, Rasa request/response, TTS output, and the AI call ladder.
 
-The SIPp media PCAP used by the older tests is G.711 lab audio. The speech profile adds dedicated G.711u/G.711a speech fixtures with sidecar transcripts, decoded WAV evidence, and generated TTS RTP prompt evidence.
+The SIPp media PCAP used by the older tests is G.711 lab audio. The speech profile adds dedicated G.711u/G.711a speech fixtures generated from real Piper speech, sidecar transcripts, decoded WAV evidence, Vosk STT evidence, and generated TTS RTP prompt evidence.
 
 ## Config Shape
 
@@ -57,9 +57,11 @@ ai_voice_gateway:
   input_mode: speech
   speech_input_pcap: sipp/scenarios/pcap/ai_rasa_speech_g711u.pcap
   speech_input_codec: PCMU
-  speech_transcript: support
-  stt_provider: whisper
+  speech_transcript: I need support
+  stt_provider: vosk
+  stt_command: python3 tools/vosk_stt_wrapper.py --audio {audio_path}
   tts_provider: piper
+  tts_command: python3 tools/piper_tts_wrapper.py --text "{text}" --output {audio_path}
   tts_output_codec: PCMU
 ```
 
@@ -70,7 +72,7 @@ ai_voice_gateway:
 | `ai-rasa-lab` | Mock Rasa REST, internal media | SIPp A calls `ai-bot`; PlaySBC terminates the AI call, consumes RTP input internally, and sends one deterministic mock Rasa REST turn | `log.ai`, `log.sip`, `log.media`, `capture.pcap`, HTML ladder with `Mock Rasa REST` |
 | `ai-rasa-rtpengine` | Mock Rasa REST, RTPengine media | Same AI call, but RTP/RTCP is anchored by RTPengine; mock Rasa returns multiple response chunks plus a transfer action | `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with `Mock Rasa + Action` |
 | `ai-rasa-real-lab` | Real Rasa pod, RTPengine media | Kubernetes starts and trains a real Rasa REST pod, PlaySBC posts to that service, and RTP/RTCP remains anchored by RTPengine | `rasa.log`, `rasa-pod-evidence.log`, `log.ai`, `log.sip`, `log.media`, HTML ladder with `Real Rasa Pod` |
-| `ai-rasa-rtpengine-speech` | Real Rasa pod, speech STT/TTS boundary | SIPp plays G.711 speech, PlaySBC decodes the RTP PCAP to WAV, feeds the transcript through the Whisper/Vosk boundary, posts to Rasa, and generates Piper/Coqui RTP prompt evidence | speech PCAP/WAV/TTS artifacts, `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with STT/Rasa/TTS nodes |
+| `ai-rasa-rtpengine-speech` | Real Rasa pod, real speech STT/TTS | SIPp plays real G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, Rasa returns the support response, and Piper generates G.711 RTP prompt evidence | speech PCAP/WAV/TTS artifacts, `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with Vosk/Rasa/Piper nodes |
 | Unit: Rasa REST client | JSON contract | Validates Rasa request/response JSON shape | `tests/test_ai_gateway.py` |
 | Unit: AI route policy | SIP route target | Validates `ai-gateway:<bot>` routing | `tests/test_mini_call_server.py` |
 | Unit: dual-realm profile | Harness wiring | Validates mock Rasa service and `log.ai` bundle wiring | `tests/test_sipp_harness.py` |
@@ -78,6 +80,29 @@ ai_voice_gateway:
 ## Real Rasa Lab
 
 The real Rasa profiles are optional by design. The normal `--all-b2bua-profiles` suite stays fast and deterministic with the mock service. Use `ai-rasa-real-lab` or `ai-rasa-rtpengine-speech` when you want to prove the actual Rasa REST channel.
+
+For direct local speech runs, install the real engines once:
+
+```bash
+python3 -m pip install --user piper-tts vosk
+python3 -m piper.download_voices en_US-lessac-low --download-dir .models/piper
+
+python3 - <<'PY'
+from pathlib import Path
+import urllib.request
+import zipfile
+
+root = Path(".models/vosk")
+root.mkdir(parents=True, exist_ok=True)
+archive = root / "vosk-model-small-en-us-0.15.zip"
+if not archive.exists():
+    urllib.request.urlretrieve("https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip", archive)
+model_dir = root / "vosk-model-small-en-us-0.15"
+if not model_dir.exists():
+    with zipfile.ZipFile(archive) as zf:
+        zf.extractall(root)
+PY
+```
 
 ### Direct Local
 
@@ -149,6 +174,6 @@ kind load docker-image rasa/rasa:3.6.20-full --name playsbc
 
 ## Still To Build
 
-- Package actual Whisper/Vosk/Piper/Coqui binaries and models into optional lab images.
+- Add Whisper and Coqui alternatives beside the current Vosk/Piper path.
 - Stream longer bot responses instead of one turn per call.
 - Execute bot actions with SIP REFER/re-INVITE, conference join, and bot-driven release.

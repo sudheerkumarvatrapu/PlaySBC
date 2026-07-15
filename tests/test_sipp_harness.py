@@ -2813,8 +2813,10 @@ class RealTopologyTests(unittest.TestCase):
 
         self.assertEqual(run_k8s_regression.media_pcap_path(profile, "uac"), "/scenarios/pcap/ai_rasa_speech_g711u.pcap")
         self.assertTrue(run_k8s_regression.profile_uses_real_rasa(profile))
-        self.assertEqual(profile.ai_voice_gateway["stt_provider"], "whisper")
+        self.assertEqual(profile.ai_voice_gateway["stt_provider"], "vosk")
+        self.assertIn("vosk_stt_wrapper.py", profile.ai_voice_gateway["stt_command"])
         self.assertEqual(profile.ai_voice_gateway["tts_provider"], "piper")
+        self.assertIn("piper_tts_wrapper.py", profile.ai_voice_gateway["tts_command"])
 
     def test_kubernetes_rasa_profiles_have_distinct_report_names_and_ladders(self):
         args = run_k8s_regression.parse_args(["--rasa-profiles"])
@@ -2835,7 +2837,7 @@ class RealTopologyTests(unittest.TestCase):
             "ai-rasa-rtpengine-speech": (
                 "AI Voice Gateway - Speech STT/TTS + Real Rasa",
                 "Real Rasa Pod",
-                "SIPp G.711 speech PCAP",
+                "SIPp plays real G.711 speech",
             ),
         }
 
