@@ -13,7 +13,7 @@
   <img alt="G711 Transcoding" src="https://img.shields.io/badge/-G711u%20%7C%20G711a-9333EA?style=flat-square">
   <img alt="RTPengine" src="https://img.shields.io/badge/-RTPengine-0F766E?style=flat-square">
   <img alt="AI Rasa" src="https://img.shields.io/badge/-AI%20Rasa%20Gateway-BE185D?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/-v1.1.0-111827?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/-v1.1.1-111827?style=flat-square">
   <img alt="License MIT" src="https://img.shields.io/badge/-MIT%20License-F59E0B?style=flat-square">
 </p>
 
@@ -23,10 +23,10 @@ Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, HA st
 
 ## Status
 
-- Version: `1.1.0`
+- Version: `1.1.1`
 - License: MIT
-- Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v1.1.0>
-- Images: `ghcr.io/sudheerkumarvatrapu/playsbc:1.1.0`, `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.1.0`, `ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.1.0`, `ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.1.0`
+- Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v1.1.1>
+- Images: `ghcr.io/sudheerkumarvatrapu/playsbc:1.1.1`, `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.1.1`, `ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.1.1`, `ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.1.1`
 - Security: CodeQL, Dependency Review, Trivy, and Checkov run in GitHub Actions.
 
 The Helm package contains Kubernetes manifests and configuration. Kubernetes pulls the PlaySBC and RTPengine images at deploy time.
@@ -299,18 +299,18 @@ kind steps:
 cd PlaySBC
 kind create cluster --name playsbc
 
-docker build -f docker/playsbc.Dockerfile -t playsbc:1.1.0 .
-docker build -f docker/rtpengine.Dockerfile -t playsbc-rtpengine:1.1.0 .
-kind load docker-image playsbc:1.1.0 playsbc-rtpengine:1.1.0 --name playsbc
+docker build -f docker/playsbc.Dockerfile -t playsbc:1.1.1 .
+docker build -f docker/rtpengine.Dockerfile -t playsbc-rtpengine:1.1.1 .
+kind load docker-image playsbc:1.1.1 playsbc-rtpengine:1.1.1 --name playsbc
 
 helm upgrade --install playsbc charts/playsbc \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=playsbc \
-  --set-string image.tag=1.1.0 \
+  --set-string image.tag=1.1.1 \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.1.0
+  --set-string rtpengine.image.tag=1.1.1
 
 kubectl -n playsbc rollout status deployment/playsbc-playsbc
 kubectl -n playsbc get pods,services
@@ -323,17 +323,17 @@ cd PlaySBC
 minikube start
 eval $(minikube docker-env)
 
-docker build -f docker/playsbc.Dockerfile -t playsbc:1.1.0 .
-docker build -f docker/rtpengine.Dockerfile -t playsbc-rtpengine:1.1.0 .
+docker build -f docker/playsbc.Dockerfile -t playsbc:1.1.1 .
+docker build -f docker/rtpengine.Dockerfile -t playsbc-rtpengine:1.1.1 .
 
 helm upgrade --install playsbc charts/playsbc \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=playsbc \
-  --set-string image.tag=1.1.0 \
+  --set-string image.tag=1.1.1 \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.1.0
+  --set-string rtpengine.image.tag=1.1.1
 
 kubectl -n playsbc rollout status deployment/playsbc-playsbc
 minikube service -n playsbc playsbc-playsbc --url
@@ -396,14 +396,14 @@ Deploy directly from the GitHub release chart:
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.1.0/playsbc-1.1.0.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.1.1/playsbc-1.1.1.tgz \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.1.0 \
+  --set-string image.tag=1.1.1 \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.1.0
+  --set-string rtpengine.image.tag=1.1.1
 ```
 
 Verify:
@@ -452,11 +452,11 @@ Deploy PlaySBC only and point it to the external RTPengine:
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.1.0/playsbc-1.1.0.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.1.1/playsbc-1.1.1.tgz \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.1.0 \
+  --set-string image.tag=1.1.1 \
   --set rtpengine.enabled=false \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://rtpengine.example.net:2223
@@ -477,13 +477,13 @@ kubectl -n playsbc logs deployment/playsbc-playsbc --tail=100
 Local build:
 
 ```bash
-docker build -f docker/playsbc.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc:1.1.0 .
-docker build -f docker/rtpengine.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.1.0 .
-docker build -f docker/k8s-regression-runner.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.1.0 .
-docker build -f docker/sipp.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.1.0 .
+docker build -f docker/playsbc.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc:1.1.1 .
+docker build -f docker/rtpengine.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.1.1 .
+docker build -f docker/k8s-regression-runner.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.1.1 .
+docker build -f docker/sipp.Dockerfile -t ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.1.1 .
 ```
 
-GitHub Actions publishes images automatically when `main` or a `v*` tag is pushed. The `v1.1.0` tag publishes the `1.1.0` and `1.1` image tags.
+GitHub Actions publishes images automatically when `main` or a `v*` tag is pushed. The `v1.1.1` tag publishes the `1.1.1` and `1.1` image tags.
 
 For chart values and Kubernetes operations, use [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
 
