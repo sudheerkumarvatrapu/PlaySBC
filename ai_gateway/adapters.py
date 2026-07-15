@@ -11,7 +11,10 @@ import asyncio
 import shlex
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Sequence
+
+from .speech import synthesize_lab_tts_to_rtp, wav_to_rtp_packets, write_rtp_pcap
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class TtsResult:
     engine_ready: bool
     duration_seconds: float
     audio_path: str = ""
+    rtp_path: str = ""
     error: str = ""
 
 
@@ -45,13 +49,20 @@ class SpeechToTextAdapter:
         started = time.monotonic()
         provider = self.provider.lower()
         if provider in {"", "scripted", "lab-scripted"}:
-            return SttResult("lab-scripted", fallback_text, False, True, time.monotonic() - started)
+            return SttResult("lab-scripted", fallback_text, bool(audio_path), True, time.monotonic() - started)
 
         if provider not in {"whisper", "vosk"}:
             return SttResult(provider, fallback_text, False, False, time.monotonic() - started, "unsupported_stt_provider")
 
         if not self.command:
-            return SttResult(provider, fallback_text, False, False, time.monotonic() - started, "stt_command_not_configured")
+            return SttResult(
+                provider,
+                fallback_text,
+                bool(audio_path),
+                False,
+                time.monotonic() - started,
+                "stt_command_not_configured; used_lab_transcript" if audio_path else "stt_command_not_configured",
+            )
 
         command = format_engine_command(self.command, text=fallback_text, audio_path=audio_path)
         try:
@@ -77,7 +88,13 @@ class TextToSpeechAdapter:
         self.provider = provider
         self.command = command
 
-    async def synthesize(self, text: str, output_path: str = "") -> TtsResult:
+    async def synthesize(
+        self,
+        text: str,
+        output_path: str = "",
+        rtp_path: str = "",
+        codec: str = "PCMU",
+    ) -> TtsResult:
         started = time.monotonic()
         provider = self.provider.lower()
         if provider in {"", "text-only", "lab-text"}:
@@ -87,6 +104,19 @@ class TextToSpeechAdapter:
             return TtsResult(provider, text, False, False, False, time.monotonic() - started, error="unsupported_tts_provider")
 
         if not self.command:
+            if output_path and rtp_path:
+                prompt = synthesize_lab_tts_to_rtp(text, Path(output_path), Path(rtp_path), codec=codec)
+                return TtsResult(
+                    provider,
+                    text,
+                    True,
+                    True,
+                    False,
+                    time.monotonic() - started,
+                    audio_path=prompt.wav_path,
+                    rtp_path=prompt.rtp_pcap_path,
+                    error="tts_command_not_configured; used_lab_fallback",
+                )
             return TtsResult(provider, text, False, False, False, time.monotonic() - started, error="tts_command_not_configured")
 
         command = format_engine_command(self.command, text=text, audio_path=output_path)
@@ -105,7 +135,33 @@ class TextToSpeechAdapter:
             return TtsResult(provider, text, False, False, False, time.monotonic() - started, error=detail)
 
         audio_path = output_path or stdout.decode("utf-8", errors="replace").strip()
-        return TtsResult(provider, text, bool(audio_path), False, True, time.monotonic() - started, audio_path=audio_path)
+        rtp_generated = False
+        if audio_path and rtp_path:
+            try:
+                packets = wav_to_rtp_packets(Path(audio_path), codec=codec)
+                write_rtp_pcap(Path(rtp_path), packets)
+                rtp_generated = True
+            except Exception as exc:  # pragma: no cover - depends on external TTS output.
+                return TtsResult(
+                    provider,
+                    text,
+                    bool(audio_path),
+                    False,
+                    True,
+                    time.monotonic() - started,
+                    audio_path=audio_path,
+                    error=f"tts_rtp_prompt_failed: {exc}",
+                )
+        return TtsResult(
+            provider,
+            text,
+            bool(audio_path),
+            rtp_generated,
+            True,
+            time.monotonic() - started,
+            audio_path=audio_path,
+            rtp_path=rtp_path if rtp_generated else "",
+        )
 
 
 def format_engine_command(command: str, *, text: str, audio_path: str = "") -> Sequence[str]:

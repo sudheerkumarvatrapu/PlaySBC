@@ -367,7 +367,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regressio
   --kind-load-images
 ```
 
-The regular full suite uses the existing `logs/k8s-job` layout. Rasa-only mode deletes old `logs/RASA-Regression` output and writes `logs/RASA-Regression/<run-id>/RASA-reports/latest.html`. It runs the mock AI profiles plus the real Rasa REST bot from `rasa/`; see [docs/AI_VOICE_GATEWAY.md](docs/AI_VOICE_GATEWAY.md).
+The regular full suite uses the existing `logs/k8s-job` layout. Rasa-only mode deletes old `logs/RASA-Regression` output and writes `logs/RASA-Regression/<run-id>/RASA-reports/latest.html`. It runs mock AI, real Rasa, and speech STT/TTS boundary profiles; see [docs/AI_VOICE_GATEWAY.md](docs/AI_VOICE_GATEWAY.md).
 
 Cleanup:
 

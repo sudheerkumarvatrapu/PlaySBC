@@ -52,7 +52,7 @@ from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 ALL_PROFILES = ALL_B2BUA_PROFILES
 CATALOG_PROFILES = (*ALL_PROFILES, *OPTIONAL_B2BUA_PROFILES)
-RASA_PROFILES = ("ai-rasa-lab", "ai-rasa-rtpengine", "ai-rasa-real-lab")
+RASA_PROFILES = ("ai-rasa-lab", "ai-rasa-rtpengine", "ai-rasa-real-lab", "ai-rasa-rtpengine-speech")
 SELECTABLE_PROFILES = (*SMOKE_PROFILES, *CATALOG_PROFILES)
 LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
 DEFAULT_OUTPUT_ROOT = str(ROOT / "logs" / "k8s-Regression")
@@ -85,6 +85,14 @@ RASA_PROFILE_LABELS = {
         "stt_node": "Scripted STT",
         "tts_node": "Text TTS",
         "mode": "real Rasa deployment, trained in-cluster, RTPengine RTP/RTCP anchor, REST webhook proof",
+    },
+    "ai-rasa-rtpengine-speech": {
+        "title": "AI Voice Gateway - Speech STT/TTS + Real Rasa",
+        "suite": "Kubernetes AI/Rasa Speech RTPengine",
+        "rasa_node": "Real Rasa Pod",
+        "stt_node": "Whisper/Vosk STT Boundary",
+        "tts_node": "Piper/Coqui TTS Boundary",
+        "mode": "SIPp G.711 speech PCAP, RTPengine RTP/RTCP anchor, decoded WAV into STT boundary, real Rasa REST response, and generated TTS RTP prompt evidence",
     },
 }
 
@@ -289,7 +297,8 @@ def sdp_payloads(profile: SimpleNamespace, role: str) -> tuple[str, str]:
 
 def media_pcap_path(profile: SimpleNamespace, role: str) -> str:
     codec = uas_media_codec(profile) if role == "uas" else str(getattr(profile, "media_codec", "PCMU")).upper()
-    relative = MEDIA_PCAPS.get(codec, MEDIA_PCAPS["PCMU"])
+    configured = str(getattr(profile, "media_pcap", "") or "")
+    relative = configured if role == "uac" and configured else MEDIA_PCAPS.get(codec, MEDIA_PCAPS["PCMU"])
     return f"/scenarios/{relative}"
 
 
@@ -1758,8 +1767,13 @@ class K8sRegressionRunner:
             flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
-        flow.sip("PlaySBC", stt_node, "scripted STT")
-        flow.sip(stt_node, "PlaySBC", "intent text")
+        if profile_name == "ai-rasa-rtpengine-speech":
+            flow.sip("Core SIPp A", "RTPengine", "G.711 speech RTP")
+            flow.sip("RTPengine", stt_node, "decode PCAP to WAV")
+            flow.sip(stt_node, "PlaySBC", "transcript: support")
+        else:
+            flow.sip("PlaySBC", stt_node, "scripted STT")
+            flow.sip(stt_node, "PlaySBC", "intent text")
         if profile_uses_real_rasa(profile):
             flow.sip("PlaySBC", rasa_node, "REST POST /webhook")
             flow.sip(rasa_node, "PlaySBC", "REST 200 support")
@@ -1769,8 +1783,12 @@ class K8sRegressionRunner:
         else:
             flow.sip("PlaySBC", rasa_node, "REST POST /mock")
             flow.sip(rasa_node, "PlaySBC", "single reply")
-        flow.sip("PlaySBC", tts_node, "text-only TTS")
-        flow.sip(tts_node, "PlaySBC", "no RTP prompt")
+        if profile_name == "ai-rasa-rtpengine-speech":
+            flow.sip("PlaySBC", tts_node, "bot text to Piper/Coqui")
+            flow.sip(tts_node, "RTPengine", "G.711 TTS RTP prompt")
+        else:
+            flow.sip("PlaySBC", tts_node, "text-only TTS")
+            flow.sip(tts_node, "PlaySBC", "no RTP prompt")
         flow.sip("Core SIPp A", "PlaySBC", "BYE")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
 

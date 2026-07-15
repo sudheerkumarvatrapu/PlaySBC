@@ -221,7 +221,7 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
-This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, and `ai-rasa-real-lab`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
+This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, `ai-rasa-real-lab`, and `ai-rasa-rtpengine-speech`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
 
 If the kind node cannot pull DockerHub images, load Rasa first:
 
@@ -335,7 +335,7 @@ Coverage:
 - UDP, TCP, TLS/SRTP interworking, RTCP, and DTMF profiles.
 - REGISTER, digest auth success/failure, registered inbound/outbound calls.
 - ESBC route policy, trunk, failover, normalization, admission, health, and metrics profiles.
-- AI/Rasa lab profiles. The default catalog uses mock Rasa; run `--profile ai-rasa-real-lab` for real Rasa.
+- AI/Rasa lab profiles. The default catalog uses mock Rasa; run `--profile ai-rasa-real-lab` or `--profile ai-rasa-rtpengine-speech` for real Rasa.
 - Negative SIP cases such as invalid BYE, unknown route, failed outbound leg, CANCEL, and retransmission.
 - Small load, soak, and 5 cps / 60 second CHT load profiles.
 

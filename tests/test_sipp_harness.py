@@ -2170,6 +2170,8 @@ Content-Length: 0
         )
         self.assertIn("ai-rasa-real-lab", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertNotIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
+        self.assertNotIn("ai-rasa-rtpengine-speech", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2193,6 +2195,7 @@ Content-Length: 0
         self.assertIn("tcp-rtpengine-transcoding", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-real-lab", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2805,6 +2808,14 @@ class RealTopologyTests(unittest.TestCase):
             "http://playsbc-playsbc-rasa:5005/webhooks/rest/webhook",
         )
 
+    def test_kubernetes_speech_profile_uses_speech_pcap_and_real_engine_boundaries(self):
+        profile = run_k8s_regression.profile_values("ai-rasa-rtpengine-speech", "unit-rasa")
+
+        self.assertEqual(run_k8s_regression.media_pcap_path(profile, "uac"), "/scenarios/pcap/ai_rasa_speech_g711u.pcap")
+        self.assertTrue(run_k8s_regression.profile_uses_real_rasa(profile))
+        self.assertEqual(profile.ai_voice_gateway["stt_provider"], "whisper")
+        self.assertEqual(profile.ai_voice_gateway["tts_provider"], "piper")
+
     def test_kubernetes_rasa_profiles_have_distinct_report_names_and_ladders(self):
         args = run_k8s_regression.parse_args(["--rasa-profiles"])
         runner = run_k8s_regression.K8sRegressionRunner(args, "unit-rasa")
@@ -2820,6 +2831,11 @@ class RealTopologyTests(unittest.TestCase):
                 "AI Voice Gateway - Real Rasa Pod + RTPengine",
                 "Real Rasa Pod",
                 "real Rasa deployment",
+            ),
+            "ai-rasa-rtpengine-speech": (
+                "AI Voice Gateway - Speech STT/TTS + Real Rasa",
+                "Real Rasa Pod",
+                "SIPp G.711 speech PCAP",
             ),
         }
 

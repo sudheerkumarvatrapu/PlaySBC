@@ -3,7 +3,11 @@ import json
 import unittest
 from unittest import mock
 
+from pathlib import Path
+import tempfile
+
 from ai_gateway import AiVoiceConfig, AiVoiceGateway, DtmfIntentMapper, RasaRestClient, RasaRestConfig, TextToSpeechAdapter
+from ai_gateway.speech import decode_rtp_pcap_to_wav, iter_rtp_payloads
 from tools import check_rasa
 
 
@@ -125,6 +129,31 @@ class RasaRestClientTests(unittest.TestCase):
         self.assertFalse(result.engine_ready)
         self.assertFalse(result.audio_generated)
         self.assertEqual(result.error, "tts_command_not_configured")
+
+    def test_speech_pcap_decodes_to_wav_and_sidecar_transcript(self):
+        root = Path(__file__).resolve().parents[1]
+        pcap = root / "sipp" / "scenarios" / "pcap" / "ai_rasa_speech_g711u.pcap"
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "speech.wav"
+            extraction = decode_rtp_pcap_to_wav(pcap, wav, codec="PCMU")
+
+            self.assertTrue(wav.exists())
+            self.assertGreater(extraction.packets, 0)
+            self.assertEqual(extraction.transcript, "support")
+            self.assertEqual(extraction.payload_type, 0)
+
+    def test_tts_adapter_generates_lab_rtp_prompt_when_real_engine_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "tts.wav"
+            pcap = Path(tmp) / "tts.pcap"
+            result = asyncio.run(TextToSpeechAdapter("piper").synthesize("Support path is ready", str(wav), str(pcap)))
+
+            self.assertFalse(result.engine_ready)
+            self.assertTrue(result.audio_generated)
+            self.assertTrue(result.rtp_prompt_generated)
+            self.assertTrue(wav.exists())
+            self.assertTrue(pcap.exists())
+            self.assertGreater(len(list(iter_rtp_payloads(pcap, payload_type=0))), 0)
 
     def test_dtmf_mapper_translates_digits_to_text(self):
         mapper = DtmfIntentMapper({"1": "balance", "2": "support"})

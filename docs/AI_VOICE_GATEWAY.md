@@ -17,13 +17,14 @@ SIPp A / caller
 - **SIP termination:** PlaySBC terminates the inbound SIP call as an AI endpoint.
 - **Routing:** `route_policies[].target` can use `ai-gateway:<bot-name>`.
 - **Media:** AI calls can use internal RTP input or RTPengine anchoring. The RTPengine profile keeps RTP/RTCP on RTPengine and leaves PlaySBC as SIP/control plus AI orchestration.
-- **Rasa integration:** PlaySBC posts `sender`, `message`, and call metadata to the Rasa REST webhook. The default regression uses a deterministic mock; `ai-rasa-real-lab` starts a real Rasa REST bot.
-- **STT/TTS boundary:** Real engine adapters are now named in config. `lab-scripted` and `text-only` keep regression portable; `whisper`/`vosk` and `piper`/`coqui` can be enabled with local command wrappers.
+- **Rasa integration:** PlaySBC posts `sender`, `message`, and call metadata to the Rasa REST webhook. The default regression uses a deterministic mock; real-Rasa profiles start a real Rasa REST bot.
+- **STT/TTS boundary:** Real engine adapters are named in config. `lab-scripted` and `text-only` keep regression portable; `whisper`/`vosk` and `piper`/`coqui` can be enabled with local command wrappers. When those commands are not installed, the speech regression uses deterministic lab fallback artifacts and logs `engine_ready=false`.
+- **Speech evidence:** The speech profile decodes G.711 RTP PCAP to PCM/WAV before STT and generates a G.711 RTP prompt PCAP after TTS.
 - **Long replies:** Rasa multi-message responses are preserved and shown as response chunks in the AI ladder.
 - **Bot actions:** Rasa `custom` payloads can request `join`, `transfer`, or `release`. Today these are accepted and logged as control-plane actions; SIP REFER/re-INVITE/conference execution is the next deeper step.
 - **Logging:** `log.ai` records AI call start/end, STT input, Rasa request/response, TTS output, and the AI call ladder.
 
-The SIPp media PCAP used by the test is only G.711 lab audio. Earlier builds echoed that tone back, which sounded like a continuous beep. The AI gateway now records/analyzes input RTP without echoing fake TTS audio.
+The SIPp media PCAP used by the older tests is G.711 lab audio. The speech profile adds dedicated G.711u/G.711a speech fixtures with sidecar transcripts, decoded WAV evidence, and generated TTS RTP prompt evidence.
 
 ## Config Shape
 
@@ -49,6 +50,19 @@ ai_voice_gateway:
   fallback_text: Rasa lab bot is unavailable
 ```
 
+Speech profile additions:
+
+```yaml
+ai_voice_gateway:
+  input_mode: speech
+  speech_input_pcap: sipp/scenarios/pcap/ai_rasa_speech_g711u.pcap
+  speech_input_codec: PCMU
+  speech_transcript: support
+  stt_provider: whisper
+  tts_provider: piper
+  tts_output_codec: PCMU
+```
+
 ## Regression Coverage
 
 | Test case | Short name | Purpose | Evidence |
@@ -56,13 +70,14 @@ ai_voice_gateway:
 | `ai-rasa-lab` | Mock Rasa REST, internal media | SIPp A calls `ai-bot`; PlaySBC terminates the AI call, consumes RTP input internally, and sends one deterministic mock Rasa REST turn | `log.ai`, `log.sip`, `log.media`, `capture.pcap`, HTML ladder with `Mock Rasa REST` |
 | `ai-rasa-rtpengine` | Mock Rasa REST, RTPengine media | Same AI call, but RTP/RTCP is anchored by RTPengine; mock Rasa returns multiple response chunks plus a transfer action | `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with `Mock Rasa + Action` |
 | `ai-rasa-real-lab` | Real Rasa pod, RTPengine media | Kubernetes starts and trains a real Rasa REST pod, PlaySBC posts to that service, and RTP/RTCP remains anchored by RTPengine | `rasa.log`, `rasa-pod-evidence.log`, `log.ai`, `log.sip`, `log.media`, HTML ladder with `Real Rasa Pod` |
+| `ai-rasa-rtpengine-speech` | Real Rasa pod, speech STT/TTS boundary | SIPp plays G.711 speech, PlaySBC decodes the RTP PCAP to WAV, feeds the transcript through the Whisper/Vosk boundary, posts to Rasa, and generates Piper/Coqui RTP prompt evidence | speech PCAP/WAV/TTS artifacts, `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with STT/Rasa/TTS nodes |
 | Unit: Rasa REST client | JSON contract | Validates Rasa request/response JSON shape | `tests/test_ai_gateway.py` |
 | Unit: AI route policy | SIP route target | Validates `ai-gateway:<bot>` routing | `tests/test_mini_call_server.py` |
 | Unit: dual-realm profile | Harness wiring | Validates mock Rasa service and `log.ai` bundle wiring | `tests/test_sipp_harness.py` |
 
 ## Real Rasa Lab
 
-The real Rasa profile is optional by design. The normal `--all-b2bua-profiles` suite stays fast and deterministic with the mock service. Use `ai-rasa-real-lab` when you want to prove the actual Rasa REST channel.
+The real Rasa profiles are optional by design. The normal `--all-b2bua-profiles` suite stays fast and deterministic with the mock service. Use `ai-rasa-real-lab` or `ai-rasa-rtpengine-speech` when you want to prove the actual Rasa REST channel.
 
 ### Direct Local
 
@@ -134,6 +149,6 @@ kind load docker-image rasa/rasa:3.6.20-full --name playsbc
 
 ## Still To Build
 
-- Decode RTP audio into engine-ready files for Whisper/Vosk.
-- Generate playable G.711 prompt RTP from Piper/Coqui output.
+- Package actual Whisper/Vosk/Piper/Coqui binaries and models into optional lab images.
+- Stream longer bot responses instead of one turn per call.
 - Execute bot actions with SIP REFER/re-INVITE, conference join, and bot-driven release.

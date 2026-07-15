@@ -6,6 +6,7 @@ COPY mini_call_server.py /app/
 COPY ai_gateway /app/ai_gateway
 COPY rtp /app/rtp
 COPY sip /app/sip
+COPY sipp/scenarios/pcap /app/sipp/scenarios/pcap
 COPY tools/check_rtpengine.py /app/tools/check_rtpengine.py
 COPY tools/check_rasa.py /app/tools/check_rasa.py
 COPY tools/mock_rasa_server.py /app/tools/mock_rasa_server.py

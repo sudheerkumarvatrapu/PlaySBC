@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from ai_gateway import AiTurnResult, AiVoiceConfig, AiVoiceGateway, BotAction
+from ai_gateway.speech import decode_rtp_pcap_to_wav
 from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
 from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp, parse_receiver_reports
@@ -3291,13 +3292,70 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         }
         sender = f"playsbc-{safe_filename(ai_call.call_id)}"
         user_text = self.ai_voice_gateway.initial_user_text()
+        speech_pcap_path = resolve_ai_speech_asset(self.ai_voice_config.speech_input_pcap)
+        speech_wav_path = ""
+        tts_wav_path = ""
+        tts_rtp_path = ""
+        speech_transcript = self.ai_voice_config.speech_transcript
+        if self.ai_voice_config.speech_input_pcap and not speech_pcap_path:
+            self.logger.ai(
+                "AI SPEECH RTP EXTRACTION FAILED",
+                f"pcap={self.ai_voice_config.speech_input_pcap} error_type=FileNotFoundError",
+                call_id=ai_call.call_id,
+            )
+        if speech_pcap_path:
+            evidence_dir = self.logger.log_dir or self.media.log_dir
+            if evidence_dir:
+                call_stem = safe_filename(ai_call.call_id)
+                speech_wav = evidence_dir / f"ai-speech-input-{call_stem}.wav"
+                try:
+                    extraction = decode_rtp_pcap_to_wav(
+                        speech_pcap_path,
+                        speech_wav,
+                        codec=self.ai_voice_config.speech_input_codec,
+                        transcript=speech_transcript,
+                    )
+                    speech_wav_path = extraction.wav_path
+                    if extraction.transcript:
+                        user_text = extraction.transcript
+                    self.logger.ai(
+                        "AI SPEECH RTP EXTRACTED",
+                        (
+                            f"pcap={speech_pcap_path} wav={extraction.wav_path} codec={extraction.codec} "
+                            f"payload_type={extraction.payload_type} packets={extraction.packets} "
+                            f"payload_bytes={extraction.payload_bytes} duration_seconds={extraction.duration_seconds:.3f} "
+                            f"transcript={json.dumps(user_text)}"
+                        ),
+                        call_id=ai_call.call_id,
+                    )
+                    self.logger.media(
+                        "AI SPEECH PCAP INPUT",
+                        (
+                            f"source_pcap={speech_pcap_path} decoded_wav={extraction.wav_path} "
+                            f"codec={extraction.codec} packets={extraction.packets} media_backend={ai_call.media_backend}"
+                        ),
+                        call_id=ai_call.call_id,
+                    )
+                    tts_wav_path = str(evidence_dir / f"ai-tts-output-{call_stem}.wav")
+                    tts_rtp_path = str(evidence_dir / f"ai-tts-rtp-{call_stem}.pcap")
+                except Exception as exc:
+                    self.logger.ai(
+                        "AI SPEECH RTP EXTRACTION FAILED",
+                        f"pcap={speech_pcap_path} error_type={type(exc).__name__} error={json.dumps(str(exc))}",
+                        call_id=ai_call.call_id,
+                    )
         media_input_label = "RTPengine RTP/RTCP input" if ai_call.media_backend == "rtpengine" else "RTP/media input"
-        ai_call.flow_log.flow("PlaySBC", "STT Adapter", media_input_label)
+        ai_call.flow_log.flow(
+            "RTPengine" if ai_call.media_backend == "rtpengine" and speech_wav_path else "PlaySBC",
+            "STT Adapter",
+            "G.711 speech RTP decoded to WAV" if speech_wav_path else media_input_label,
+        )
         ai_call.flow_log.flow("STT Adapter", "PlaySBC", self.ai_voice_config.stt_provider)
         self.logger.ai(
             "AI STT INPUT",
             (
-                f"adapter={self.ai_voice_config.stt_provider} audio_decoded=false mode={self.ai_voice_config.input_mode} "
+                f"adapter={self.ai_voice_config.stt_provider} audio_decoded={str(bool(speech_wav_path)).lower()} "
+                f"mode={self.ai_voice_config.input_mode} audio_path={json.dumps(speech_wav_path)} "
                 f"text={json.dumps(user_text)} sender={sender}"
             ),
             call_id=ai_call.call_id,
@@ -3308,7 +3366,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             call_id=ai_call.call_id,
         )
         ai_call.flow_log.flow("PlaySBC", "Rasa Bot", "Rasa REST POST")
-        result: AiTurnResult = await self.ai_voice_gateway.start_turn(sender, metadata)
+        result: AiTurnResult = await self.ai_voice_gateway.start_turn(
+            sender,
+            metadata,
+            audio_path=speech_wav_path,
+            tts_output_path=tts_wav_path,
+            tts_rtp_path=tts_rtp_path,
+            tts_codec=self.ai_voice_config.tts_output_codec,
+        )
         stt = result.stt
         if stt:
             self.logger.ai(
@@ -3351,10 +3416,23 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             (
                 f"renderer={tts_provider} audio_generated={audio_generated} "
                 f"rtp_prompt_generated={rtp_prompt_generated} error={json.dumps(tts_error)} "
+                f"audio_path={json.dumps(tts.audio_path if tts else '')} "
+                f"rtp_path={json.dumps(tts.rtp_path if tts else '')} "
                 f"text={json.dumps(result.rendered_text)}"
             ),
             call_id=ai_call.call_id,
         )
+        if tts and tts.rtp_prompt_generated:
+            ai_call.flow_log.flow("TTS Adapter", "RTPengine" if ai_call.media_backend == "rtpengine" else "PlaySBC", "G.711 RTP prompt")
+            self.logger.media(
+                "AI TTS RTP PROMPT",
+                (
+                    f"status=generated rtp_pcap={tts.rtp_path} audio_path={tts.audio_path} "
+                    f"codec={self.ai_voice_config.tts_output_codec} media_backend={ai_call.media_backend} "
+                    "delivery_model=rtpengine_media_anchor_evidence"
+                ),
+                call_id=ai_call.call_id,
+            )
         for action in result.bot_actions:
             self.apply_ai_bot_action(ai_call, action)
 
@@ -4069,6 +4147,29 @@ def safe_filename(value: str) -> str:
     return cleaned or "call"
 
 
+def resolve_ai_speech_asset(value: str) -> Optional[Path]:
+    if not value:
+        return None
+    if value.startswith("/scenarios/"):
+        relative = value.removeprefix("/")
+        for root in (Path("/app/sipp"), Path(__file__).resolve().parent / "sipp", Path.cwd() / "sipp"):
+            path = root / relative
+            if path.exists():
+                return path
+    candidate = Path(value)
+    roots = []
+    if candidate.is_absolute():
+        roots.append(Path("/"))
+    else:
+        roots.extend([Path.cwd(), Path(__file__).resolve().parent])
+
+    for root in roots:
+        path = candidate if candidate.is_absolute() else root / candidate
+        if path.exists():
+            return path
+    return candidate if candidate.exists() else None
+
+
 def parse_dtmf_event(payload: bytes) -> Optional[Tuple[int, str, bool, int]]:
     if len(payload) < 4:
         return None
@@ -4644,6 +4745,10 @@ def validate_config(config: ServerConfig) -> None:
             raise ValueError("ai_voice_gateway.stt_provider must be lab-scripted, whisper, or vosk")
         if ai_config.tts_provider not in {"text-only", "lab-text", "piper", "coqui"}:
             raise ValueError("ai_voice_gateway.tts_provider must be text-only, piper, or coqui")
+        if ai_config.speech_input_codec not in {"PCMU", "PCMA"}:
+            raise ValueError("ai_voice_gateway.speech_input_codec must be PCMU or PCMA")
+        if ai_config.tts_output_codec not in {"PCMU", "PCMA"}:
+            raise ValueError("ai_voice_gateway.tts_output_codec must be PCMU or PCMA")
         if ai_config.response_mode not in {"rest", "callback", "streaming"}:
             raise ValueError("ai_voice_gateway.response_mode must be rest, callback, or streaming")
     if config.ha:

@@ -39,6 +39,10 @@ class AiVoiceConfig:
     stt_command: str = ""
     tts_provider: str = "text-only"
     tts_command: str = ""
+    speech_input_pcap: str = ""
+    speech_input_codec: str = "PCMU"
+    speech_transcript: str = ""
+    tts_output_codec: str = "PCMU"
     response_mode: str = "rest"
     bot_actions_enabled: bool = True
     dtmf_intents: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_DTMF_INTENTS))
@@ -62,6 +66,10 @@ class AiVoiceConfig:
             stt_command=str(raw.get("stt_command", "")),
             tts_provider=str(raw.get("tts_provider", raw.get("tts_adapter", "text-only"))).lower(),
             tts_command=str(raw.get("tts_command", "")),
+            speech_input_pcap=str(raw.get("speech_input_pcap", "")),
+            speech_input_codec=str(raw.get("speech_input_codec", "PCMU")).upper(),
+            speech_transcript=str(raw.get("speech_transcript", "")),
+            tts_output_codec=str(raw.get("tts_output_codec", "PCMU")).upper(),
             response_mode=str(raw.get("response_mode", "rest")).lower(),
             bot_actions_enabled=bool(raw.get("bot_actions_enabled", True)),
             dtmf_intents={str(key): str(text) for key, text in (intents or DEFAULT_DTMF_INTENTS).items()},
@@ -81,6 +89,10 @@ class AiVoiceConfig:
             "stt_command": self.stt_command,
             "tts_provider": self.tts_provider,
             "tts_command": self.tts_command,
+            "speech_input_pcap": self.speech_input_pcap,
+            "speech_input_codec": self.speech_input_codec,
+            "speech_transcript": self.speech_transcript,
+            "tts_output_codec": self.tts_output_codec,
             "response_mode": self.response_mode,
             "bot_actions_enabled": self.bot_actions_enabled,
             "dtmf_intents": dict(self.dtmf_intents),
@@ -146,6 +158,8 @@ class AiVoiceGateway:
         if self.config.input_mode == "dtmf":
             mapped = self.dtmf_mapper.text_for_digits(dtmf_digits)
             return mapped or self.config.initial_message
+        if self.config.input_mode == "speech" and self.config.speech_transcript:
+            return self.config.speech_transcript
         return self.config.initial_message
 
     async def start_turn(
@@ -154,6 +168,9 @@ class AiVoiceGateway:
         metadata: Optional[Dict[str, Any]] = None,
         dtmf_digits: str = "",
         audio_path: str = "",
+        tts_output_path: str = "",
+        tts_rtp_path: str = "",
+        tts_codec: str = "PCMU",
     ) -> AiTurnResult:
         started = time.monotonic()
         stt_result = await self.stt.transcribe(self.initial_user_text(dtmf_digits), audio_path)
@@ -161,7 +178,12 @@ class AiVoiceGateway:
         try:
             responses = await self.rasa.send_message_async(sender, user_text, metadata or {})
             rendered_text = " ".join(response.text for response in responses if response.text)
-            tts_result = await self.tts.synthesize(rendered_text)
+            tts_result = await self.tts.synthesize(
+                rendered_text,
+                output_path=tts_output_path,
+                rtp_path=tts_rtp_path,
+                codec=tts_codec,
+            )
             return AiTurnResult(
                 sender=sender,
                 user_text=user_text,
@@ -176,7 +198,12 @@ class AiVoiceGateway:
             )
         except RasaRestError as exc:
             fallback = RasaBotResponse(text=self.config.fallback_text)
-            tts_result = await self.tts.synthesize(fallback.text)
+            tts_result = await self.tts.synthesize(
+                fallback.text,
+                output_path=tts_output_path,
+                rtp_path=tts_rtp_path,
+                codec=tts_codec,
+            )
             return AiTurnResult(
                 sender=sender,
                 user_text=user_text,

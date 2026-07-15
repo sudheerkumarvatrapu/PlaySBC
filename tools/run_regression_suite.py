@@ -78,6 +78,7 @@ ALL_B2BUA_PROFILES = (
 )
 OPTIONAL_B2BUA_PROFILES = (
     "ai-rasa-real-lab",
+    "ai-rasa-rtpengine-speech",
 )
 SELECTABLE_B2BUA_PROFILES = (*ALL_B2BUA_PROFILES, *OPTIONAL_B2BUA_PROFILES)
 RTPENGINE_B2BUA_PROFILES = (
@@ -87,6 +88,7 @@ RTPENGINE_B2BUA_PROFILES = (
     "tcp-rtpengine-transcoding",
     "ai-rasa-rtpengine",
     "ai-rasa-real-lab",
+    "ai-rasa-rtpengine-speech",
     "rtpengine-control-failure",
     "rtpengine-port-exhaustion",
     "rtpengine-interface-failure",
