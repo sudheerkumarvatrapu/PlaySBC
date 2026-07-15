@@ -329,6 +329,25 @@ def is_load_profile(profile: SimpleNamespace) -> bool:
     return int(getattr(profile, "calls", 1)) > 1
 
 
+def k8s_sipp_timeout_seconds(profile: SimpleNamespace) -> int:
+    calls = int(getattr(profile, "calls", 1))
+    rate = int(getattr(profile, "rate", 1))
+    hold_ms = int(getattr(profile, "hold_ms", BASE_DEFAULTS["hold_ms"]))
+    base = sipp_timeout_seconds(calls, rate, hold_ms)
+    if not is_load_profile(profile):
+        return base
+
+    safe_rate = max(rate, 1)
+    traffic_seconds = (max(calls, 1) + safe_rate - 1) // safe_rate
+    hold_seconds = max(hold_ms, 0) // 1000
+    load_headroom = 180
+    if profile_uses_rtpengine(profile):
+        load_headroom += 180
+    if is_transcoding_profile(profile):
+        load_headroom += 120
+    return max(base, traffic_seconds + hold_seconds + load_headroom)
+
+
 def profile_transport_tokens(profile: SimpleNamespace) -> set[str]:
     tokens: set[str] = set()
     for attr in ("sip_transport", "uac_transport", "uas_transport"):
@@ -1332,6 +1351,7 @@ class K8sRegressionRunner:
         calls = int(getattr(profile, "calls", 1))
         rate = int(getattr(profile, "rate", 1))
         hold_ms = int(getattr(profile, "hold_ms", self.args.call_hold_ms))
+        timeout_seconds = k8s_sipp_timeout_seconds(profile)
         return [
             "-i",
             pod_ip,
@@ -1344,7 +1364,7 @@ class K8sRegressionRunner:
             "-l",
             str(call_limit(calls, rate, hold_ms)),
             "-timeout",
-            str(sipp_timeout_seconds(calls, rate, hold_ms)),
+            str(timeout_seconds),
             "-timeout_error",
             "-nostdin",
             "-min_rtp_port",
@@ -1562,7 +1582,8 @@ class K8sRegressionRunner:
 
             if getattr(profile, "run_call", True):
                 uac_args = self.b2bua_uac_args(profile, uac_scenario, core_ip)
-                timeout = max(self.args.sipp_timeout, sipp_timeout_seconds(int(getattr(profile, "calls", 1)), int(getattr(profile, "rate", 1)), int(getattr(profile, "hold_ms", self.args.call_hold_ms))) + 30)
+                profile_timeout = k8s_sipp_timeout_seconds(profile)
+                timeout = max(self.args.sipp_timeout, profile_timeout + 30)
                 if should_run_k8s_rtcp(profile):
                     uac_process = self.start_sipp_process(core_pod, "core-sipp-a-uac", uac_args, bundle)
                     commands.append(command_text(self.sipp_exec_command(core_pod, uac_args)))
@@ -1589,7 +1610,7 @@ class K8sRegressionRunner:
 
             for step_name, pod, process in processes:
                 try:
-                    rc = process.wait(timeout=max(30, self.args.sipp_timeout + 30))
+                    rc = process.wait(timeout=max(30, min(k8s_sipp_timeout_seconds(profile), 180)))
                 except subprocess.TimeoutExpired:
                     process.terminate()
                     rc = 124

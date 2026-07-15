@@ -2740,6 +2740,18 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("capture-internal-media-ring", run_dual_realm_profile.capture_services(internal))
         self.assertIn("capture-media-ring", run_dual_realm_profile.capture_services(rtpengine))
 
+    def test_kubernetes_load_profiles_use_expanded_sipp_timeout(self):
+        args = run_k8s_regression.parse_args(["--all-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        internal = run_k8s_regression.profile_values("load-5cps-60s", "unit-k8s")
+        rtpengine = run_k8s_regression.profile_values("load-5cps-60s-rtpengine-transcoding", "unit-k8s")
+
+        self.assertEqual(run_k8s_regression.sipp_timeout_seconds(300, 5, 60000), 180)
+        self.assertGreaterEqual(run_k8s_regression.k8s_sipp_timeout_seconds(internal), 300)
+        self.assertGreaterEqual(run_k8s_regression.k8s_sipp_timeout_seconds(rtpengine), 600)
+        self.assertIn(str(run_k8s_regression.k8s_sipp_timeout_seconds(internal)), runner.b2bua_base_args(internal, "10.244.0.10", 5060))
+        self.assertIn(str(run_k8s_regression.k8s_sipp_timeout_seconds(rtpengine)), runner.b2bua_base_args(rtpengine, "10.244.0.11", 5060))
+
     def test_dual_realm_evidence_cleanup_removes_temporary_work_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "work"
