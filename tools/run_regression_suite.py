@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -126,6 +128,7 @@ ROBOT_PHASE_ORDER = (
     "Test Teardown",
     "Evidence Validation",
 )
+AUDIO_EVIDENCE_PREFIXES = ("ai-speech-input", "ai-tts-output")
 
 
 @dataclass
@@ -149,8 +152,51 @@ class ReportRow:
     sip_ladder: str = ""
 
 
+@dataclass
+class AudioEvidence:
+    label: str
+    path: str
+    src: str
+
+
 def make_run_id() -> str:
     return time.strftime("regression-%Y%m%d-%H%M%S", time.localtime())
+
+
+def audio_evidence_label(path: Path) -> str:
+    name = path.name.lower()
+    if name.startswith("ai-speech-input"):
+        return "Caller speech input"
+    if name.startswith("ai-tts-output"):
+        return "Piper TTS output"
+    return "Audio evidence"
+
+
+def audio_src_for_report(path: Path, report_dir: Optional[Path]) -> str:
+    try:
+        if report_dir:
+            source = os.path.relpath(path.resolve(), report_dir.resolve()).replace(os.sep, "/")
+        else:
+            source = path.resolve().as_uri()
+    except (OSError, ValueError):
+        source = str(path)
+    return urllib.parse.quote(source, safe="/:._~%-")
+
+
+def discover_audio_evidence(log_path: str, report_dir: Optional[Path] = None) -> List[AudioEvidence]:
+    root = Path(log_path)
+    if not root.is_dir():
+        return []
+    wav_files = [
+        path
+        for path in root.rglob("*.wav")
+        if path.is_file() and path.name.lower().startswith(AUDIO_EVIDENCE_PREFIXES)
+    ]
+    wav_files.sort(key=lambda path: (0 if path.name.lower().startswith("ai-speech-input") else 1, str(path)))
+    return [
+        AudioEvidence(audio_evidence_label(path), str(path), audio_src_for_report(path, report_dir))
+        for path in wav_files[:6]
+    ]
 
 
 def run_command(command: List[str], timeout: int) -> tuple[int, float, str, str]:
@@ -512,7 +558,7 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
     ]
 
 
-def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
+def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_dir: Optional[Path] = None) -> str:
     passed = sum(1 for row in rows if row.status == "passed")
     blocked = sum(1 for row in rows if row.status == "blocked")
     failed = sum(1 for row in rows if row.status not in {"passed", "blocked"})
@@ -537,9 +583,33 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
             )
         ladder_html = ""
         if row.sip_ladder:
+            is_ai_ladder = "AI VOICE" in row.sip_ladder or "ai-rasa" in row.name
+            ladder_title = "Unified SIP/RTP/AI Ladder" if is_ai_ladder else "Unified SIP Ladder"
+            ladder_note = (
+                "Single ordered ladder for the test case. AI speech profiles show RTPengine, Vosk STT, Rasa, and Piper TTS in the same call flow."
+                if is_ai_ladder
+                else "Single ordered SIP ladder for the test case."
+            )
             ladder_html = (
-                "<section class=\"ladder\"><h2>SIP Ladders</h2>"
+                f"<section class=\"ladder\"><h2>{html.escape(ladder_title)}</h2>"
+                f"<p>{html.escape(ladder_note)}</p>"
                 f"<pre>{html.escape(row.sip_ladder)}</pre></section>"
+            )
+        audio_html = ""
+        audio_evidence = discover_audio_evidence(row.log_path, report_dir)
+        if audio_evidence:
+            players = []
+            for evidence in audio_evidence:
+                players.append(
+                    "<div class=\"audio-item\">"
+                    f"<div><strong>{html.escape(evidence.label)}</strong><code>{html.escape(evidence.path)}</code></div>"
+                    f"<audio controls preload=\"none\" src=\"{html.escape(evidence.src)}\"></audio>"
+                    "</div>"
+                )
+            audio_html = (
+                "<section class=\"audio-evidence\"><h2>AI Speech Audio Evidence</h2>"
+                "<p>Replay the decoded caller speech WAV and generated Piper response WAV directly from this report.</p>"
+                f"{''.join(players)}</section>"
             )
         row_html.append(
             f"<details class=\"test-case {status_class}\" open>"
@@ -560,6 +630,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
             "</tr></thead><tbody>"
             f"{''.join(phase_html)}"
             "</tbody></table>"
+            f"{audio_html}"
             f"{ladder_html}"
             "</div></details>"
         )
@@ -602,8 +673,12 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
     code {{ font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }}
     .keyword {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; color: #1d4ed8; }}
     .elapsed {{ font-variant-numeric: tabular-nums; white-space: nowrap; }}
-    .ladder {{ margin-top: 16px; }}
-    .ladder h2 {{ margin: 0 0 8px; font-size: 14px; text-transform: uppercase; color: #374151; }}
+    .audio-evidence, .ladder {{ margin-top: 16px; }}
+    .audio-evidence h2, .ladder h2 {{ margin: 0 0 8px; font-size: 14px; text-transform: uppercase; color: #374151; }}
+    .audio-evidence p, .ladder p {{ margin: 0 0 10px; color: #4b5563; font-size: 13px; }}
+    .audio-item {{ display: grid; grid-template-columns: minmax(240px, 1fr) minmax(260px, 420px); align-items: center; gap: 12px; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #f9fafb; margin-top: 8px; }}
+    .audio-item strong {{ display: block; margin-bottom: 4px; color: #111827; }}
+    .audio-item audio {{ width: 100%; }}
     .ladder pre {{ margin: 0; padding: 14px; overflow-x: auto; border: 1px solid #d1d5db; background: #111827; color: #e5e7eb; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .badge {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 4px 8px; font-weight: 700; font-size: 12px; }}
     .badge.pass {{ color: #166534; background: #dcfce7; border: 1px solid #16a34a; }}
@@ -616,6 +691,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
       .total-time {{ grid-column: 2; grid-row: 1; }}
       .metadata {{ grid-template-columns: 1fr; }}
       .metadata span {{ margin-top: 6px; }}
+      .audio-item {{ grid-template-columns: 1fr; }}
       .phases {{ table-layout: auto; }}
       .phases th:nth-child(3), .phases td:nth-child(3) {{ display: none; }}
     }}
@@ -643,7 +719,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str) -> str:
 def write_reports(rows: List[ReportRow], report_dir: Path, run_id: str) -> Path:
     report_dir.mkdir(parents=True, exist_ok=True)
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
-    html_text = render_html(rows, generated_at, run_id)
+    html_text = render_html(rows, generated_at, run_id, report_dir=report_dir)
     report_path = report_dir / f"{run_id}.html"
     latest_path = report_dir / "latest.html"
     json_path = report_dir / f"{run_id}.json"

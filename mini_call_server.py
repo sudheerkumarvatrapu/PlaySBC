@@ -66,6 +66,26 @@ CODEC_PAYLOADS = {
 }
 
 
+def ai_stt_ladder_node(provider: str) -> str:
+    names = {
+        "vosk": "Vosk STT",
+        "whisper": "Whisper STT",
+        "lab-scripted": "Scripted STT",
+        "scripted": "Scripted STT",
+    }
+    return names.get(str(provider or "").lower(), "STT Adapter")
+
+
+def ai_tts_ladder_node(provider: str) -> str:
+    names = {
+        "piper": "Piper TTS",
+        "coqui": "Coqui TTS",
+        "text-only": "Text TTS",
+        "lab-text": "Text TTS",
+    }
+    return names.get(str(provider or "").lower(), "TTS Adapter")
+
+
 @dataclass
 class ServerConfig:
     sip_ip: str = "0.0.0.0"
@@ -1045,7 +1065,7 @@ class B2BUAFlowLog:
 
 
 class AIVoiceFlowLog:
-    PARTICIPANTS = ("SIPp A", "PlaySBC", "STT Adapter", "Rasa Bot", "TTS Adapter")
+    PARTICIPANTS = ("SIPp A", "PlaySBC", "Scripted STT", "Rasa Bot", "Text TTS")
     STEP_WIDTH = 6
     COLUMN_WIDTH = 24
 
@@ -2459,13 +2479,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         remote_payloads: Tuple[int, ...],
         dtmf_payload_type: Optional[int],
     ) -> None:
+        stt_node = ai_stt_ladder_node(self.ai_voice_config.stt_provider)
+        tts_node = ai_tts_ladder_node(self.ai_voice_config.tts_provider)
         flow_log = AIVoiceFlowLog(
             self.logger,
             inbound_call_id,
             participants=(
-                ("SIPp A", "PlaySBC", "RTPengine", "STT Adapter", "Rasa Bot", "TTS Adapter")
+                ("SIPp A", "RTPengine", "PlaySBC", stt_node, "Rasa Bot", tts_node)
                 if self.media_backend == "rtpengine"
-                else None
+                else ("SIPp A", "PlaySBC", stt_node, "Rasa Bot", tts_node)
             ),
         )
         ai_call = AIVoiceCall(
@@ -3344,13 +3366,18 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                         f"pcap={speech_pcap_path} error_type={type(exc).__name__} error={json.dumps(str(exc))}",
                         call_id=ai_call.call_id,
                     )
+        stt_node = ai_stt_ladder_node(self.ai_voice_config.stt_provider)
+        tts_node = ai_tts_ladder_node(self.ai_voice_config.tts_provider)
         media_input_label = "RTPengine RTP/RTCP input" if ai_call.media_backend == "rtpengine" else "RTP/media input"
+        media_source_node = "RTPengine" if ai_call.media_backend == "rtpengine" and speech_wav_path else "PlaySBC"
         ai_call.flow_log.flow(
-            "RTPengine" if ai_call.media_backend == "rtpengine" and speech_wav_path else "PlaySBC",
-            "STT Adapter",
-            "G.711 speech RTP decoded to WAV" if speech_wav_path else media_input_label,
+            media_source_node,
+            "PlaySBC" if media_source_node == "RTPengine" else stt_node,
+            "anchored speech RTP" if media_source_node == "RTPengine" and speech_wav_path else media_input_label,
         )
-        ai_call.flow_log.flow("STT Adapter", "PlaySBC", self.ai_voice_config.stt_provider)
+        if media_source_node == "RTPengine":
+            ai_call.flow_log.flow("PlaySBC", stt_node, "decode WAV")
+        ai_call.flow_log.flow(stt_node, "PlaySBC", self.ai_voice_config.stt_provider)
         self.logger.ai(
             "AI STT INPUT",
             (
@@ -3404,8 +3431,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         for index, response in enumerate(result.bot_responses, start=1):
             if index > 1:
                 ai_call.flow_log.flow("Rasa Bot", "PlaySBC", f"response chunk {index}")
-        ai_call.flow_log.flow("PlaySBC", "TTS Adapter", "bot text")
-        ai_call.flow_log.flow("TTS Adapter", "PlaySBC", self.ai_voice_config.tts_provider)
+        ai_call.flow_log.flow("PlaySBC", tts_node, "bot text")
+        ai_call.flow_log.flow(tts_node, "PlaySBC", self.ai_voice_config.tts_provider)
         tts = result.tts
         audio_generated = str(tts.audio_generated).lower() if tts else "false"
         rtp_prompt_generated = str(tts.rtp_prompt_generated).lower() if tts else "false"
@@ -3423,7 +3450,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             call_id=ai_call.call_id,
         )
         if tts and tts.rtp_prompt_generated:
-            ai_call.flow_log.flow("TTS Adapter", "RTPengine" if ai_call.media_backend == "rtpengine" else "PlaySBC", "G.711 RTP prompt")
+            if ai_call.media_backend == "rtpengine":
+                ai_call.flow_log.flow("PlaySBC", "RTPengine", "G.711 RTP prompt")
+            else:
+                ai_call.flow_log.flow(tts_node, "PlaySBC", "G.711 RTP prompt")
             self.logger.media(
                 "AI TTS RTP PROMPT",
                 (

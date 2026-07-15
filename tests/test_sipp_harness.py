@@ -1876,8 +1876,37 @@ Content-Length: 0
             self.assertIn("SIP LADDER", ladder)
             self.assertIn("CALLEE REGISTRATION LADDER", ladder)
             self.assertIn("AI VOICE CALL LADDER", ladder)
-            self.assertIn("<h2>SIP Ladders</h2>", report)
+            self.assertIn("<h2>Unified SIP/RTP/AI Ladder</h2>", report)
             self.assertIn("SIPp A", report)
+
+    def test_regression_report_embeds_ai_speech_audio_players(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle = root / "bundle"
+            report_dir = root / "reports"
+            bundle.mkdir()
+            report_dir.mkdir()
+            (bundle / "ai-speech-input-call.wav").write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+            (bundle / "ai-tts-output-call.wav").write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+            row = run_regression_suite.ReportRow(
+                "Kubernetes AI/Rasa Speech RTPengine",
+                "ai-rasa-rtpengine-speech",
+                "passed",
+                0,
+                1.0,
+                str(bundle),
+                "cmd",
+                sip_ladder="AI VOICE CALL LADDER\nStep  Core SIPp A  RTPengine  PlaySBC  Vosk STT  Rasa Bot  Piper TTS",
+            )
+
+            report = run_regression_suite.render_html([row], "2026-07-15", "audio-report", report_dir=report_dir)
+
+            self.assertIn("AI Speech Audio Evidence", report)
+            self.assertIn("Caller speech input", report)
+            self.assertIn("Piper TTS output", report)
+            self.assertIn("<audio controls", report)
+            self.assertIn("../bundle/ai-speech-input-call.wav", report)
+            self.assertIn("../bundle/ai-tts-output-call.wav", report)
 
     def test_regression_report_reads_measured_robot_phases_from_platform_log(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2856,6 +2885,13 @@ class RealTopologyTests(unittest.TestCase):
                 self.assertIn(f"case={title}", ladder)
                 self.assertIn(mode, ladder)
                 self.assertIn(node, ladder)
+                if profile_name == "ai-rasa-rtpengine-speech":
+                    self.assertIn("Vosk STT", ladder)
+                    self.assertIn("Piper TTS", ladder)
+                    self.assertIn("decode WAV", ladder)
+                    self.assertIn("Piper WAV", ladder)
+                    self.assertNotIn("STT Adapter", ladder)
+                    self.assertNotIn("TTS Adapter", ladder)
 
     def test_kubernetes_rasa_profile_shortcut_uses_dedicated_outputs(self):
         args = run_k8s_regression.parse_args(["--rasa-profiles"])

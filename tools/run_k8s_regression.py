@@ -1731,6 +1731,9 @@ class K8sRegressionRunner:
     def ladder_participants(self, profile: SimpleNamespace) -> tuple[str, ...]:
         profile_name = str(getattr(profile, "profile", ""))
         if "ai-rasa" in profile_name:
+            if profile_name == "ai-rasa-rtpengine-speech":
+                stt_node, rasa_node, tts_node = ai_ladder_nodes(profile)
+                return ("Core SIPp A", "RTPengine", "PlaySBC", stt_node, rasa_node, tts_node)
             participants = ["Core SIPp A", "PlaySBC"]
             if profile_uses_rtpengine(profile):
                 participants.append("RTPengine")
@@ -1812,8 +1815,9 @@ class K8sRegressionRunner:
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
         if profile_name == "ai-rasa-rtpengine-speech":
             flow.sip("Core SIPp A", "RTPengine", "G.711 speech RTP")
-            flow.sip("RTPengine", stt_node, "decode PCAP to WAV")
-            flow.sip(stt_node, "PlaySBC", "transcript: i need support")
+            flow.sip("RTPengine", "PlaySBC", "anchored RTP")
+            flow.sip("PlaySBC", stt_node, "decode WAV")
+            flow.sip(stt_node, "PlaySBC", "text: i need support")
         else:
             flow.sip("PlaySBC", stt_node, "scripted STT")
             flow.sip(stt_node, "PlaySBC", "intent text")
@@ -1827,8 +1831,9 @@ class K8sRegressionRunner:
             flow.sip("PlaySBC", rasa_node, "REST POST /mock")
             flow.sip(rasa_node, "PlaySBC", "single reply")
         if profile_name == "ai-rasa-rtpengine-speech":
-            flow.sip("PlaySBC", tts_node, "bot text to Piper")
-            flow.sip(tts_node, "RTPengine", "G.711 TTS RTP prompt")
+            flow.sip("PlaySBC", tts_node, "bot text")
+            flow.sip(tts_node, "PlaySBC", "Piper WAV")
+            flow.sip("PlaySBC", "RTPengine", "G.711 prompt RTP")
         else:
             flow.sip("PlaySBC", tts_node, "text-only TTS")
             flow.sip(tts_node, "PlaySBC", "no RTP prompt")
