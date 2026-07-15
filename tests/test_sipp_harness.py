@@ -2161,17 +2161,20 @@ Content-Length: 0
     def test_regression_suite_can_target_all_b2bua_profiles(self):
         self.assertEqual(
             len(run_regression_suite.ALL_B2BUA_PROFILES),
-            len(run_b2bua_sipp_smoke.B2BUA_PROFILES) - len(run_regression_suite.OPTIONAL_B2BUA_PROFILES) + 1,
+            len(run_b2bua_sipp_smoke.B2BUA_PROFILES) + 1,
         )
         self.assertEqual(
             set(run_regression_suite.ALL_B2BUA_PROFILES),
-            (set(run_b2bua_sipp_smoke.B2BUA_PROFILES) - set(run_regression_suite.OPTIONAL_B2BUA_PROFILES))
-            | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
+            set(run_b2bua_sipp_smoke.B2BUA_PROFILES) | {run_regression_suite.REAL_TOPOLOGY_PROFILE},
         )
         self.assertIn("ai-rasa-real-lab", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
-        self.assertNotIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
-        self.assertNotIn("ai-rasa-rtpengine-speech", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertEqual(
+            run_regression_suite.RASA_B2BUA_PROFILES,
+            ("ai-rasa-lab", "ai-rasa-rtpengine", "ai-rasa-real-lab", "ai-rasa-rtpengine-speech"),
+        )
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-media", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2792,7 +2795,7 @@ class RealTopologyTests(unittest.TestCase):
 
     def test_kubernetes_real_rasa_profile_is_selectable_and_rewrites_webhook(self):
         self.assertIn("ai-rasa-real-lab", run_k8s_regression.SELECTABLE_PROFILES)
-        self.assertNotIn("ai-rasa-real-lab", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("ai-rasa-real-lab", run_k8s_regression.ALL_PROFILES)
 
         args = run_k8s_regression.parse_args(["--profile", "ai-rasa-real-lab"])
         runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")

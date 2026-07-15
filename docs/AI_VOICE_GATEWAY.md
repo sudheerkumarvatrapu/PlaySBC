@@ -79,7 +79,7 @@ ai_voice_gateway:
 
 ## Real Rasa Lab
 
-The real Rasa profiles are optional by design. The normal `--all-b2bua-profiles` suite stays fast and deterministic with the mock service. Use `ai-rasa-real-lab` or `ai-rasa-rtpengine-speech` when you want to prove the actual Rasa REST channel.
+The full `--all-b2bua-profiles` and Kubernetes `--all-profiles` suites include all four Rasa profiles. Use `--rasa-profiles` when you want to run only the AI/Rasa slice and keep its logs under `logs/RASA-Regression`.
 
 For direct local speech runs, install the real engines once:
 

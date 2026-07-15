@@ -43,6 +43,8 @@ ALL_B2BUA_PROFILES = (
     "dtmf-rfc4733",
     "ai-rasa-lab",
     "ai-rasa-rtpengine",
+    "ai-rasa-real-lab",
+    "ai-rasa-rtpengine-speech",
     "invalid-bye",
     "unknown-route",
     "failed-outbound",
@@ -76,11 +78,14 @@ ALL_B2BUA_PROFILES = (
     "load-5cps-60s",
     "load-5cps-60s-rtpengine-transcoding",
 )
-OPTIONAL_B2BUA_PROFILES = (
+RASA_B2BUA_PROFILES = (
+    "ai-rasa-lab",
+    "ai-rasa-rtpengine",
     "ai-rasa-real-lab",
     "ai-rasa-rtpengine-speech",
 )
-SELECTABLE_B2BUA_PROFILES = (*ALL_B2BUA_PROFILES, *OPTIONAL_B2BUA_PROFILES)
+OPTIONAL_B2BUA_PROFILES: tuple[str, ...] = ()
+SELECTABLE_B2BUA_PROFILES = ALL_B2BUA_PROFILES
 RTPENGINE_B2BUA_PROFILES = (
     "rtpengine",
     "rtpengine-media",
@@ -656,6 +661,7 @@ def main() -> int:
     parser.add_argument("--b2bua-log-folder", default="b2bua-Regression")
     parser.add_argument("--b2bua-profile", action="append", choices=SELECTABLE_B2BUA_PROFILES, help="B2BUA profile to run; repeatable")
     parser.add_argument("--all-b2bua-profiles", action="store_true", help="Run all B2BUA profiles, including load and RTPengine profiles")
+    parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Rasa/AI B2BUA profile group")
     parser.add_argument("--b2bua-media-driver", choices=("python", "sipp-pcap"), default="", help="Override B2BUA media driver for media-enabled profiles")
     parser.add_argument("--b2bua-sipp-pcap-sudo", action="store_true", help="Pass --sipp-pcap-sudo to B2BUA profile runs")
     parser.add_argument("--b2bua-rtpengine-url", default="udp://127.0.0.1:2223", help="RTPengine NG control URL for RTPengine-backed B2BUA profiles")
@@ -665,6 +671,8 @@ def main() -> int:
     parser.add_argument("--skip-b2bua", action="store_true")
     parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args()
+    if args.rasa_profiles and (args.all_b2bua_profiles or args.b2bua_profile):
+        raise SystemExit("--rasa-profiles cannot be combined with --all-b2bua-profiles or --b2bua-profile")
 
     run_id = args.run_id or make_run_id()
     report_dir = Path(args.report_dir)
@@ -714,7 +722,12 @@ def main() -> int:
                 (smoke_root / smoke_run_id / "stdout.log").write_text(stdout, encoding="utf-8")
 
         if not args.skip_b2bua:
-            profiles = ALL_B2BUA_PROFILES if args.all_b2bua_profiles else tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
+            if args.rasa_profiles:
+                profiles = RASA_B2BUA_PROFILES
+            elif args.all_b2bua_profiles:
+                profiles = ALL_B2BUA_PROFILES
+            else:
+                profiles = tuple(args.b2bua_profile or DEFAULT_B2BUA_PROFILES)
             for profile_index, profile in enumerate(profiles):
                 profile_run_id = f"{run_id}-{profile}"
                 profile_log_path = b2bua_log_root / profile_run_id

@@ -190,7 +190,7 @@ Startup complete
 
 ## Optional Real Rasa Lab
 
-The default regression uses a lightweight mock Rasa service. Use this optional values file when you want PlaySBC to talk to a real Rasa REST bot inside Kubernetes:
+The complete Kubernetes regression catalog includes mock Rasa, real Rasa, and real Vosk/Piper speech profiles. This values file enables the real Rasa REST bot inside Kubernetes:
 
 ```bash
 helm upgrade --install playsbc charts/playsbc \
@@ -251,7 +251,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression.py --list-profiles
 ```
 
-Run the full 47-profile in-cluster Kubernetes suite:
+Run the full 49-profile in-cluster Kubernetes suite:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \

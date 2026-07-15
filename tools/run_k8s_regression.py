@@ -40,7 +40,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
 )
 from tools.run_regression_suite import (  # noqa: E402
     ALL_B2BUA_PROFILES,
-    OPTIONAL_B2BUA_PROFILES,
+    RASA_B2BUA_PROFILES,
     REAL_TOPOLOGY_PROFILE,
     cleanup_old_reports,
     ReportPhase,
@@ -51,8 +51,8 @@ from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 ALL_PROFILES = ALL_B2BUA_PROFILES
-CATALOG_PROFILES = (*ALL_PROFILES, *OPTIONAL_B2BUA_PROFILES)
-RASA_PROFILES = ("ai-rasa-lab", "ai-rasa-rtpengine", "ai-rasa-real-lab", "ai-rasa-rtpengine-speech")
+CATALOG_PROFILES = ALL_PROFILES
+RASA_PROFILES = RASA_B2BUA_PROFILES
 SELECTABLE_PROFILES = (*SMOKE_PROFILES, *CATALOG_PROFILES)
 LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
 DEFAULT_OUTPUT_ROOT = str(ROOT / "logs" / "k8s-Regression")
@@ -2052,7 +2052,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--helm-release", default="playsbc")
     parser.add_argument("--chart", default=str(ROOT / "charts" / "playsbc"))
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
-    parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 47 B2BUA profiles on Kubernetes")
+    parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 49 B2BUA profiles on Kubernetes, including Rasa profiles")
     parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
     parser.add_argument("--list-profiles", action="store_true")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
@@ -2099,10 +2099,6 @@ def main() -> int:
         for profile in ALL_PROFILES:
             label = profile_execution_label(profile)
             print(f"  {profile}: {label} - {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
-        print("\nOptional profiles:")
-        for profile in OPTIONAL_B2BUA_PROFILES:
-            label = profile_execution_label(profile)
-            print(f"  {profile}: {label} - {PROFILE_DESCRIPTIONS.get(profile, 'Optional Kubernetes profile.')}")
         print("\nRasa shortcut:")
         for profile in RASA_PROFILES:
             print(f"  --rasa-profiles includes {profile}: {profile_display_title(profile)}")
