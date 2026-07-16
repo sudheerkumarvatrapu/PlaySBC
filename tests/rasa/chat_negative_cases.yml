@@ -1,0 +1,44 @@
+version: "1.0"
+suite: chat-negative-and-guardrail-routing
+description: "Negative and ambiguous chat cases for the PlaySBC AI contact-center lab."
+cases:
+  - id: CHAT-NEG-001
+    user_input: "I don't want sales"
+    expected_intent: deny
+    expected_behavior: "Must not classify as sales."
+  - id: CHAT-NEG-002
+    user_input: "Billing or maybe support"
+    expected_intent: clarify
+    expected_behavior: "Ask for clarification."
+  - id: CHAT-NEG-003
+    user_input: "I want help"
+    expected_intent: clarify
+    expected_behavior: "Ask what kind of help."
+  - id: CHAT-NEG-004
+    user_input: ""
+    expected_intent: no_input
+    expected_behavior: "Reprompt the user before calling Rasa."
+  - id: CHAT-NEG-005
+    user_input: "flibbertigibbet quantum banana"
+    expected_intent: nlu_fallback
+    expected_behavior: "Trigger fallback."
+  - id: CHAT-NEG-006
+    user_input: "!@#$%^&*"
+    expected_intent: nlu_fallback
+    expected_behavior: "Trigger fallback."
+  - id: CHAT-NEG-007
+    user_input: "Very long message repeated safely"
+    expected_intent: safe_processing
+    expected_behavior: "Process safely without timeout by applying the PlaySBC text-length guard."
+  - id: CHAT-NEG-008
+    user_input: "necesito ayuda"
+    expected_intent: language_limitation
+    expected_behavior: "Respond with the supported-language limitation."
+  - id: CHAT-NEG-009
+    user_input: "this is stupid"
+    expected_intent: safe_continue
+    expected_behavior: "Respond safely and continue."
+  - id: CHAT-NEG-010
+    user_input: "Transfer me - actually don't"
+    expected_intent: deny
+    expected_behavior: "Honor the latest instruction."

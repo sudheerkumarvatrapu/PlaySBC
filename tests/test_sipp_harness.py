@@ -2946,6 +2946,37 @@ class RealTopologyTests(unittest.TestCase):
                     self.assertIn("REST 200 sales workflow", ladder)
                     self.assertIn("SIPp B Bot Agent", ladder)
 
+    def test_kubernetes_rasa_chat_nlu_profiles_are_selectable(self):
+        self.assertIn("ai-rasa-chat-nlu", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("ai-rasa-chat-negative", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("ai-rasa-chat-nlu", run_k8s_regression.SELECTABLE_PROFILES)
+        self.assertIn("ai-rasa-chat-negative", run_k8s_regression.SELECTABLE_PROFILES)
+        self.assertIn("ai-rasa-chat-nlu", run_k8s_regression.RASA_PROFILES)
+        self.assertIn("ai-rasa-chat-negative", run_k8s_regression.RASA_PROFILES)
+        self.assertEqual(run_k8s_regression.RASA_NLU_CASE_FILES["ai-rasa-chat-nlu"].name, "chat_nlu_cases.yml")
+        self.assertEqual(run_k8s_regression.RASA_NLU_CASE_FILES["ai-rasa-chat-negative"].name, "chat_negative_cases.yml")
+        self.assertEqual(run_k8s_regression.profile_display_title("ai-rasa-chat-nlu"), "AI Rasa Chat NLU - Intent Matrix")
+        self.assertEqual(run_k8s_regression.profile_display_title("ai-rasa-chat-negative"), "AI Rasa Negative Chat - Guardrails")
+        self.assertIn("CHAT-NLU-001", run_k8s_regression.profile_mode_detail("ai-rasa-chat-nlu"))
+        self.assertIn("CHAT-NEG-001", run_k8s_regression.profile_mode_detail("ai-rasa-chat-negative"))
+
+    def test_kubernetes_rasa_chat_nlu_ladder_is_not_sipp_call_ladder(self):
+        args = run_k8s_regression.parse_args(["--profile", "ai-rasa-chat-nlu"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-rasa")
+
+        ladder = runner.rasa_nlu_ladder("ai-rasa-chat-nlu")
+
+        self.assertIn("NLP CHAT / RASA LADDER", ladder)
+        self.assertIn("Chat YAML", ladder)
+        self.assertIn("PlaySBC Guard", ladder)
+        self.assertIn("Rasa NLU", ladder)
+        self.assertIn("Rasa Bot", ladder)
+        self.assertIn("HTML Report", ladder)
+        self.assertIn("render chat + ladder", ladder)
+        self.assertIn("POST /webhook", ladder)
+        self.assertNotIn("INVITE", ladder)
+        self.assertNotIn("RTPengine", ladder)
+
     def test_kubernetes_rasa_profile_shortcut_uses_dedicated_outputs(self):
         args = run_k8s_regression.parse_args(["--rasa-profiles"])
         self.assertEqual(run_k8s_regression.selected_profiles(args), run_k8s_regression.RASA_PROFILES)
@@ -2967,6 +2998,7 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("600", command)
         self.assertIn("/workspace/logs/RASA-Regression", command)
         self.assertIn("/workspace/logs/RASA-reports", command)
+        self.assertEqual(len(run_k8s_regression.RASA_PROFILES), 7)
 
     def test_kubernetes_full_suite_keeps_existing_output_layout(self):
         args = run_k8s_regression_job.parse_args(["--all-profiles"])

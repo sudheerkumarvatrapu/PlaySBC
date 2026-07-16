@@ -89,6 +89,55 @@ RASA_B2BUA_PROFILES = (
     "ai-rasa-rtpengine-speech",
     "ai-rasa-contact-center-sales",
 )
+RASA_NLU_PROFILES = (
+    "ai-rasa-chat-nlu",
+    "ai-rasa-chat-negative",
+)
+RASA_TEST_PROFILES = (*RASA_B2BUA_PROFILES, *RASA_NLU_PROFILES)
+RASA_TEST_FLOWS = {
+    "ai-rasa-lab": {
+        "title": "Mock Rasa REST",
+        "proves": "AI route and Rasa adapter sanity.",
+        "flow": "K8s Runner -> profile config -> SIPp A -> PlaySBC AI callee -> scripted STT/media -> Mock Rasa REST -> log.ai -> HTML Report.",
+        "evidence": "log.ai, SIP/media logs, mock ladder.",
+    },
+    "ai-rasa-rtpengine": {
+        "title": "Mock Rasa + RTPengine",
+        "proves": "AI call with RTPengine media anchor.",
+        "flow": "K8s Runner -> profile config -> SIPp A -> PlaySBC -> RTPengine -> Mock Rasa REST/action -> RTPengine evidence -> HTML Report.",
+        "evidence": "RTPengine query, log.ai, media log.",
+    },
+    "ai-rasa-real-lab": {
+        "title": "Real Rasa Pod",
+        "proves": "Real Rasa deploy/train/webhook path.",
+        "flow": "K8s Runner -> Helm/Rasa config -> Real Rasa Pod train/start -> SIPp A -> PlaySBC/RTPengine -> Rasa webhook -> HTML Report.",
+        "evidence": "Rasa rollout logs, log.ai, SIP/media logs.",
+    },
+    "ai-rasa-rtpengine-speech": {
+        "title": "Real Speech STT/TTS",
+        "proves": "G.711 speech to STT/Rasa/TTS.",
+        "flow": "K8s Runner -> SIPp A speech PCAP -> RTPengine -> PlaySBC WAV decode -> Vosk STT -> Real Rasa -> Piper TTS -> RTP prompt/WAV evidence -> HTML Report.",
+        "evidence": "WAV players, RTPengine evidence, AI ladder.",
+    },
+    "ai-rasa-contact-center-sales": {
+        "title": "Contact-Center Sales Bot",
+        "proves": "Virtual SIPp B bot-agent sales flow.",
+        "flow": "K8s Runner -> SIPp A -> PlaySBC virtual SIPp B Bot Agent -> RTPengine -> Vosk STT -> Real Rasa sales workflow -> Piper TTS -> HTML Report.",
+        "evidence": "Speech WAVs, contact-center ladder, log.ai.",
+    },
+    "ai-rasa-chat-nlu": {
+        "title": "Chat Intent Matrix",
+        "proves": "Positive chat intent routing.",
+        "flow": "Chat YAML -> K8s Runner -> PlaySBC Guard -> Rasa NLU /model/parse -> Rasa Bot Webhook -> JSON verdict/chat window -> HTML Report.",
+        "evidence": "rasa-nlu-results.json, log.rasa-nlu, Rasa chat window, NLP Chat/Rasa ladder.",
+    },
+    "ai-rasa-chat-negative": {
+        "title": "Negative Chat / Guardrails",
+        "proves": "Negative chat and safety guardrails.",
+        "flow": "Negative Chat YAML -> K8s Runner -> PlaySBC no-input/language guards -> Rasa NLU/webhook when valid -> JSON verdict/guardrail chat window -> HTML Report.",
+        "evidence": "rasa-nlu-results.json, log.rasa-nlu, guardrail chat window, NLP ladder.",
+    },
+}
 OPTIONAL_B2BUA_PROFILES: tuple[str, ...] = ()
 SELECTABLE_B2BUA_PROFILES = ALL_B2BUA_PROFILES
 RTPENGINE_B2BUA_PROFILES = (
@@ -200,8 +249,32 @@ def embedded_audio_src(path: Path) -> Optional[str]:
     return f"data:audio/wav;base64,{encoded}"
 
 
+def evidence_bundle_candidates(log_path: str, report_dir: Optional[Path] = None) -> List[Path]:
+    path = Path(log_path)
+    candidates = [path]
+    if report_dir is not None:
+        run_root = report_dir.parent
+        bundle_name = path.name
+        candidates.extend(
+            [
+                run_root / bundle_name,
+                run_root / "RASA-Regression" / bundle_name,
+                run_root / "k8s-Regression" / bundle_name,
+                run_root / "b2bua-Regression" / bundle_name,
+            ]
+        )
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            unique.append(candidate)
+            seen.add(key)
+    return unique
+
+
 def discover_audio_evidence(log_path: str, report_dir: Optional[Path] = None) -> List[AudioEvidence]:
-    root = Path(log_path)
+    root = next((candidate for candidate in evidence_bundle_candidates(log_path, report_dir) if candidate.is_dir()), Path(log_path))
     if not root.is_dir():
         return []
     wav_files = [
@@ -216,6 +289,78 @@ def discover_audio_evidence(log_path: str, report_dir: Optional[Path] = None) ->
         data_src = embedded_audio_src(path)
         evidence.append(AudioEvidence(audio_evidence_label(path), str(path), data_src or file_src, file_src, bool(data_src)))
     return evidence
+
+
+def discover_chat_nlu_evidence(log_path: str, report_dir: Optional[Path] = None) -> List[dict]:
+    result_path = next(
+        (
+            candidate / "rasa-nlu-results.json"
+            for candidate in evidence_bundle_candidates(log_path, report_dir)
+            if (candidate / "rasa-nlu-results.json").is_file()
+        ),
+        Path(log_path) / "rasa-nlu-results.json",
+    )
+    if not result_path.is_file():
+        return []
+    try:
+        parsed = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def rasa_profile_from_row(row: "ReportRow") -> str:
+    row_text = f"{row.name} {row.suite} {row.command}"
+    for profile in RASA_TEST_PROFILES:
+        if f"[{profile}]" in row.name or re.search(rf"(^|[^a-z0-9-]){re.escape(profile)}([^a-z0-9-]|$)", row_text):
+            return profile
+    return ""
+
+
+def render_rasa_test_section(rows: List["ReportRow"]) -> str:
+    ordered_profiles: List[str] = []
+    status_by_profile: dict[str, str] = {}
+    for row in rows:
+        profile = rasa_profile_from_row(row)
+        if profile and profile not in ordered_profiles:
+            ordered_profiles.append(profile)
+        if profile:
+            status_by_profile[profile] = row.status
+    if not ordered_profiles:
+        return ""
+
+    cards = []
+    for profile in ordered_profiles:
+        flow = RASA_TEST_FLOWS.get(profile, {})
+        status = status_by_profile.get(profile, "unknown")
+        status_class = "pass" if status == "passed" else "blocked" if status == "blocked" else "fail"
+        cards.append(
+            "<article class=\"rasa-card\">"
+            "<div class=\"rasa-card-head\">"
+            f"<h3>{html.escape(str(flow.get('title') or profile))}</h3>"
+            f"<span class=\"badge {status_class}\">{html.escape(status.upper())}</span>"
+            "</div>"
+            f"<code>{html.escape(profile)}</code>"
+            f"<p><strong>Purpose:</strong> {html.escape(str(flow.get('proves') or 'RASA profile validation.'))}</p>"
+            f"<p><strong>Flow:</strong> {html.escape(str(flow.get('flow') or 'See per-test evidence.'))}</p>"
+            "</article>"
+        )
+
+    common_flow = (
+        "Kubernetes RASA regression prepares the profile config, rolls PlaySBC/RTPengine/Rasa components as needed, "
+        "runs either SIPp voice traffic or direct chat/NLU inputs, captures PlaySBC AI evidence, validates the expected "
+        "Rasa outcome, and renders the result in the HTML report."
+    )
+    return (
+        "<section class=\"rasa-section\">"
+        "<div class=\"rasa-section-head\">"
+        "<span class=\"eyebrow\">RASA test section</span>"
+        "<h2>AI/Rasa End-to-End Regression Flow</h2>"
+        f"<p>{html.escape(common_flow)}</p>"
+        "</div>"
+        f"<div class=\"rasa-grid\">{''.join(cards)}</div>"
+        "</section>"
+    )
 
 
 def run_command(command: List[str], timeout: int) -> tuple[int, float, str, str]:
@@ -582,6 +727,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
     blocked = sum(1 for row in rows if row.status == "blocked")
     failed = sum(1 for row in rows if row.status not in {"passed", "blocked"})
     summary_class = "pass" if failed == 0 and blocked == 0 else "blocked" if failed == 0 else "fail"
+    rasa_section_html = render_rasa_test_section(rows)
     row_html = []
     for row in rows:
         status_class = "pass" if row.status == "passed" else "blocked" if row.status == "blocked" else "fail"
@@ -600,22 +746,30 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
                 f"<td>{html.escape(phase.detail)}</td>"
                 "</tr>"
             )
+        chat_nlu_evidence = discover_chat_nlu_evidence(row.log_path, report_dir)
+        is_chat_nlu = bool(chat_nlu_evidence)
         ladder_html = ""
         if row.sip_ladder:
-            is_ai_ladder = "AI VOICE" in row.sip_ladder or "ai-rasa" in row.name
-            ladder_title = "Unified SIP/RTP/AI Ladder" if is_ai_ladder else "Unified SIP Ladder"
-            ladder_note = (
-                "Single ordered ladder for the test case. AI speech profiles show RTPengine, Vosk STT, Rasa, and Piper TTS in the same call flow."
-                if is_ai_ladder
-                else "Single ordered SIP ladder for the test case."
-            )
+            if is_chat_nlu:
+                ladder_title = "NLP Chat/Rasa Ladder"
+                ladder_note = (
+                    "Chat-specific ladder for the Rasa NLU regression path. This is not a SIP/RTP ladder."
+                )
+            else:
+                is_ai_ladder = "AI VOICE" in row.sip_ladder or "ai-rasa" in row.name
+                ladder_title = "Unified SIP/RTP/AI Ladder" if is_ai_ladder else "Unified SIP Ladder"
+                ladder_note = (
+                    "Single ordered ladder for the test case. AI speech profiles show RTPengine, Vosk STT, Rasa, and Piper TTS in the same call flow."
+                    if is_ai_ladder
+                    else "Single ordered SIP ladder for the test case."
+                )
             ladder_html = (
                 f"<section class=\"ladder\"><h2>{html.escape(ladder_title)}</h2>"
                 f"<p>{html.escape(ladder_note)}</p>"
                 f"<pre>{html.escape(row.sip_ladder)}</pre></section>"
             )
         audio_html = ""
-        audio_evidence = discover_audio_evidence(row.log_path, report_dir)
+        audio_evidence = [] if is_chat_nlu else discover_audio_evidence(row.log_path, report_dir)
         if audio_evidence:
             players = []
             for evidence in audio_evidence:
@@ -634,8 +788,46 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
                 "<p>Replay the decoded caller speech WAV and generated Piper response WAV directly from this report.</p>"
                 f"{''.join(players)}</section>"
             )
+        chat_nlu_html = ""
+        if chat_nlu_evidence:
+            chat_turns = []
+            for item in chat_nlu_evidence:
+                case_status = str(item.get("status", "failed"))
+                case_class = "pass" if case_status == "passed" else "fail"
+                user_input = str(item.get("user_input", ""))
+                if not user_input:
+                    user_input = "(empty message)"
+                bot_reply = str(item.get("bot_reply", "")).strip() or "No bot response was captured for this chat turn."
+                chat_turns.append(
+                    f"<article class=\"chat-turn {case_class}\">"
+                    "<div class=\"chat-head\">"
+                    f"<span class=\"keyword\">{html.escape(str(item.get('case_id', '')))}</span>"
+                    f"<span class=\"badge {case_class}\">{html.escape(case_status.upper())}</span>"
+                    "</div>"
+                    "<div class=\"chat-message user\">"
+                    "<strong>User</strong>"
+                    f"<p>{html.escape(user_input)}</p>"
+                    "</div>"
+                    "<div class=\"chat-message bot\">"
+                    "<strong>Rasa Bot</strong>"
+                    f"<p>{html.escape(bot_reply)}</p>"
+                    "<div class=\"intent-line\">"
+                    f"<span>Expected <b>{html.escape(str(item.get('expected_intent', '')))}</b></span>"
+                    f"<span>Predicted <b>{html.escape(str(item.get('predicted_intent', '')))}</b></span>"
+                    f"<span>Confidence <b>{float(item.get('confidence') or 0.0):.3f}</b></span>"
+                    "</div>"
+                    f"<small>{html.escape(str(item.get('detail', '')))}</small>"
+                    "</div>"
+                    "</article>"
+                )
+            chat_nlu_html = (
+                "<section class=\"chat-evidence\"><h2>Rasa Chat Window</h2>"
+                "<p>Each message is sent to real Rasa /model/parse and, when input is present, the REST webhook reply is captured as the bot response.</p>"
+                f"<div class=\"chat-window\">{''.join(chat_turns)}</div></section>"
+            )
+        open_attr = " open" if row.status != "passed" or is_chat_nlu else ""
         row_html.append(
-            f"<details class=\"test-case {status_class}\" open>"
+            f"<details class=\"test-case {status_class}\"{open_attr}>"
             "<summary>"
             f"<span class=\"test-name\">{html.escape(row.name)}</span>"
             f"<span class=\"suite\">{html.escape(row.suite)}</span>"
@@ -653,6 +845,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
             "</tr></thead><tbody>"
             f"{''.join(phase_html)}"
             "</tbody></table>"
+            f"{chat_nlu_html}"
             f"{audio_html}"
             f"{ladder_html}"
             "</div></details>"
@@ -675,6 +868,14 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
     .summary.pass {{ background: #ecfdf5; border: 1px solid #16a34a; }}
     .summary.blocked {{ background: #fffbeb; border: 1px solid #f59e0b; }}
     .summary.fail {{ background: #fef2f2; border: 1px solid #dc2626; }}
+    .rasa-section {{ background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin: 18px 0; }}
+    .rasa-section-head h2 {{ margin: 4px 0 6px; font-size: 20px; }}
+    .rasa-section-head p {{ margin: 0 0 14px; color: #4b5563; line-height: 1.45; }}
+    .rasa-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }}
+    .rasa-card {{ border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; background: #f8fafc; }}
+    .rasa-card-head {{ display: flex; justify-content: space-between; align-items: start; gap: 8px; margin-bottom: 6px; }}
+    .rasa-card h3 {{ margin: 0; font-size: 15px; color: #111827; }}
+    .rasa-card p {{ margin: 8px 0 0; font-size: 13px; color: #374151; line-height: 1.42; }}
     .test-case {{ background: #fff; border: 1px solid #d1d5db; border-left: 5px solid #16a34a; border-radius: 6px; margin: 10px 0; overflow: hidden; }}
     .test-case.blocked {{ border-left-color: #f59e0b; }}
     .test-case.fail {{ border-left-color: #dc2626; }}
@@ -696,14 +897,27 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
     code {{ font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }}
     .keyword {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; color: #1d4ed8; }}
     .elapsed {{ font-variant-numeric: tabular-nums; white-space: nowrap; }}
-    .audio-evidence, .ladder {{ margin-top: 16px; }}
-    .audio-evidence h2, .ladder h2 {{ margin: 0 0 8px; font-size: 14px; text-transform: uppercase; color: #374151; }}
-    .audio-evidence p, .ladder p {{ margin: 0 0 10px; color: #4b5563; font-size: 13px; }}
+    .audio-evidence, .chat-evidence, .ladder {{ margin-top: 16px; }}
+    .audio-evidence h2, .chat-evidence h2, .ladder h2 {{ margin: 0 0 8px; font-size: 14px; text-transform: uppercase; color: #374151; }}
+    .audio-evidence p, .chat-evidence p, .ladder p {{ margin: 0 0 10px; color: #4b5563; font-size: 13px; }}
     .audio-item {{ display: grid; grid-template-columns: minmax(240px, 1fr) minmax(260px, 420px); align-items: center; gap: 12px; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #f9fafb; margin-top: 8px; }}
     .audio-item strong {{ display: block; margin-bottom: 4px; color: #111827; }}
     .audio-item span {{ display: inline-block; margin: 0 0 4px; color: #166534; font-size: 12px; font-weight: 750; }}
     .audio-item a {{ display: inline-block; margin-top: 6px; color: #2563eb; font-size: 12px; font-weight: 700; }}
     .audio-item audio {{ width: 100%; }}
+    .chat-window {{ display: grid; gap: 12px; border: 1px solid #d1d5db; border-radius: 8px; padding: 14px; background: #f8fafc; }}
+    .chat-turn {{ display: grid; gap: 8px; padding: 12px; border-radius: 8px; background: #fff; border: 1px solid #dbe4ef; }}
+    .chat-turn.fail {{ border-color: #fecaca; background: #fff7f7; }}
+    .chat-head {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; }}
+    .chat-message {{ width: min(760px, 92%); padding: 10px 12px; border-radius: 8px; }}
+    .chat-message strong {{ display: block; margin-bottom: 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }}
+    .chat-message p {{ margin: 0; line-height: 1.45; }}
+    .chat-message.user {{ justify-self: start; background: #dbeafe; border: 1px solid #60a5fa; color: #172554; }}
+    .chat-message.bot {{ justify-self: end; background: #ecfdf5; border: 1px solid #34d399; color: #064e3b; }}
+    .chat-turn.fail .chat-message.bot {{ background: #fee2e2; border-color: #f87171; color: #7f1d1d; }}
+    .intent-line {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }}
+    .intent-line span {{ padding: 4px 7px; border-radius: 999px; background: rgba(255,255,255,.72); border: 1px solid rgba(15,23,42,.12); font-size: 12px; }}
+    .chat-message small {{ display: block; margin-top: 8px; color: inherit; opacity: .78; }}
     .ladder pre {{ margin: 0; padding: 14px; overflow-x: auto; border: 1px solid #d1d5db; background: #111827; color: #e5e7eb; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .badge {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 4px 8px; font-weight: 700; font-size: 12px; }}
     .badge.pass {{ color: #166534; background: #dcfce7; border: 1px solid #16a34a; }}
@@ -719,6 +933,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
       .audio-item {{ grid-template-columns: 1fr; }}
       .phases {{ table-layout: auto; }}
       .phases th:nth-child(3), .phases td:nth-child(3) {{ display: none; }}
+      .chat-message {{ width: 100%; }}
     }}
   </style>
 </head>
@@ -734,6 +949,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
       <strong>Failed: {failed}</strong>
       <strong>Total time: {sum(row.duration_seconds for row in rows):.3f} s</strong>
     </div>
+    {rasa_section_html}
     <section aria-label="Regression test cases">{''.join(row_html)}</section>
   </main>
 </body>

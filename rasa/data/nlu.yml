@@ -17,6 +17,10 @@ nlu:
       - technical support
       - help me with a service issue
       - connect me to support
+      - I have a problem with my connection
+      - My service has stopped working
+      - calls are failing
+      - my SIP trunk is down
 
   - intent: sales
     examples: |
@@ -27,6 +31,10 @@ nlu:
       - new service enquiry
       - sales support
       - I need sales support
+      - Tell me about your pricing plans
+      - I want to purchase a new connection
+      - I want a demo
+      - new connection pricing
 
   - intent: billing
     examples: |
@@ -35,6 +43,10 @@ nlu:
       - invoice help
       - payment issue
       - connect me to billing
+      - Why was I charged twice?
+      - My invoice amount is incorrect
+      - invoice amount is wrong
+      - duplicate charge on my account
 
   - intent: agent
     examples: |
@@ -43,6 +55,9 @@ nlu:
       - representative
       - talk to a person
       - transfer me to an agent
+      - Let me speak with someone
+      - I need a person
+      - connect me to someone
 
   - intent: repeat
     examples: |
@@ -50,6 +65,8 @@ nlu:
       - say that again
       - can you repeat
       - what did you say
+      - That didn't make sense, say it again
+      - say it again please
 
   - intent: confirm
     examples: |
@@ -58,3 +75,52 @@ nlu:
       - okay
       - correct
       - that is right
+      - Yes, please proceed
+      - please proceed
+
+  - intent: deny
+    examples: |
+      - no
+      - no thanks
+      - don't transfer me
+      - No, don't transfer me
+      - I don't want sales
+      - Transfer me actually don't
+      - Transfer me - actually don't
+      - stop the transfer
+      - cancel that
+      - don't do that
+
+  - intent: clarify
+    examples: |
+      - Billing or maybe support
+      - I want help
+      - help
+      - I need help
+      - not sure
+      - maybe support or billing
+      - I am not sure where to go
+
+  - intent: no_input
+    examples: |
+      - silence
+      - no audio
+      - I did not say anything
+
+  - intent: language_limitation
+    examples: |
+      - necesito ayuda
+      - quiero soporte
+      - je veux de l'aide
+
+  - intent: safe_continue
+    examples: |
+      - this is stupid
+      - you are useless
+      - damn this service
+      - this is terrible
+
+  - intent: nlu_fallback
+    examples: |
+      - flibbertigibbet quantum banana
+      - !@#$%^&*

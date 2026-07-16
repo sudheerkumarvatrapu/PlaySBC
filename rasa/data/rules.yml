@@ -36,6 +36,31 @@ rules:
       - intent: confirm
       - action: utter_confirm
 
+  - rule: Deny transfer
+    steps:
+      - intent: deny
+      - action: utter_deny
+
+  - rule: Clarify ambiguous request
+    steps:
+      - intent: clarify
+      - action: utter_clarify
+
+  - rule: Reprompt on no input
+    steps:
+      - intent: no_input
+      - action: utter_no_input
+
+  - rule: Unsupported language
+    steps:
+      - intent: language_limitation
+      - action: utter_language_limitation
+
+  - rule: Safe continuation
+    steps:
+      - intent: safe_continue
+      - action: utter_safe_continue
+
   - rule: Fallback
     steps:
       - intent: nlu_fallback

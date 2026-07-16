@@ -51,15 +51,20 @@ from tools.run_regression_suite import (  # noqa: E402
 from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
-ALL_PROFILES = ALL_B2BUA_PROFILES
-CATALOG_PROFILES = ALL_PROFILES
-RASA_PROFILES = RASA_B2BUA_PROFILES
-SELECTABLE_PROFILES = (*SMOKE_PROFILES, *CATALOG_PROFILES)
+RASA_NLU_PROFILES = ("ai-rasa-chat-nlu", "ai-rasa-chat-negative")
+ALL_PROFILES = (*ALL_B2BUA_PROFILES, *RASA_NLU_PROFILES)
+CATALOG_PROFILES = ALL_B2BUA_PROFILES
+RASA_PROFILES = (*RASA_B2BUA_PROFILES, *RASA_NLU_PROFILES)
+SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES)
 LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
 DEFAULT_OUTPUT_ROOT = str(ROOT / "logs" / "k8s-Regression")
 DEFAULT_REPORT_DIR = str(ROOT / "logs" / "k8s-reports")
 RASA_OUTPUT_ROOT = str(ROOT / "logs" / "RASA-Regression")
 RASA_REPORT_DIR = str(ROOT / "logs" / "RASA-Regression" / "reports")
+RASA_NLU_CASE_FILES = {
+    "ai-rasa-chat-nlu": ROOT / "tests" / "rasa" / "chat_nlu_cases.yml",
+    "ai-rasa-chat-negative": ROOT / "tests" / "rasa" / "chat_negative_cases.yml",
+}
 DEFAULT_ROLLOUT_TIMEOUT = 120
 RASA_ROLLOUT_TIMEOUT = 600
 RASA_PROFILE_LABELS = {
@@ -102,6 +107,22 @@ RASA_PROFILE_LABELS = {
         "stt_node": "Vosk STT",
         "tts_node": "Piper TTS",
         "mode": "SIPp A calls a virtual SIPp B sales agent, RTPengine anchors RTP/RTCP, Vosk transcribes sales speech, real Rasa runs the sales workflow, and Piper returns the bot-agent prompt",
+    },
+    "ai-rasa-chat-nlu": {
+        "title": "AI Rasa Chat NLU - Intent Matrix",
+        "suite": "Kubernetes AI/Rasa NLU",
+        "rasa_node": "Real Rasa NLU",
+        "stt_node": "Chat Input",
+        "tts_node": "Intent Result",
+        "mode": "real Rasa /model/parse validates CHAT-NLU-001 through CHAT-NLU-010 intent routing",
+    },
+    "ai-rasa-chat-negative": {
+        "title": "AI Rasa Negative Chat - Guardrails",
+        "suite": "Kubernetes AI/Rasa NLU",
+        "rasa_node": "Real Rasa NLU",
+        "stt_node": "Chat Input",
+        "tts_node": "Guardrail Result",
+        "mode": "real Rasa /model/parse plus PlaySBC local guards validate CHAT-NEG-001 through CHAT-NEG-010",
     },
 }
 
@@ -404,6 +425,35 @@ def rasa_project_values() -> dict[str, str]:
         "credentials": (project / "credentials.yml").read_text(encoding="utf-8"),
         "endpoints": (project / "endpoints.yml").read_text(encoding="utf-8"),
     }
+
+
+def rasa_nlu_profile_values(profile_name: str, run_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        profile=profile_name,
+        resolved_run_id=run_id,
+        sip_transport="udp",
+        media_backend="internal",
+        users={},
+        trunk_groups=[],
+        hunt_groups=[],
+        number_normalization=[],
+        header_normalization={},
+        transport_policies=[],
+        call_admission={},
+        ha={},
+        reject_unknown_routes=False,
+        ladder_enabled=False,
+        rasa_deployment="real",
+        ai_voice_gateway={
+            "enabled": True,
+            "provider": "rasa",
+            "bot_name": "rasa-nlu",
+            "rasa_webhook_url": "http://playsbc-playsbc-rasa:5005/webhooks/rest/webhook",
+            "rasa_timeout": 5.0,
+            "initial_message": "support",
+            "fallback_text": "Real Rasa NLU bot is unavailable",
+        },
+    )
 
 
 def profile_enables_rtpengine_deployment(profile: SimpleNamespace, args: argparse.Namespace) -> bool:
@@ -890,6 +940,8 @@ class K8sRegressionRunner:
             profile = profile_values(profile_name, self.run_id)
             include_rtpengine = profile_enables_rtpengine_deployment(profile, self.args)
             include_rasa = profile_uses_real_rasa(profile)
+        elif profile_name in RASA_NLU_PROFILES:
+            include_rasa = True
         commands = {
             "kubectl-pods.log": ["get", "pods", "-o", "wide"],
             "kubectl-services.log": ["get", "svc", "-o", "wide"],
@@ -1524,13 +1576,18 @@ class K8sRegressionRunner:
 
         try:
             self.prepare_common(bundle, phases)
-            self.build_and_load_sipp_image(bundle, phases)
+            if profile in RASA_NLU_PROFILES:
+                returncodes, command_lines, sip_ladder = self.profile_rasa_nlu(profile, bundle, phases)
+            else:
+                self.build_and_load_sipp_image(bundle, phases)
             if profile == "options":
                 returncodes, command_lines, sip_ladder = self.profile_options(bundle, phases)
             elif profile == "register-contact":
                 returncodes, command_lines, sip_ladder = self.profile_register_contact(bundle, phases)
             elif profile == "b2bua-signalling":
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_signalling(bundle, phases)
+            elif profile in RASA_NLU_PROFILES:
+                pass
             elif profile in CATALOG_PROFILES:
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_catalog(profile, bundle, phases)
             else:
@@ -1571,6 +1628,127 @@ class K8sRegressionRunner:
             command=" && ".join(command_lines) if command_lines else f"tools/run_k8s_regression.py --profile {profile}",
             phases=phases.phases,
             sip_ladder=sip_ladder,
+        )
+
+    def profile_rasa_nlu(self, profile_name: str, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
+        setup_started = time.monotonic()
+        profile = rasa_nlu_profile_values(profile_name, self.run_id)
+        self.apply_profile_config(profile, bundle, phases)
+        case_file = RASA_NLU_CASE_FILES[profile_name]
+        parse_url = f"http://{self.args.service}-rasa:5005/model/parse"
+        phases.append(
+            "Test Setup",
+            "passed",
+            setup_started,
+            (
+                f"Prepared real Rasa NLU regression profile={profile_name}; "
+                f"case_file={case_file}; parse_url={parse_url}; SIPp/RTP pods are not required."
+            ),
+        )
+
+        execution_started = time.monotonic()
+        command = [
+            sys.executable,
+            str(ROOT / "tools" / "run_rasa_nlu_regression.py"),
+            "--url",
+            parse_url,
+            "--case-file",
+            str(case_file),
+            "--output-dir",
+            str(bundle),
+            "--suite",
+            profile_name,
+            "--timeout",
+            "5",
+        ]
+        result = run_command(command, timeout=self.args.timeout, check=False)
+        self.write_log(bundle, "log.platform", "RASA NLU REGRESSION COMMAND", command_text(command))
+        self.write_log(bundle, "log.platform", "RASA NLU REGRESSION STDOUT", result.stdout)
+        self.write_log(bundle, "log.platform", "RASA NLU REGRESSION STDERR", result.stderr)
+        phases.append(
+            "Test Execution",
+            "passed" if result.returncode == 0 else "failed",
+            execution_started,
+            (
+                f"Ran real Rasa /model/parse chat regression profile={profile_name}; "
+                f"case_count={self.rasa_nlu_case_count(bundle)}; returncode={result.returncode}."
+            ),
+        )
+        ladder = self.rasa_nlu_ladder(profile_name)
+        return [result.returncode], [command_text(command)], ladder
+
+    def rasa_nlu_case_count(self, bundle: Path) -> int:
+        result_path = bundle / "rasa-nlu-results.json"
+        try:
+            parsed = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 0
+        return len(parsed) if isinstance(parsed, list) else 0
+
+    def rasa_nlu_ladder(self, profile_name: str) -> str:
+        title = profile_display_title(profile_name)
+        participants = ["Chat YAML", "K8s Runner", "PlaySBC Guard", "Rasa NLU", "Rasa Bot", "HTML Report"]
+        lane_width = 20
+        prefix_width = 6
+        total_width = prefix_width + lane_width * len(participants)
+        centers = [prefix_width + index * lane_width + lane_width // 2 for index, _name in enumerate(participants)]
+
+        def lane_line(step: str = "") -> list[str]:
+            chars = list(f"{step:<5} " + (" " * (total_width - prefix_width)))
+            for center in centers:
+                chars[center] = "|"
+            return chars
+
+        def place_text(chars: list[str], text: str, start: int, end: int) -> None:
+            if end <= start:
+                return
+            clipped = text[: max(0, end - start)]
+            for offset, character in enumerate(clipped):
+                chars[start + offset] = character
+
+        def message(step: str, src: int, dst: int, label: str) -> list[str]:
+            left, right = sorted((centers[src], centers[dst]))
+            label_chars = lane_line(step)
+            label_start = left + max(1, ((right - left - len(label)) // 2))
+            place_text(label_chars, label, label_start, right)
+
+            arrow_chars = lane_line()
+            if src < dst:
+                for index in range(centers[src] + 1, centers[dst] - 1):
+                    arrow_chars[index] = "-"
+                arrow_chars[centers[dst] - 1] = ">"
+            else:
+                for index in range(centers[dst] + 2, centers[src]):
+                    arrow_chars[index] = "-"
+                arrow_chars[centers[dst] + 1] = "<"
+            return ["".join(label_chars).rstrip(), "".join(arrow_chars).rstrip()]
+
+        header = "Step  " + "".join(f"{participant:^{lane_width}}" for participant in participants)
+        lines = [
+            header,
+            "-" * len(header),
+            "".join(lane_line()).rstrip(),
+        ]
+        for step, src, dst, label in [
+            ("01", 0, 1, "load YAML cases"),
+            ("02", 1, 2, "validate text"),
+            ("03", 2, 1, "local guard result"),
+            ("04", 1, 3, "POST /model/parse"),
+            ("05", 3, 1, "intent + confidence"),
+            ("06", 1, 4, "POST /webhook"),
+            ("07", 4, 1, "bot reply text"),
+            ("08", 1, 5, "write JSON verdicts"),
+            ("09", 1, 5, "render chat + ladder"),
+        ]:
+            lines.extend(message(step, src, dst, label))
+
+        return (
+            "NLP CHAT / RASA LADDER\n"
+            f"profile={profile_name}\n"
+            f"case={title}\n"
+            f"mode={profile_mode_detail(profile_name)}\n"
+            + "\n".join(lines)
+            + "\n"
         )
 
     def profile_b2bua_catalog(self, profile_name: str, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
@@ -2124,8 +2302,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--helm-release", default="playsbc")
     parser.add_argument("--chart", default=str(ROOT / "charts" / "playsbc"))
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
-    parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 50 B2BUA profiles on Kubernetes, including Rasa/contact-center profiles")
-    parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
+    parser.add_argument("--all-profiles", action="store_true", help="Run the canonical Kubernetes profile catalog, including SIPp, Rasa voice, and Rasa chat/NLU profiles")
+    parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa voice and chat/NLU profiles")
     parser.add_argument("--list-profiles", action="store_true")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
@@ -2167,10 +2345,11 @@ def main() -> int:
     ensure_binary(args.kubectl_bin)
     ensure_binary(args.helm_bin)
     if args.list_profiles:
-        print("Available Kubernetes B2BUA profiles:")
+        print("Available Kubernetes regression profiles:")
         for profile in ALL_PROFILES:
             label = profile_execution_label(profile)
-            print(f"  {profile}: {label} - {PROFILE_DESCRIPTIONS.get(profile, 'Real dual-realm RTPengine transcoding topology profile.')}")
+            description = PROFILE_DESCRIPTIONS.get(profile) or profile_mode_detail(profile)
+            print(f"  {profile}: {label} - {description}")
         print("\nRasa shortcut:")
         for profile in RASA_PROFILES:
             print(f"  --rasa-profiles includes {profile}: {profile_display_title(profile)}")

@@ -101,6 +101,45 @@ class RasaRestClientTests(unittest.TestCase):
         self.assertEqual(result.stt.provider, "lab-scripted")
         self.assertEqual(result.tts.provider, "text-only")
 
+    def test_ai_voice_gateway_reprompts_empty_input_without_calling_rasa(self):
+        async def fake_send(_client, _sender, _message, _metadata):
+            raise AssertionError("blank input should be handled before the Rasa REST call")
+
+        with mock.patch.object(RasaRestClient, "send_message_async", fake_send):
+            gateway = AiVoiceGateway(
+                AiVoiceConfig(
+                    enabled=True,
+                    initial_message="   ",
+                    no_input_text="Please say support, sales, billing, or agent.",
+                )
+            )
+            result = asyncio.run(gateway.start_turn("call-empty", {"callee": "ai-bot"}))
+
+        self.assertFalse(result.fallback_used)
+        self.assertEqual(result.error, "no_input")
+        self.assertEqual(result.user_text, "")
+        self.assertEqual(result.rendered_text, "Please say support, sales, billing, or agent.")
+
+    def test_ai_voice_gateway_caps_very_long_input_before_rasa(self):
+        captured = {}
+
+        async def fake_send(_client, _sender, message, _metadata):
+            captured["message"] = message
+            return [FakeBotResponse("processed safely")]
+
+        with mock.patch.object(RasaRestClient, "send_message_async", fake_send):
+            gateway = AiVoiceGateway(
+                AiVoiceConfig(
+                    enabled=True,
+                    initial_message="x" * 120,
+                    max_user_text_chars=32,
+                )
+            )
+            result = asyncio.run(gateway.start_turn("call-long", {}))
+
+        self.assertEqual(captured["message"], "x" * 32)
+        self.assertEqual(result.rendered_text, "processed safely")
+
     def test_ai_voice_gateway_extracts_bot_actions_from_rasa_custom_payload(self):
         async def fake_send(_client, _sender, _message, _metadata):
             return [

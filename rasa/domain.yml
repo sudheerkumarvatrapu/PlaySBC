@@ -8,6 +8,11 @@ intents:
   - agent
   - repeat
   - confirm
+  - deny
+  - clarify
+  - no_input
+  - language_limitation
+  - safe_continue
   - nlu_fallback
 
 responses:
@@ -41,6 +46,16 @@ responses:
     - text: "Sure. PlaySBC is connected to real Rasa over the REST channel."
   utter_confirm:
     - text: "Confirmed. The AI control path is alive."
+  utter_deny:
+    - text: "Okay, I will not transfer you. You can ask for support, sales, billing, or an agent."
+  utter_clarify:
+    - text: "I can help with support, sales, billing, or an agent. Which one do you need?"
+  utter_no_input:
+    - text: "I did not hear anything. Please say support, sales, billing, or agent."
+  utter_language_limitation:
+    - text: "I can help in English in this lab. Please repeat the request in English."
+  utter_safe_continue:
+    - text: "I can continue helping with support, sales, billing, or an agent."
   utter_default:
     - text: "I heard you, but I am not sure where to route this yet."
 

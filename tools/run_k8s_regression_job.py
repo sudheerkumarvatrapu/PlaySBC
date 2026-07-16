@@ -570,7 +570,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--set-playsbc-image", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--kind-cluster", default="playsbc")
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
-    parser.add_argument("--all-profiles", action="store_true", help="Run all canonical B2BUA profiles; default when --profile is omitted")
+    parser.add_argument("--all-profiles", action="store_true", help="Run all canonical Kubernetes regression profiles; default when --profile is omitted")
     parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--service", default="playsbc-playsbc")
@@ -634,7 +634,7 @@ def main() -> int:
         print(f"Launching Kubernetes RASA Regression Job for {len(RASA_PROFILES)} profiles.")
         print(f"Local output directory: {args.output_dir}")
     elif args.all_profiles or not args.profile:
-        print(f"Launching Kubernetes Job for {len(ALL_PROFILES)} B2BUA profiles.")
+        print(f"Launching Kubernetes Job for {len(ALL_PROFILES)} profiles.")
     else:
         print(f"Launching Kubernetes Job for profiles: {', '.join(args.profile)}")
     return run_job(args)

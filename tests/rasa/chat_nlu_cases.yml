@@ -1,0 +1,34 @@
+version: "1.0"
+suite: chat-nlu-intent-routing
+description: "Direct Rasa chat/NLU routing cases for the PlaySBC AI contact-center lab."
+cases:
+  - id: CHAT-NLU-001
+    user_input: "I have a problem with my connection"
+    expected_intent: support
+  - id: CHAT-NLU-002
+    user_input: "My service has stopped working"
+    expected_intent: support
+  - id: CHAT-NLU-003
+    user_input: "Tell me about your pricing plans"
+    expected_intent: sales
+  - id: CHAT-NLU-004
+    user_input: "I want to purchase a new connection"
+    expected_intent: sales
+  - id: CHAT-NLU-005
+    user_input: "Why was I charged twice?"
+    expected_intent: billing
+  - id: CHAT-NLU-006
+    user_input: "My invoice amount is incorrect"
+    expected_intent: billing
+  - id: CHAT-NLU-007
+    user_input: "Let me speak with someone"
+    expected_intent: agent
+  - id: CHAT-NLU-008
+    user_input: "That didn't make sense, say it again"
+    expected_intent: repeat
+  - id: CHAT-NLU-009
+    user_input: "Yes, please proceed"
+    expected_intent: confirm
+  - id: CHAT-NLU-010
+    user_input: "No, don't transfer me"
+    expected_intent: deny

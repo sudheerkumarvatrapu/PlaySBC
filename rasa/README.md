@@ -5,8 +5,9 @@ This is a tiny real Rasa project for PlaySBC AI Voice Gateway testing.
 It is intentionally small:
 
 - REST channel enabled through `credentials.yml`.
-- NLU intents for `greet`, `support`, `sales`, `billing`, `agent`, `repeat`, and `confirm`.
+- NLU intents for `greet`, `support`, `sales`, `billing`, `agent`, `repeat`, `confirm`, `deny`, and the first chat guardrail intents.
 - Sales workflow supports the contact-center profile where SIPp A calls the virtual `SIPp B Bot Agent`.
+- Chat guardrail coverage lives under `tests/rasa/` for direct intent routing, ambiguous requests, denial, no-input, unsupported language, safe continuation, and fallback examples.
 - Bot responses include normal text and optional `custom.playsbc_action` payloads that PlaySBC can log as bot control actions.
 
 Run with official Rasa:

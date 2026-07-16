@@ -34,6 +34,8 @@ class AiVoiceConfig:
     rasa_timeout: float = 3.0
     initial_message: str = "hello"
     fallback_text: str = "AI assistant is not available right now."
+    no_input_text: str = "I did not hear anything. Please say support, sales, billing, or agent."
+    max_user_text_chars: int = 2000
     agent_label: str = "Rasa Bot"
     contact_center_queue: str = ""
     contact_center_skill: str = ""
@@ -64,6 +66,10 @@ class AiVoiceConfig:
             rasa_timeout=float(raw.get("rasa_timeout", 3.0)),
             initial_message=str(raw.get("initial_message", "hello")),
             fallback_text=str(raw.get("fallback_text", "AI assistant is not available right now.")),
+            no_input_text=str(
+                raw.get("no_input_text", "I did not hear anything. Please say support, sales, billing, or agent.")
+            ),
+            max_user_text_chars=max(1, int(raw.get("max_user_text_chars", 2000))),
             agent_label=str(raw.get("agent_label", "Rasa Bot")),
             contact_center_queue=str(raw.get("contact_center_queue", "")),
             contact_center_skill=str(raw.get("contact_center_skill", "")),
@@ -90,6 +96,8 @@ class AiVoiceConfig:
             "rasa_timeout": self.rasa_timeout,
             "initial_message": self.initial_message,
             "fallback_text": self.fallback_text,
+            "no_input_text": self.no_input_text,
+            "max_user_text_chars": self.max_user_text_chars,
             "agent_label": self.agent_label,
             "contact_center_queue": self.contact_center_queue,
             "contact_center_skill": self.contact_center_skill,
@@ -183,7 +191,26 @@ class AiVoiceGateway:
     ) -> AiTurnResult:
         started = time.monotonic()
         stt_result = await self.stt.transcribe(self.initial_user_text(dtmf_digits), audio_path)
-        user_text = stt_result.text
+        user_text = self.prepare_user_text(stt_result.text)
+        if not user_text:
+            tts_result = await self.tts.synthesize(
+                self.config.no_input_text,
+                output_path=tts_output_path,
+                rtp_path=tts_rtp_path,
+                codec=tts_codec,
+            )
+            return AiTurnResult(
+                sender=sender,
+                user_text="",
+                bot_responses=[RasaBotResponse(text=self.config.no_input_text)],
+                fallback_used=False,
+                error="no_input",
+                duration_seconds=time.monotonic() - started,
+                stt=stt_result,
+                tts=tts_result,
+                bot_actions=[],
+                response_mode=self.config.response_mode,
+            )
         try:
             responses = await self.rasa.send_message_async(sender, user_text, metadata or {})
             rendered_text = " ".join(response.text for response in responses if response.text)
@@ -225,6 +252,12 @@ class AiVoiceGateway:
                 bot_actions=[],
                 response_mode=self.config.response_mode,
             )
+
+    def prepare_user_text(self, text: str) -> str:
+        cleaned = text.strip()
+        if not cleaned:
+            return ""
+        return cleaned[: self.config.max_user_text_chars]
 
     def extract_bot_actions(self, responses: List[RasaBotResponse]) -> List[BotAction]:
         if not self.config.bot_actions_enabled:

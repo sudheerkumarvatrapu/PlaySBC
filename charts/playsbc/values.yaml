@@ -4,7 +4,7 @@ image:
   # For direct deployments after image publishing, use:
   # repository: ghcr.io/sudheerkumarvatrapu/playsbc
   repository: playsbc
-  tag: "1.2.1"
+  tag: "1.2.2"
   pullPolicy: IfNotPresent
 
 service:
@@ -67,11 +67,21 @@ rasa:
       language: en
       pipeline:
         - name: WhitespaceTokenizer
+        - name: RegexFeaturizer
+        - name: LexicalSyntacticFeaturizer
         - name: CountVectorsFeaturizer
         - name: DIETClassifier
+          epochs: 100
+        - name: EntitySynonymMapper
+        - name: ResponseSelector
           epochs: 40
+        - name: FallbackClassifier
+          threshold: 0.05
       policies:
         - name: RulePolicy
+          core_fallback_threshold: 0.4
+          core_fallback_action_name: utter_default
+          enable_fallback_prediction: true
     domain: |
       version: "3.1"
       intents:
@@ -82,6 +92,11 @@ rasa:
         - agent
         - repeat
         - confirm
+        - deny
+        - clarify
+        - no_input
+        - language_limitation
+        - safe_continue
         - nlu_fallback
       responses:
         utter_greet:
@@ -114,6 +129,16 @@ rasa:
           - text: "Sure. PlaySBC is connected to real Rasa over the REST channel."
         utter_confirm:
           - text: "Confirmed. The AI control path is alive."
+        utter_deny:
+          - text: "Okay, I will not transfer you. You can ask for support, sales, billing, or an agent."
+        utter_clarify:
+          - text: "I can help with support, sales, billing, or an agent. Which one do you need?"
+        utter_no_input:
+          - text: "I did not hear anything. Please say support, sales, billing, or agent."
+        utter_language_limitation:
+          - text: "I can help in English in this lab. Please repeat the request in English."
+        utter_safe_continue:
+          - text: "I can continue helping with support, sales, billing, or an agent."
         utter_default:
           - text: "I heard you, but I am not sure where to route this yet."
       session_config:
@@ -132,6 +157,8 @@ rasa:
             - support
             - I need support
             - connect me to support
+            - I have a problem with my connection
+            - My service has stopped working
         - intent: sales
           examples: |
             - sales
@@ -139,24 +166,60 @@ rasa:
             - connect me to sales
             - sales support
             - I need sales support
+            - Tell me about your pricing plans
+            - I want to purchase a new connection
         - intent: billing
           examples: |
             - billing
             - invoice help
             - payment issue
+            - Why was I charged twice?
+            - My invoice amount is incorrect
         - intent: agent
           examples: |
             - agent
             - human agent
             - transfer me to an agent
+            - Let me speak with someone
         - intent: repeat
           examples: |
             - repeat
             - say that again
+            - That didn't make sense, say it again
         - intent: confirm
           examples: |
             - yes
             - confirm
+            - Yes, please proceed
+        - intent: deny
+          examples: |
+            - no
+            - No, don't transfer me
+            - I don't want sales
+            - Transfer me actually don't
+            - don't transfer me
+        - intent: clarify
+          examples: |
+            - Billing or maybe support
+            - I want help
+            - help
+            - I need help
+        - intent: no_input
+          examples: |
+            - silence
+            - no audio
+        - intent: language_limitation
+          examples: |
+            - necesito ayuda
+            - je veux de l'aide
+        - intent: safe_continue
+          examples: |
+            - this is stupid
+            - damn this service
+        - intent: nlu_fallback
+          examples: |
+            - flibbertigibbet quantum banana
+            - !@#$%^&*
     rules: |
       version: "3.1"
       rules:
@@ -188,6 +251,26 @@ rasa:
           steps:
             - intent: confirm
             - action: utter_confirm
+        - rule: Deny transfer
+          steps:
+            - intent: deny
+            - action: utter_deny
+        - rule: Clarify ambiguous request
+          steps:
+            - intent: clarify
+            - action: utter_clarify
+        - rule: Reprompt on no input
+          steps:
+            - intent: no_input
+            - action: utter_no_input
+        - rule: Unsupported language
+          steps:
+            - intent: language_limitation
+            - action: utter_language_limitation
+        - rule: Safe continuation
+          steps:
+            - intent: safe_continue
+            - action: utter_safe_continue
         - rule: Fallback
           steps:
             - intent: nlu_fallback

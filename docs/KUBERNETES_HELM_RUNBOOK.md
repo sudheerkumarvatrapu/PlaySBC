@@ -82,11 +82,11 @@ helm upgrade --install playsbc charts/playsbc \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.2.1 \
+  --set-string image.tag=1.2.2 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.2.1 \
+  --set-string rtpengine.image.tag=1.2.2 \
   --set rtpengine.image.pullPolicy=Always \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
@@ -96,15 +96,15 @@ Deploy from the GitHub release Helm package:
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.2.1/playsbc-1.2.1.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.2.2/playsbc-1.2.2.tgz \
   --namespace playsbc \
   --create-namespace \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.2.1 \
+  --set-string image.tag=1.2.2 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.2.1 \
+  --set-string rtpengine.image.tag=1.2.2 \
   --set rtpengine.image.pullPolicy=Always \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
@@ -221,7 +221,7 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
-This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, `ai-rasa-real-lab`, `ai-rasa-rtpengine-speech`, and `ai-rasa-contact-center-sales`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
+This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, `ai-rasa-real-lab`, `ai-rasa-rtpengine-speech`, `ai-rasa-contact-center-sales`, `ai-rasa-chat-nlu`, and `ai-rasa-chat-negative`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
 
 If the kind node cannot pull DockerHub images, load Rasa first:
 
@@ -251,7 +251,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression.py --list-profiles
 ```
 
-Run the full 50-profile in-cluster Kubernetes suite:
+Run the full 52-profile in-cluster Kubernetes suite:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
@@ -283,9 +283,9 @@ If all required images are already available in the cluster, skip local builds:
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.2.1 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.2.1 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.2.1 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.2.2 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.2.2 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.2.2 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image
@@ -335,7 +335,7 @@ Coverage:
 - UDP, TCP, TLS/SRTP interworking, RTCP, and DTMF profiles.
 - REGISTER, digest auth success/failure, registered inbound/outbound calls.
 - ESBC route policy, trunk, failover, normalization, admission, health, and metrics profiles.
-- AI/Rasa lab profiles. The default catalog includes mock Rasa, real Rasa, speech STT/TTS, and the contact-center sales bot profile. Run `--profile ai-rasa-real-lab`, `--profile ai-rasa-rtpengine-speech`, or `--profile ai-rasa-contact-center-sales` for targeted real Rasa checks.
+- AI/Rasa lab profiles. The default catalog includes mock Rasa, real Rasa, speech STT/TTS, the contact-center sales bot profile, and real Rasa chat/NLU verifier profiles. Run `--profile ai-rasa-real-lab`, `--profile ai-rasa-rtpengine-speech`, `--profile ai-rasa-contact-center-sales`, `--profile ai-rasa-chat-nlu`, or `--profile ai-rasa-chat-negative` for targeted real Rasa checks.
 - Negative SIP cases such as invalid BYE, unknown route, failed outbound leg, CANCEL, and retransmission.
 - Small load, soak, and 5 cps / 60 second CHT load profiles.
 
@@ -375,7 +375,7 @@ helm lint charts/playsbc
 helm template playsbc charts/playsbc \
   --namespace playsbc \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.2.1 \
+  --set-string image.tag=1.2.2 \
   --set rtpengine.enabled=true
 ```
 

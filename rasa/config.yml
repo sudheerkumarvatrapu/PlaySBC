@@ -7,12 +7,12 @@ pipeline:
   - name: LexicalSyntacticFeaturizer
   - name: CountVectorsFeaturizer
   - name: DIETClassifier
-    epochs: 40
+    epochs: 100
   - name: EntitySynonymMapper
   - name: ResponseSelector
-    epochs: 20
+    epochs: 40
   - name: FallbackClassifier
-    threshold: 0.45
+    threshold: 0.05
 
 policies:
   - name: RulePolicy

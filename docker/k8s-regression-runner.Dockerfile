@@ -36,6 +36,7 @@ COPY rasa /workspace/rasa
 COPY rtp /workspace/rtp
 COPY sip /workspace/sip
 COPY sipp /workspace/sipp
+COPY tests/rasa /workspace/tests/rasa
 COPY tools /workspace/tools
 COPY mini_call_server.py /workspace/mini_call_server.py
 COPY VERSION /workspace/VERSION
