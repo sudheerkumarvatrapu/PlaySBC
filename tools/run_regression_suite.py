@@ -722,12 +722,18 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
     ]
 
 
-def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_dir: Optional[Path] = None) -> str:
+def render_html(
+    rows: List[ReportRow],
+    generated_at: str,
+    run_id: str,
+    report_dir: Optional[Path] = None,
+    include_rasa_test_section: bool = False,
+) -> str:
     passed = sum(1 for row in rows if row.status == "passed")
     blocked = sum(1 for row in rows if row.status == "blocked")
     failed = sum(1 for row in rows if row.status not in {"passed", "blocked"})
     summary_class = "pass" if failed == 0 and blocked == 0 else "blocked" if failed == 0 else "fail"
-    rasa_section_html = render_rasa_test_section(rows)
+    rasa_section_html = render_rasa_test_section(rows) if include_rasa_test_section else ""
     row_html = []
     for row in rows:
         status_class = "pass" if row.status == "passed" else "blocked" if row.status == "blocked" else "fail"
@@ -825,7 +831,7 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
                 "<p>Each message is sent to real Rasa /model/parse and, when input is present, the REST webhook reply is captured as the bot response.</p>"
                 f"<div class=\"chat-window\">{''.join(chat_turns)}</div></section>"
             )
-        open_attr = " open" if row.status != "passed" or is_chat_nlu else ""
+        open_attr = " open" if row.status != "passed" and not is_chat_nlu else ""
         row_html.append(
             f"<details class=\"test-case {status_class}\"{open_attr}>"
             "<summary>"
@@ -957,10 +963,16 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
 """
 
 
-def write_reports(rows: List[ReportRow], report_dir: Path, run_id: str) -> Path:
+def write_reports(rows: List[ReportRow], report_dir: Path, run_id: str, include_rasa_test_section: bool = False) -> Path:
     report_dir.mkdir(parents=True, exist_ok=True)
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
-    html_text = render_html(rows, generated_at, run_id, report_dir=report_dir)
+    html_text = render_html(
+        rows,
+        generated_at,
+        run_id,
+        report_dir=report_dir,
+        include_rasa_test_section=include_rasa_test_section,
+    )
     report_path = report_dir / f"{run_id}.html"
     latest_path = report_dir / "latest.html"
     json_path = report_dir / f"{run_id}.json"
@@ -1063,7 +1075,7 @@ def main() -> int:
                     append_bundle_log(actual_log_path, "log.platform", "RUNNER STDOUT", stdout)
                 rows.extend(parse_b2bua_stdout(profile, stdout, returncode, duration, actual_log_path, command_text))
 
-        report_path = write_reports(rows, report_dir, run_id)
+        report_path = write_reports(rows, report_dir, run_id, include_rasa_test_section=args.rasa_profiles)
         failed = [row for row in rows if row.status != "passed"]
         print(f"Regression report: {report_path}")
         print(f"Latest report: {report_dir / 'latest.html'}")

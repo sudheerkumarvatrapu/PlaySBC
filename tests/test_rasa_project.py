@@ -194,30 +194,35 @@ class RasaProjectTests(unittest.TestCase):
             )
             (bundle / "ai-speech-output.wav").write_bytes(b"old voice evidence")
 
+            rows = [
+                ReportRow(
+                    suite="Kubernetes AI/Rasa NLU",
+                    name="AI Rasa Chat NLU - Intent Matrix [ai-rasa-chat-nlu]",
+                    status="passed",
+                    returncode=0,
+                    duration_seconds=1.0,
+                    log_path=str(bundle),
+                    command="tools/run_rasa_nlu_regression.py",
+                    sip_ladder=(
+                        "NLP CHAT / RASA LADDER\n"
+                        "Step       Chat YAML           K8s Runner        PlaySBC Guard          Rasa NLU            Rasa Bot          HTML Report\n"
+                        "06              |                   |                   |  POST /webhook    |                   |                   |\n"
+                    ),
+                )
+            ]
+            full_suite_html = render_html(rows, "now", "unit-full")
             html = render_html(
-                [
-                    ReportRow(
-                        suite="Kubernetes AI/Rasa NLU",
-                        name="AI Rasa Chat NLU - Intent Matrix [ai-rasa-chat-nlu]",
-                        status="passed",
-                        returncode=0,
-                        duration_seconds=1.0,
-                        log_path=str(bundle),
-                        command="tools/run_rasa_nlu_regression.py",
-                        sip_ladder=(
-                            "NLP CHAT / RASA LADDER\n"
-                            "Step       Chat YAML           K8s Runner        PlaySBC Guard          Rasa NLU            Rasa Bot          HTML Report\n"
-                            "06              |                   |                   |  POST /webhook    |                   |                   |\n"
-                        ),
-                    )
-                ],
+                rows,
                 "now",
                 "unit-rasa",
+                include_rasa_test_section=True,
             )
 
         self.assertIn("Rasa Chat Window", html)
         self.assertIn("RASA test section", html)
         self.assertIn("AI/Rasa End-to-End Regression Flow", html)
+        self.assertNotIn("RASA test section", full_suite_html)
+        self.assertNotIn("AI/Rasa End-to-End Regression Flow", full_suite_html)
         self.assertIn("Chat Intent Matrix", html)
         self.assertIn("Chat YAML", html)
         self.assertIn("K8s Runner", html)
@@ -234,6 +239,45 @@ class RasaProjectTests(unittest.TestCase):
         self.assertIn("sales", html)
         self.assertNotIn("AI Speech Audio Evidence", html)
         self.assertNotIn("<audio controls", html)
+        self.assertIn("<details class=\"test-case pass\">", html)
+        self.assertNotIn("<details class=\"test-case pass\" open>", html)
+
+    def test_regression_html_keeps_failed_chat_nlu_details_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / "bundle"
+            bundle.mkdir()
+            (bundle / "rasa-nlu-results.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "case_id": "CHAT-NEG-005",
+                            "user_input": "random text",
+                            "expected_intent": "fallback",
+                            "predicted_intent": "unknown",
+                            "confidence": 0.10,
+                            "bot_reply": "I did not understand that.",
+                            "status": "failed",
+                            "detail": "expected=fallback predicted=unknown",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            row = ReportRow(
+                suite="Kubernetes AI/Rasa NLU",
+                name="AI Rasa Negative Chat - Guardrails [ai-rasa-chat-negative]",
+                status="failed",
+                returncode=1,
+                duration_seconds=1.0,
+                log_path=str(bundle),
+                command="tools/run_rasa_nlu_regression.py",
+                sip_ladder="NLP CHAT / RASA LADDER\n",
+            )
+
+            html = render_html([row], "now", "unit-rasa", include_rasa_test_section=True)
+
+        self.assertIn("<details class=\"test-case fail\">", html)
+        self.assertNotIn("<details class=\"test-case fail\" open>", html)
 
 
 class FakeRasaParseResponse:

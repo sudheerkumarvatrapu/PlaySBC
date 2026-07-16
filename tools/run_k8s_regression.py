@@ -2376,7 +2376,7 @@ def main() -> int:
     finally:
         restore_error = runner.restore_original_values(report_dir) or ""
     cleanup_old_reports(report_dir, run_id)
-    report_path = write_reports(rows, report_dir, run_id)
+    report_path = write_reports(rows, report_dir, run_id, include_rasa_test_section=args.rasa_profiles)
     print(f"Kubernetes regression report: {report_path}")
     print(f"Latest report: {report_dir / 'latest.html'}")
     for row in rows:
