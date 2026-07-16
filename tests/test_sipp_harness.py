@@ -1905,6 +1905,9 @@ Content-Length: 0
             self.assertIn("Caller speech input", report)
             self.assertIn("Piper TTS output", report)
             self.assertIn("<audio controls", report)
+            self.assertIn("data:audio/wav;base64,", report)
+            self.assertIn("embedded WAV", report)
+            self.assertIn("Open WAV file", report)
             self.assertIn("../bundle/ai-speech-input-call.wav", report)
             self.assertIn("../bundle/ai-tts-output-call.wav", report)
 

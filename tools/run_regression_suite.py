@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 import os
@@ -129,6 +130,7 @@ ROBOT_PHASE_ORDER = (
     "Evidence Validation",
 )
 AUDIO_EVIDENCE_PREFIXES = ("ai-speech-input", "ai-tts-output")
+AUDIO_EMBED_MAX_BYTES = 2_000_000
 
 
 @dataclass
@@ -157,6 +159,8 @@ class AudioEvidence:
     label: str
     path: str
     src: str
+    file_src: str
+    embedded: bool = False
 
 
 def make_run_id() -> str:
@@ -183,6 +187,16 @@ def audio_src_for_report(path: Path, report_dir: Optional[Path]) -> str:
     return urllib.parse.quote(source, safe="/:._~%-")
 
 
+def embedded_audio_src(path: Path) -> Optional[str]:
+    try:
+        if path.stat().st_size > AUDIO_EMBED_MAX_BYTES:
+            return None
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    return f"data:audio/wav;base64,{encoded}"
+
+
 def discover_audio_evidence(log_path: str, report_dir: Optional[Path] = None) -> List[AudioEvidence]:
     root = Path(log_path)
     if not root.is_dir():
@@ -193,10 +207,12 @@ def discover_audio_evidence(log_path: str, report_dir: Optional[Path] = None) ->
         if path.is_file() and path.name.lower().startswith(AUDIO_EVIDENCE_PREFIXES)
     ]
     wav_files.sort(key=lambda path: (0 if path.name.lower().startswith("ai-speech-input") else 1, str(path)))
-    return [
-        AudioEvidence(audio_evidence_label(path), str(path), audio_src_for_report(path, report_dir))
-        for path in wav_files[:6]
-    ]
+    evidence = []
+    for path in wav_files[:6]:
+        file_src = audio_src_for_report(path, report_dir)
+        data_src = embedded_audio_src(path)
+        evidence.append(AudioEvidence(audio_evidence_label(path), str(path), data_src or file_src, file_src, bool(data_src)))
+    return evidence
 
 
 def run_command(command: List[str], timeout: int) -> tuple[int, float, str, str]:
@@ -600,9 +616,13 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
         if audio_evidence:
             players = []
             for evidence in audio_evidence:
+                source_note = "embedded WAV" if evidence.embedded else "linked WAV"
                 players.append(
                     "<div class=\"audio-item\">"
-                    f"<div><strong>{html.escape(evidence.label)}</strong><code>{html.escape(evidence.path)}</code></div>"
+                    f"<div><strong>{html.escape(evidence.label)}</strong>"
+                    f"<span>{html.escape(source_note)}</span>"
+                    f"<code>{html.escape(evidence.path)}</code>"
+                    f"<a href=\"{html.escape(evidence.file_src)}\" download>Open WAV file</a></div>"
                     f"<audio controls preload=\"none\" src=\"{html.escape(evidence.src)}\"></audio>"
                     "</div>"
                 )
@@ -678,6 +698,8 @@ def render_html(rows: List[ReportRow], generated_at: str, run_id: str, report_di
     .audio-evidence p, .ladder p {{ margin: 0 0 10px; color: #4b5563; font-size: 13px; }}
     .audio-item {{ display: grid; grid-template-columns: minmax(240px, 1fr) minmax(260px, 420px); align-items: center; gap: 12px; padding: 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #f9fafb; margin-top: 8px; }}
     .audio-item strong {{ display: block; margin-bottom: 4px; color: #111827; }}
+    .audio-item span {{ display: inline-block; margin: 0 0 4px; color: #166534; font-size: 12px; font-weight: 750; }}
+    .audio-item a {{ display: inline-block; margin-top: 6px; color: #2563eb; font-size: 12px; font-weight: 700; }}
     .audio-item audio {{ width: 100%; }}
     .ladder pre {{ margin: 0; padding: 14px; overflow-x: auto; border: 1px solid #d1d5db; background: #111827; color: #e5e7eb; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .badge {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 4px 8px; font-weight: 700; font-size: 12px; }}
