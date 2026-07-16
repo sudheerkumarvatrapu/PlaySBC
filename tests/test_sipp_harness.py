@@ -2889,6 +2889,13 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(profile.ai_voice_gateway["stt_provider"], "vosk")
         self.assertEqual(profile.ai_voice_gateway["tts_provider"], "piper")
 
+    def test_kubernetes_real_rasa_profiles_inject_current_repo_project(self):
+        project = run_k8s_regression.rasa_project_values()
+
+        self.assertIn("Sales support agent is ready", project["domain"])
+        self.assertIn("I need sales support", project["nlu"])
+        self.assertIn("rest:", project["credentials"])
+
     def test_kubernetes_rasa_profiles_have_distinct_report_names_and_ladders(self):
         args = run_k8s_regression.parse_args(["--rasa-profiles"])
         runner = run_k8s_regression.K8sRegressionRunner(args, "unit-rasa")

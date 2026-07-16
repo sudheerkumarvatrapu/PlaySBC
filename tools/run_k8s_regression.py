@@ -394,6 +394,18 @@ def profile_uses_real_rasa(profile: SimpleNamespace) -> bool:
     )
 
 
+def rasa_project_values() -> dict[str, str]:
+    project = ROOT / "rasa"
+    return {
+        "config": (project / "config.yml").read_text(encoding="utf-8"),
+        "domain": (project / "domain.yml").read_text(encoding="utf-8"),
+        "nlu": (project / "data" / "nlu.yml").read_text(encoding="utf-8"),
+        "rules": (project / "data" / "rules.yml").read_text(encoding="utf-8"),
+        "credentials": (project / "credentials.yml").read_text(encoding="utf-8"),
+        "endpoints": (project / "endpoints.yml").read_text(encoding="utf-8"),
+    }
+
+
 def profile_enables_rtpengine_deployment(profile: SimpleNamespace, args: argparse.Namespace) -> bool:
     return bool(
         args.rtpengine_enabled
@@ -1353,7 +1365,9 @@ class K8sRegressionRunner:
             values.setdefault("tls", {})["enabled"] = False
             values.setdefault("tls", {})["existingSecret"] = ""
         if profile_uses_real_rasa(profile):
-            values.setdefault("rasa", {})["enabled"] = True
+            rasa_values = values.setdefault("rasa", {})
+            rasa_values["enabled"] = True
+            rasa_values["project"] = rasa_project_values()
         elif not (self.original_values or {}).get("rasa", {}).get("enabled", False):
             values.setdefault("rasa", {})["enabled"] = False
         values_path = bundle / "helm-profile-values.yaml"
