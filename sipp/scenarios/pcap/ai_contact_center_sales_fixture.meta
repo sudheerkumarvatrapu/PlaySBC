@@ -1,0 +1,4 @@
+transcript=Connect me to sales
+source=Piper en_US-lessac-low generated contact-center sales prompt
+codec_outputs=PCMU,PCMA
+sample_rate=8000

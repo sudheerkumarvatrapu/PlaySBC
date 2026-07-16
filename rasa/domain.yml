@@ -20,7 +20,7 @@ responses:
         target: support
         reason: support intent
   utter_sales:
-    - text: "Sales path is ready. I can transfer this call to the sales trunk."
+    - text: "Sales support agent is ready. I can help with pricing, demos, or transfer this call to the sales trunk."
       custom:
         playsbc_action: transfer
         target: sip:sales@peer.example

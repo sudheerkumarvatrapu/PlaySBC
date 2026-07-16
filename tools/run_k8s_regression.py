@@ -95,6 +95,14 @@ RASA_PROFILE_LABELS = {
         "tts_node": "Piper TTS",
         "mode": "SIPp plays real G.711 speech, RTPengine anchors RTP/RTCP, PlaySBC decodes RTP to WAV, Vosk transcribes, real Rasa responds, and Piper generates RTP prompt evidence",
     },
+    "ai-rasa-contact-center-sales": {
+        "title": "AI Contact Center - SIPp B Sales Bot Agent",
+        "suite": "Kubernetes AI/Rasa Contact Center",
+        "rasa_node": "SIPp B Bot Agent",
+        "stt_node": "Vosk STT",
+        "tts_node": "Piper TTS",
+        "mode": "SIPp A calls a virtual SIPp B sales agent, RTPengine anchors RTP/RTCP, Vosk transcribes sales speech, real Rasa runs the sales workflow, and Piper returns the bot-agent prompt",
+    },
 }
 
 
@@ -1731,7 +1739,7 @@ class K8sRegressionRunner:
     def ladder_participants(self, profile: SimpleNamespace) -> tuple[str, ...]:
         profile_name = str(getattr(profile, "profile", ""))
         if "ai-rasa" in profile_name:
-            if profile_name == "ai-rasa-rtpengine-speech":
+            if profile_name in {"ai-rasa-rtpengine-speech", "ai-rasa-contact-center-sales"}:
                 stt_node, rasa_node, tts_node = ai_ladder_nodes(profile)
                 return ("Core SIPp A", "RTPengine", "PlaySBC", stt_node, rasa_node, tts_node)
             participants = ["Core SIPp A", "PlaySBC"]
@@ -1813,24 +1821,26 @@ class K8sRegressionRunner:
             flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
-        if profile_name == "ai-rasa-rtpengine-speech":
+        if profile_name in {"ai-rasa-rtpengine-speech", "ai-rasa-contact-center-sales"}:
             flow.sip("Core SIPp A", "RTPengine", "G.711 speech RTP")
             flow.sip("RTPengine", "PlaySBC", "anchored RTP")
             flow.sip("PlaySBC", stt_node, "decode WAV")
-            flow.sip(stt_node, "PlaySBC", "text: i need support")
+            transcript = "text: connect me to sales" if profile_name == "ai-rasa-contact-center-sales" else "text: i need support"
+            flow.sip(stt_node, "PlaySBC", transcript)
         else:
             flow.sip("PlaySBC", stt_node, "scripted STT")
             flow.sip(stt_node, "PlaySBC", "intent text")
         if profile_uses_real_rasa(profile):
             flow.sip("PlaySBC", rasa_node, "REST POST /webhook")
-            flow.sip(rasa_node, "PlaySBC", "REST 200 support")
+            response_label = "REST 200 sales workflow" if profile_name == "ai-rasa-contact-center-sales" else "REST 200 support"
+            flow.sip(rasa_node, "PlaySBC", response_label)
         elif profile_name == "ai-rasa-rtpengine":
             flow.sip("PlaySBC", rasa_node, "REST POST /mock")
             flow.sip(rasa_node, "PlaySBC", "2 replies + transfer")
         else:
             flow.sip("PlaySBC", rasa_node, "REST POST /mock")
             flow.sip(rasa_node, "PlaySBC", "single reply")
-        if profile_name == "ai-rasa-rtpengine-speech":
+        if profile_name in {"ai-rasa-rtpengine-speech", "ai-rasa-contact-center-sales"}:
             flow.sip("PlaySBC", tts_node, "bot text")
             flow.sip(tts_node, "PlaySBC", "Piper WAV")
             flow.sip("PlaySBC", "RTPengine", "G.711 prompt RTP")
@@ -2100,7 +2110,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--helm-release", default="playsbc")
     parser.add_argument("--chart", default=str(ROOT / "charts" / "playsbc"))
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
-    parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 49 B2BUA profiles on Kubernetes, including Rasa profiles")
+    parser.add_argument("--all-profiles", action="store_true", help="Run the canonical 50 B2BUA profiles on Kubernetes, including Rasa/contact-center profiles")
     parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
     parser.add_argument("--list-profiles", action="store_true")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)

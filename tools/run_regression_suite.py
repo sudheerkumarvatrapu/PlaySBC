@@ -48,6 +48,7 @@ ALL_B2BUA_PROFILES = (
     "ai-rasa-rtpengine",
     "ai-rasa-real-lab",
     "ai-rasa-rtpengine-speech",
+    "ai-rasa-contact-center-sales",
     "invalid-bye",
     "unknown-route",
     "failed-outbound",
@@ -86,6 +87,7 @@ RASA_B2BUA_PROFILES = (
     "ai-rasa-rtpengine",
     "ai-rasa-real-lab",
     "ai-rasa-rtpengine-speech",
+    "ai-rasa-contact-center-sales",
 )
 OPTIONAL_B2BUA_PROFILES: tuple[str, ...] = ()
 SELECTABLE_B2BUA_PROFILES = ALL_B2BUA_PROFILES
@@ -97,6 +99,7 @@ RTPENGINE_B2BUA_PROFILES = (
     "ai-rasa-rtpengine",
     "ai-rasa-real-lab",
     "ai-rasa-rtpengine-speech",
+    "ai-rasa-contact-center-sales",
     "rtpengine-control-failure",
     "rtpengine-port-exhaustion",
     "rtpengine-interface-failure",

@@ -25,6 +25,8 @@ nlu:
       - talk to sales
       - connect me to sales
       - new service enquiry
+      - sales support
+      - I need sales support
 
   - intent: billing
     examples: |

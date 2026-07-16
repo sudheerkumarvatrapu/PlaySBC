@@ -1077,7 +1077,8 @@ class AIVoiceFlowLog:
 
     def flow(self, sender: str, receiver: str, message: str) -> None:
         self.events.append((sender, receiver, message))
-        category = "sip" if sender != "Rasa Bot" and receiver != "Rasa Bot" else "ai"
+        ai_tokens = ("Rasa", "Bot", "Agent", "STT", "TTS", "Vosk", "Piper")
+        category = "ai" if any(token in sender or token in receiver for token in ai_tokens) else "sip"
         self.logger.write(
             category,
             "AI VOICE FLOW",
@@ -2481,13 +2482,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     ) -> None:
         stt_node = ai_stt_ladder_node(self.ai_voice_config.stt_provider)
         tts_node = ai_tts_ladder_node(self.ai_voice_config.tts_provider)
+        bot_node = self.ai_voice_config.agent_label or "Rasa Bot"
         flow_log = AIVoiceFlowLog(
             self.logger,
             inbound_call_id,
             participants=(
-                ("SIPp A", "RTPengine", "PlaySBC", stt_node, "Rasa Bot", tts_node)
+                ("SIPp A", "RTPengine", "PlaySBC", stt_node, bot_node, tts_node)
                 if self.media_backend == "rtpengine"
-                else ("SIPp A", "PlaySBC", stt_node, "Rasa Bot", tts_node)
+                else ("SIPp A", "PlaySBC", stt_node, bot_node, tts_node)
             ),
         )
         ai_call = AIVoiceCall(
@@ -3312,6 +3314,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "dtmf_payload": dtmf_payload_type if dtmf_payload_type is not None else "",
             "source": "playsbc-ai-voice-gateway",
         }
+        if self.ai_voice_config.agent_label:
+            metadata["agent_label"] = self.ai_voice_config.agent_label
+        if self.ai_voice_config.contact_center_queue:
+            metadata["contact_center_queue"] = self.ai_voice_config.contact_center_queue
+        if self.ai_voice_config.contact_center_skill:
+            metadata["contact_center_skill"] = self.ai_voice_config.contact_center_skill
         sender = f"playsbc-{safe_filename(ai_call.call_id)}"
         user_text = self.ai_voice_gateway.initial_user_text()
         speech_pcap_path = resolve_ai_speech_asset(self.ai_voice_config.speech_input_pcap)
@@ -3368,6 +3376,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     )
         stt_node = ai_stt_ladder_node(self.ai_voice_config.stt_provider)
         tts_node = ai_tts_ladder_node(self.ai_voice_config.tts_provider)
+        bot_node = self.ai_voice_config.agent_label or "Rasa Bot"
+        if self.ai_voice_config.agent_label != "Rasa Bot" or self.ai_voice_config.contact_center_queue:
+            self.logger.ai(
+                "AI CONTACT CENTER AGENT",
+                (
+                    f"agent_label={json.dumps(bot_node)} queue={json.dumps(self.ai_voice_config.contact_center_queue)} "
+                    f"skill={json.dumps(self.ai_voice_config.contact_center_skill)} "
+                    f"b_side=virtual-rasa-agent target_user={ai_call.target_user}"
+                ),
+                call_id=ai_call.call_id,
+            )
         media_input_label = "RTPengine RTP/RTCP input" if ai_call.media_backend == "rtpengine" else "RTP/media input"
         media_source_node = "RTPengine" if ai_call.media_backend == "rtpengine" and speech_wav_path else "PlaySBC"
         ai_call.flow_log.flow(
@@ -3392,7 +3411,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"url={self.ai_voice_config.rasa_webhook_url} sender={sender} metadata_keys={','.join(sorted(metadata))}",
             call_id=ai_call.call_id,
         )
-        ai_call.flow_log.flow("PlaySBC", "Rasa Bot", "Rasa REST POST")
+        ai_call.flow_log.flow("PlaySBC", bot_node, "Rasa REST POST")
         result: AiTurnResult = await self.ai_voice_gateway.start_turn(
             sender,
             metadata,
@@ -3427,10 +3446,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             ),
             call_id=ai_call.call_id,
         )
-        ai_call.flow_log.flow("Rasa Bot", "PlaySBC", "Rasa REST 200")
+        ai_call.flow_log.flow(bot_node, "PlaySBC", "Rasa REST 200")
         for index, response in enumerate(result.bot_responses, start=1):
             if index > 1:
-                ai_call.flow_log.flow("Rasa Bot", "PlaySBC", f"response chunk {index}")
+                ai_call.flow_log.flow(bot_node, "PlaySBC", f"response chunk {index}")
         ai_call.flow_log.flow("PlaySBC", tts_node, "bot text")
         ai_call.flow_log.flow(tts_node, "PlaySBC", self.ai_voice_config.tts_provider)
         tts = result.tts

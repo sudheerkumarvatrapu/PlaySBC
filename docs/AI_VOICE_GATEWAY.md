@@ -28,6 +28,25 @@ SIPp A / caller
 
 The SIPp media PCAP used by the older tests is G.711 lab audio. The speech profile adds dedicated G.711u/G.711a speech fixtures generated from real Piper speech, sidecar transcripts, decoded WAV evidence, Vosk STT evidence, and generated TTS RTP prompt evidence.
 
+## Contact-Center Bot Agent
+
+`ai-rasa-contact-center-sales` models a contact-center style call:
+
+```text
+SIPp A caller
+  -> PlaySBC
+     -> virtual SIPp B Bot Agent
+        -> RTPengine media anchor
+        -> Vosk STT
+        -> real Rasa sales workflow
+        -> Piper TTS bot-agent speech
+        -> RTP prompt back through RTPengine
+```
+
+SIPp itself cannot run Rasa workflows, so SIPp B is represented as a virtual bot-agent B side inside PlaySBC. The profile labels that B side as `SIPp B Bot Agent` in `log.ai`, `log.sip`, and the HTML ladder. The actual workflow brain is real Rasa behind PlaySBC.
+
+The caller speech fixture says `Connect me to sales`. Vosk transcribes it, Rasa matches the sales workflow, and Piper generates the spoken bot-agent reply.
+
 ## End-To-End Speech Call
 
 The `ai-rasa-rtpengine-speech` profile proves the full AI speech path.
@@ -107,13 +126,14 @@ ai_voice_gateway:
 | `ai-rasa-rtpengine` | Mock Rasa REST, RTPengine media | Same AI call, but RTP/RTCP is anchored by RTPengine; mock Rasa returns multiple response chunks plus a transfer action | `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with `Mock Rasa + Action` |
 | `ai-rasa-real-lab` | Real Rasa pod, RTPengine media | Kubernetes starts and trains a real Rasa REST pod, PlaySBC posts to that service, and RTP/RTCP remains anchored by RTPengine | `rasa.log`, `rasa-pod-evidence.log`, `log.ai`, `log.sip`, `log.media`, HTML ladder with `Real Rasa Pod` |
 | `ai-rasa-rtpengine-speech` | Real Rasa pod, real speech STT/TTS | SIPp plays real G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, Rasa returns the support response, and Piper generates G.711 RTP prompt evidence | speech PCAP/WAV/TTS artifacts, `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with Vosk/Rasa/Piper nodes |
+| `ai-rasa-contact-center-sales` | Real Rasa sales bot agent | SIPp A calls the virtual SIPp B bot agent, caller speech says `Connect me to sales`, Rasa runs the sales workflow, and Piper returns the bot-agent speech prompt through RTPengine | contact-center speech PCAP/WAV/TTS artifacts, `log.ai`, `log.media`, RTPengine query evidence, HTML ladder with `SIPp B Bot Agent` |
 | Unit: Rasa REST client | JSON contract | Validates Rasa request/response JSON shape | `tests/test_ai_gateway.py` |
 | Unit: AI route policy | SIP route target | Validates `ai-gateway:<bot>` routing | `tests/test_mini_call_server.py` |
 | Unit: dual-realm profile | Harness wiring | Validates mock Rasa service and `log.ai` bundle wiring | `tests/test_sipp_harness.py` |
 
 ## Real Rasa Lab
 
-The full `--all-b2bua-profiles` and Kubernetes `--all-profiles` suites include all four Rasa profiles. Use `--rasa-profiles` when you want to run only the AI/Rasa slice and keep its logs under `logs/RASA-Regression`.
+The full `--all-b2bua-profiles` and Kubernetes `--all-profiles` suites include all Rasa/contact-center profiles. Use `--rasa-profiles` when you want to run only the AI/Rasa slice and keep its logs under `logs/RASA-Regression`.
 
 For direct local speech runs, install the real engines once:
 
@@ -217,6 +237,7 @@ This runs:
 - `ai-rasa-rtpengine`: mock Rasa, RTP/RTCP anchored by RTPengine.
 - `ai-rasa-real-lab`: real Rasa pod, RTPengine-backed AI call control.
 - `ai-rasa-rtpengine-speech`: real G.711 speech input, Vosk STT, real Rasa, Piper TTS, RTPengine media evidence.
+- `ai-rasa-contact-center-sales`: contact-center sales bot agent, virtual SIPp B side, Vosk STT, real Rasa sales workflow, Piper TTS, RTPengine media evidence.
 
 Step 5: open the report.
 

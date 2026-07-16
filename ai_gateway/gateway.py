@@ -34,6 +34,9 @@ class AiVoiceConfig:
     rasa_timeout: float = 3.0
     initial_message: str = "hello"
     fallback_text: str = "AI assistant is not available right now."
+    agent_label: str = "Rasa Bot"
+    contact_center_queue: str = ""
+    contact_center_skill: str = ""
     input_mode: str = "scripted"
     stt_provider: str = "lab-scripted"
     stt_command: str = ""
@@ -61,6 +64,9 @@ class AiVoiceConfig:
             rasa_timeout=float(raw.get("rasa_timeout", 3.0)),
             initial_message=str(raw.get("initial_message", "hello")),
             fallback_text=str(raw.get("fallback_text", "AI assistant is not available right now.")),
+            agent_label=str(raw.get("agent_label", "Rasa Bot")),
+            contact_center_queue=str(raw.get("contact_center_queue", "")),
+            contact_center_skill=str(raw.get("contact_center_skill", "")),
             input_mode=str(raw.get("input_mode", "scripted")).lower(),
             stt_provider=str(raw.get("stt_provider", raw.get("stt_adapter", "lab-scripted"))).lower(),
             stt_command=str(raw.get("stt_command", "")),
@@ -84,6 +90,9 @@ class AiVoiceConfig:
             "rasa_timeout": self.rasa_timeout,
             "initial_message": self.initial_message,
             "fallback_text": self.fallback_text,
+            "agent_label": self.agent_label,
+            "contact_center_queue": self.contact_center_queue,
+            "contact_center_skill": self.contact_center_skill,
             "input_mode": self.input_mode,
             "stt_provider": self.stt_provider,
             "stt_command": self.stt_command,

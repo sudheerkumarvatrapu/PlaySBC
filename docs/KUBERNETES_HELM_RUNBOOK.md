@@ -221,7 +221,7 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
-This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, `ai-rasa-real-lab`, and `ai-rasa-rtpengine-speech`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
+This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, `ai-rasa-real-lab`, `ai-rasa-rtpengine-speech`, and `ai-rasa-contact-center-sales`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
 
 If the kind node cannot pull DockerHub images, load Rasa first:
 
@@ -251,7 +251,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression.py --list-profiles
 ```
 
-Run the full 49-profile in-cluster Kubernetes suite:
+Run the full 50-profile in-cluster Kubernetes suite:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
@@ -335,7 +335,7 @@ Coverage:
 - UDP, TCP, TLS/SRTP interworking, RTCP, and DTMF profiles.
 - REGISTER, digest auth success/failure, registered inbound/outbound calls.
 - ESBC route policy, trunk, failover, normalization, admission, health, and metrics profiles.
-- AI/Rasa lab profiles. The default catalog uses mock Rasa; run `--profile ai-rasa-real-lab` or `--profile ai-rasa-rtpengine-speech` for real Rasa.
+- AI/Rasa lab profiles. The default catalog includes mock Rasa, real Rasa, speech STT/TTS, and the contact-center sales bot profile. Run `--profile ai-rasa-real-lab`, `--profile ai-rasa-rtpengine-speech`, or `--profile ai-rasa-contact-center-sales` for targeted real Rasa checks.
 - Negative SIP cases such as invalid BYE, unknown route, failed outbound leg, CANCEL, and retransmission.
 - Small load, soak, and 5 cps / 60 second CHT load profiles.
 

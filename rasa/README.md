@@ -6,6 +6,7 @@ It is intentionally small:
 
 - REST channel enabled through `credentials.yml`.
 - NLU intents for `greet`, `support`, `sales`, `billing`, `agent`, `repeat`, and `confirm`.
+- Sales workflow supports the contact-center profile where SIPp A calls the virtual `SIPp B Bot Agent`.
 - Bot responses include normal text and optional `custom.playsbc_action` payloads that PlaySBC can log as bot control actions.
 
 Run with official Rasa:
@@ -27,4 +28,5 @@ Regression entry points:
 
 - Local direct config: `configs/config.ai-rasa-real.example.yaml`
 - Docker dual-realm profile: `ai-rasa-real-lab`
+- Contact-center profile: `ai-rasa-contact-center-sales`
 - Kubernetes values: `configs/kubernetes/ai-rasa-real-values.yaml`
