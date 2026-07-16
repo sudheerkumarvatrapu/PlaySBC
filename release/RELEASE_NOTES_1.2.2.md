@@ -24,6 +24,7 @@ PlaySBC 1.2.2 expands the AI/Rasa lab into a clearer end-to-end regression exper
 - Improved the Rasa lab bot data with support, sales, billing, agent, repeat, confirm, deny, clarify, language-limitation, safe-continuation, and fallback intents.
 - Updated `docs/AI_VOICE_GATEWAY.md` with a shorter, clearer RASA-focused guide.
 - Updated Kubernetes regression runner image contents so chat case files are available in-cluster.
+- Pinned the bundled Vosk model checksum in the PlaySBC container image build so the release remains reproducible while the upstream model host has an expired TLS certificate.
 
 ## RASA Profiles Covered
 
