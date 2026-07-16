@@ -1,22 +1,24 @@
 # PlaySBC AI Voice Gateway
 
-PlaySBC now has an AI Voice Gateway path for lab calls.
+PlaySBC has an AI Voice Gateway path for lab calls. In this path, PlaySBC can answer a SIP call as the callee, anchor RTP/RTCP through RTPengine, transcribe caller speech, ask Rasa for the bot response, synthesize the reply with Piper, and send the generated speech back as RTP evidence.
 
 ```text
 SIPp A / caller
   -> PlaySBC SIP route policy: ai-gateway:rasa-support
-     -> PlaySBC answers the SIP call and owns the RTP session
-        -> STT/intent adapter stage: lab-scripted, Whisper, or Vosk
-           -> Rasa REST webhook
-              -> TTS adapter stage: text-only, Piper, or Coqui
-                 -> voice/media response stage
+     -> PlaySBC answers the SIP call as the AI callee
+        -> RTPengine anchors RTP/RTCP media
+           -> PlaySBC decodes inbound G.711 RTP to WAV
+              -> Vosk STT converts speech to text
+                 -> Rasa REST webhook returns bot text/action
+                    -> Piper TTS generates WAV speech
+                       -> PlaySBC sends G.711 RTP prompt evidence back through RTPengine
 ```
 
 ## Current Architecture
 
-- **SIP termination:** PlaySBC terminates the inbound SIP call as an AI endpoint.
+- **SIP termination:** PlaySBC terminates the inbound SIP call as an AI endpoint. In the speech profile, PlaySBC is the callee for SIPp A.
 - **Routing:** `route_policies[].target` can use `ai-gateway:<bot-name>`.
-- **Media:** AI calls can use internal RTP input or RTPengine anchoring. The RTPengine profile keeps RTP/RTCP on RTPengine and leaves PlaySBC as SIP/control plus AI orchestration.
+- **Media:** AI calls can use internal RTP input or RTPengine anchoring. RTPengine is the media anchor/relay; it does not perform STT, TTS, or bot logic.
 - **Rasa integration:** PlaySBC posts `sender`, `message`, and call metadata to the Rasa REST webhook. The default regression uses a deterministic mock; real-Rasa profiles start a real Rasa REST bot.
 - **STT/TTS engines:** `ai-rasa-rtpengine-speech` uses Vosk STT and Piper TTS through wrapper commands. Mock profiles still use portable scripted/text modes.
 - **Speech evidence:** The speech profile plays a real Piper-generated G.711 speech PCAP saying `I need support`, decodes RTP to PCM/WAV for Vosk, sends the transcript to Rasa, and generates a G.711 RTP prompt PCAP from Piper's bot-response WAV.
@@ -25,6 +27,38 @@ SIPp A / caller
 - **Logging:** `log.ai` records AI call start/end, STT input, Rasa request/response, TTS output, and the AI call ladder.
 
 The SIPp media PCAP used by the older tests is G.711 lab audio. The speech profile adds dedicated G.711u/G.711a speech fixtures generated from real Piper speech, sidecar transcripts, decoded WAV evidence, Vosk STT evidence, and generated TTS RTP prompt evidence.
+
+## End-To-End Speech Call
+
+The `ai-rasa-rtpengine-speech` profile proves the full AI speech path.
+
+Actors:
+
+- **SIPp A:** the caller. It sends SIP and plays a real G.711 speech PCAP.
+- **PlaySBC:** the SIP callee and AI voice gateway. It answers the call, controls RTPengine, decodes RTP, calls STT/Rasa/TTS, and sends the response audio.
+- **RTPengine:** the RTP/RTCP media anchor. It relays and accounts for media; it is not the speech analyzer.
+- **Vosk STT:** converts decoded caller WAV audio into text.
+- **Rasa:** receives the transcript over REST and returns the bot response.
+- **Piper TTS:** converts the Rasa text response into speech WAV output.
+
+Call sequence:
+
+1. SIPp A sends `INVITE` to PlaySBC for the AI route.
+2. PlaySBC replies with `100 Trying`, `180 Ringing`, and `200 OK`.
+3. PlaySBC sends RTPengine `OFFER` and `ANSWER` control commands to anchor RTP/RTCP.
+4. SIPp A sends `ACK`; the SIP dialog is established.
+5. SIPp A sends G.711 caller speech RTP through the RTPengine media path.
+6. PlaySBC extracts/decodes the caller RTP into WAV.
+7. PlaySBC sends the WAV to Vosk STT.
+8. Vosk returns the transcript, for example `i need support`.
+9. PlaySBC posts the transcript and call metadata to the real Rasa REST webhook.
+10. Rasa returns the bot text response.
+11. PlaySBC sends the bot text to Piper TTS.
+12. Piper generates the bot response WAV.
+13. PlaySBC converts the TTS output to G.711 RTP prompt evidence and sends it back through RTPengine toward SIPp A.
+14. SIPp A clears the call with `BYE`; PlaySBC responds `200 OK`.
+
+The report should therefore show one unified ladder with SIPp A, RTPengine, PlaySBC, Vosk STT, Real Rasa Pod, and Piper TTS. The same report also embeds the decoded caller WAV and generated Piper output WAV so the speech evidence can be played directly from the HTML page.
 
 ## Config Shape
 
@@ -134,9 +168,18 @@ python3 tools/run_regression_suite.py \
   --timeout 420
 ```
 
-### Kubernetes
+### Kubernetes Rasa-Only Run
 
-Deploy or upgrade with the real Rasa values file:
+Use this when the Kubernetes cluster is already running and you want to run only the AI/Rasa profiles.
+
+Step 1: select the cluster and namespace.
+
+```bash
+kubectl config use-context kind-playsbc
+kubectl config set-context --current --namespace=playsbc
+```
+
+Step 2: deploy or upgrade PlaySBC with RTPengine and the real Rasa values file.
 
 ```bash
 helm upgrade --install playsbc charts/playsbc \
@@ -146,7 +189,16 @@ helm upgrade --install playsbc charts/playsbc \
   -f configs/kubernetes/ai-rasa-real-values.yaml
 ```
 
-Run all Kubernetes AI/Rasa profiles:
+Step 3: verify the pods.
+
+```bash
+kubectl get pods -n playsbc
+kubectl -n playsbc rollout status deployment/playsbc-playsbc
+kubectl -n playsbc rollout status deployment/playsbc-playsbc-rtpengine
+kubectl -n playsbc rollout status deployment/playsbc-playsbc-rasa
+```
+
+Step 4: run only the Kubernetes AI/Rasa regression profiles.
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
@@ -159,10 +211,29 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
-Rasa-only Kubernetes runs delete old `logs/RASA-Regression` output by default and write the latest report under:
+This runs:
+
+- `ai-rasa-lab`: mock Rasa, internal AI media path.
+- `ai-rasa-rtpengine`: mock Rasa, RTP/RTCP anchored by RTPengine.
+- `ai-rasa-real-lab`: real Rasa pod, RTPengine-backed AI call control.
+- `ai-rasa-rtpengine-speech`: real G.711 speech input, Vosk STT, real Rasa, Piper TTS, RTPengine media evidence.
+
+Step 5: open the report.
 
 ```text
 logs/RASA-Regression/<run-id>/RASA-reports/latest.html
+```
+
+The report contains the unified SIP/RTP/AI ladder, embedded caller speech WAV, embedded Piper output WAV, pass/fail status, and links to the per-profile log bundle.
+
+Step 6: inspect the main evidence files inside the profile bundle.
+
+```text
+log.sip          SIP call flow and unified ladder
+log.media        RTPengine media anchoring and RTP/RTCP evidence
+log.ai           STT input/result, Rasa request/response, TTS output
+capture.pcap     SIP/RTP/RTCP packet evidence
+*.wav            decoded caller speech and generated Piper response
 ```
 
 For kind clusters without DockerHub pull access, pre-pull and load the Rasa image:
