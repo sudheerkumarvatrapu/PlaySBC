@@ -32,6 +32,7 @@ WORKDIR /workspace
 COPY ai_gateway /workspace/ai_gateway
 COPY charts /workspace/charts
 COPY configs /workspace/configs
+COPY rasa /workspace/rasa
 COPY rtp /workspace/rtp
 COPY sip /workspace/sip
 COPY sipp /workspace/sipp
