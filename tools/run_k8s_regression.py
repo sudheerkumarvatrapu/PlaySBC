@@ -990,7 +990,15 @@ class K8sRegressionRunner:
             result = self.kubectl(*parts, check=False)
             (bundle / filename).write_text(result.stdout + result.stderr, encoding="utf-8")
         self.collect_playsbc_pod_evidence(bundle)
-        self.collect_playsbc_persistent_logs(bundle)
+        if profile_name in RASA_NLU_PROFILES:
+            self.write_log(
+                bundle,
+                "log.platform",
+                "PLAY SBC PERSISTENT LOG COPY SKIPPED",
+                "chat/NLU profiles use rasa-nlu-results.json and log.rasa-nlu as primary evidence; SIP/RTP logs are not applicable",
+            )
+        else:
+            self.collect_playsbc_persistent_logs(bundle)
         if include_rasa:
             self.collect_rasa_pod_evidence(bundle)
 
