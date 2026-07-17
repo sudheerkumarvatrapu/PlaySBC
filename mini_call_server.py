@@ -4487,6 +4487,7 @@ def parse_yaml_map(lines: List[Tuple[int, str]], index: int, indent: int) -> Tup
         key, raw_value = split_yaml_key_value(content)
         index += 1
         if raw_value:
+            raw_value, index = collect_yaml_scalar_continuations(lines, index, current_indent, raw_value)
             result[key] = parse_yaml_scalar(raw_value)
             continue
         if index < len(lines) and lines[index][0] == current_indent and lines[index][1].startswith("- "):
@@ -4532,6 +4533,7 @@ def parse_yaml_list(lines: List[Tuple[int, str]], index: int, indent: int) -> Tu
             continue
 
         if item:
+            item, index = collect_yaml_scalar_continuations(lines, index, current_indent, item)
             result.append(parse_yaml_scalar(item))
             continue
         if index < len(lines) and lines[index][0] > current_indent:
@@ -4540,6 +4542,32 @@ def parse_yaml_list(lines: List[Tuple[int, str]], index: int, indent: int) -> Tu
         else:
             result.append(None)
     return result, index
+
+
+def collect_yaml_scalar_continuations(
+    lines: List[Tuple[int, str]],
+    index: int,
+    parent_indent: int,
+    value: str,
+) -> Tuple[str, int]:
+    """Fold Helm/toYaml wrapped plain scalar continuation lines.
+
+    Helm may render long command strings as valid YAML plain scalars split over
+    multiple indented lines. PlaySBC only needs the folded form for config
+    strings, so continuation lines are joined with spaces while nested lists or
+    key/value children are left for the normal block parser.
+    """
+
+    parts = [value]
+    while index < len(lines):
+        continuation_indent, continuation = lines[index]
+        if continuation_indent <= parent_indent:
+            break
+        if continuation.startswith("- ") or maybe_split_yaml_key_value(continuation):
+            break
+        parts.append(continuation)
+        index += 1
+    return " ".join(part for part in parts if part), index
 
 
 def split_yaml_key_value(content: str) -> Tuple[str, str]:

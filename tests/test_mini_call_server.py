@@ -628,6 +628,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(parsed["route_policies"][0]["name"], "registered-endpoints")
         self.assertEqual(parsed["route_policies"][0]["target"], "registration")
 
+    def test_simple_yaml_parser_folds_helm_wrapped_plain_scalars(self):
+        parsed = server.parse_simple_yaml(
+            """
+            ai_voice_gateway:
+              stt_command: python3 tools/whisper_stt_wrapper.py --audio {audio_path} --fallback-transcript
+                "{text}" --allow-lab-fallback
+              tts_command: python3 tools/piper_tts_wrapper.py --text "{text}" --output {audio_path}
+            """
+        )
+
+        self.assertEqual(
+            parsed["ai_voice_gateway"]["stt_command"],
+            'python3 tools/whisper_stt_wrapper.py --audio {audio_path} --fallback-transcript "{text}" --allow-lab-fallback',
+        )
+        self.assertEqual(
+            parsed["ai_voice_gateway"]["tts_command"],
+            'python3 tools/piper_tts_wrapper.py --text "{text}" --output {audio_path}',
+        )
+
     def test_invalid_rtpengine_config_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
