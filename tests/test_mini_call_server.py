@@ -378,6 +378,77 @@ class ResponseTests(unittest.TestCase):
         )
 
 
+class PrometheusMetricTests(unittest.TestCase):
+    def test_prometheus_renderer_adds_metadata_and_escapes_labels(self):
+        body = server.render_prometheus_metrics(
+            [
+                ("playsbc_active_calls", 1, {}),
+                ("playsbc_active_calls", 2, {"node": 'node"one', "cluster": "lab\\one"}),
+            ]
+        )
+
+        self.assertIn("# HELP playsbc_active_calls Current active calls admitted by PlaySBC.", body)
+        self.assertIn("# TYPE playsbc_active_calls gauge", body)
+        self.assertIn("playsbc_active_calls 1", body)
+        self.assertIn('playsbc_active_calls{cluster="lab\\\\one",node="node\\"one"} 2', body)
+
+    def test_protocol_metrics_include_core_peer_rtpengine_and_ai_labels(self):
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media=None,
+            logger=server.SbcLogger(None),
+            default_payload=server.PCMU,
+            auth_realm="playsbc",
+            users={},
+            bridge_rooms=(),
+            b2bua_routes={},
+            route_policies=(),
+            b2bua_ladder_logs=False,
+            trunk_groups=(
+                {
+                    "name": "peer-trunks",
+                    "members": [
+                        {
+                            "name": "peer-primary",
+                            "uri": "sip:{user}@peer.example:5060",
+                            "realm": "peer",
+                        }
+                    ],
+                },
+            ),
+            media_backend="rtpengine",
+            rtpengine_client=server.RtpengineClient("udp://127.0.0.1:2223"),
+            rtpengine_directions=("core", "peer"),
+            ai_voice_gateway={
+                "enabled": True,
+                "provider": "rasa",
+                "bot_name": "rasa-support",
+                "stt_provider": "whisper",
+                "tts_provider": "coqui",
+            },
+        )
+        protocol.ai_rasa_requests_total = 3
+        protocol.rtpengine_control_requests_total = 2
+
+        body = server.render_prometheus_metrics(protocol.prometheus_samples())
+
+        self.assertIn('playsbc_realm_info{cluster="playsbc-lab",node="standalone",realm="core"} 1', body)
+        self.assertIn('playsbc_realm_info{cluster="playsbc-lab",node="standalone",realm="peer"} 1', body)
+        self.assertIn(
+            'playsbc_trunk_healthy{cluster="playsbc-lab",node="standalone",realm="peer",trunk="peer-primary"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_ai_rasa_requests_total{bot="rasa-support",cluster="playsbc-lab",node="standalone",provider="rasa",realm="ai",stt="whisper",tts="coqui"} 3',
+            body,
+        )
+        self.assertIn(
+            'playsbc_rtpengine_control_requests_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",node="standalone",to_realm="peer",url="udp://127.0.0.1:2223"} 2',
+            body,
+        )
+
+
 class RtpengineRetryTests(unittest.TestCase):
     def make_flow_log(self):
         route = server.RouteResult(

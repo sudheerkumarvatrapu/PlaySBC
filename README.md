@@ -19,7 +19,7 @@
 
 Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, HA state experiments, AI voice gateway, and SIPp regression across real core and peer realms.
 
-[Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md) | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) | [Kubernetes lab](docs/KUBERNETES_LOCAL.md) | [Kubernetes Helm runbook](docs/KUBERNETES_HELM_RUNBOOK.md)
+[Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md) | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) | [Observability](docs/OBSERVABILITY.md) | [Kubernetes lab](docs/KUBERNETES_LOCAL.md) | [Kubernetes Helm runbook](docs/KUBERNETES_HELM_RUNBOOK.md)
 
 ## Status
 

@@ -4,6 +4,17 @@ metadata:
   name: {{ include "playsbc.fullname" . }}
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
+{{- if or .Values.observability.prometheus.scrapeAnnotations .Values.service.annotations }}
+  annotations:
+{{- if .Values.observability.prometheus.scrapeAnnotations }}
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "{{ .Values.service.healthPort }}"
+{{- end }}
+{{- with .Values.service.annotations }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+{{- end }}
 spec:
   type: {{ .Values.service.type }}
   sessionAffinity: {{ .Values.service.sessionAffinity }}

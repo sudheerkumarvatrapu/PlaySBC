@@ -34,7 +34,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from ai_gateway import AiTurnResult, AiVoiceConfig, AiVoiceGateway, BotAction
 from ai_gateway.speech import decode_rtp_pcap_to_wav
@@ -312,11 +312,20 @@ class RouteResult:
     group_name: str = ""
 
 
+def infer_realm_label(*values: object, default: str = "peer") -> str:
+    text = " ".join(str(value or "") for value in values).lower()
+    for realm in ("core", "peer", "ai"):
+        if re.search(rf"(^|[^a-z0-9]){realm}([^a-z0-9]|$)", text):
+            return realm
+    return default
+
+
 @dataclass
 class TrunkRuntime:
     name: str
     uri: str
     priority: int = 100
+    realm: str = "peer"
     enabled: bool = True
     healthy: bool = True
     max_calls: int = 0
@@ -346,6 +355,7 @@ class TrunkRuntime:
             name=str(value.get("name") or f"trunk-{index + 1}"),
             uri=str(value.get("uri") or value.get("target") or ""),
             priority=int(value.get("priority", (index + 1) * 10)),
+            realm=str(value.get("realm") or infer_realm_label(value.get("name"), value.get("uri"), value.get("target"))),
             enabled=bool(value.get("enabled", True)),
             healthy=str(value.get("state", "up")).lower() not in {"down", "failed", "disabled"},
             max_calls=max(0, int(value.get("max_calls", 0))),
@@ -414,8 +424,10 @@ class RoutingEngine:
             for member_index, value in enumerate(group.get("members", [])):
                 if isinstance(value, str):
                     member = TrunkRuntime(f"{group_name}-{member_index + 1}", value, (member_index + 1) * 10)
+                    member.realm = infer_realm_label(group_name, value)
                 elif isinstance(value, dict):
                     member = TrunkRuntime.from_config(value, member_index)
+                    member.realm = str(value.get("realm") or infer_realm_label(group_name, member.name, member.uri))
                 else:
                     continue
                 if not member.uri:
@@ -621,6 +633,80 @@ class RoutingEngine:
             values[f"{prefix}_options_probe_failures_total"] = trunk.options_probe_failures
             values[f"{prefix}_options_probe_consecutive_failures"] = trunk.options_probe_consecutive_failures
         return values
+
+
+PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
+    "playsbc_active_calls": ("gauge", "Current active calls admitted by PlaySBC."),
+    "playsbc_admission_rejections_total": ("counter", "Total calls rejected by call admission control."),
+    "playsbc_trunk_healthy": ("gauge", "Trunk health state, 1 for healthy and 0 for unhealthy."),
+    "playsbc_trunk_active_calls": ("gauge", "Current active calls on a trunk."),
+    "playsbc_trunk_attempts_total": ("counter", "Total attempted calls on a trunk."),
+    "playsbc_trunk_successes_total": ("counter", "Total successful calls on a trunk."),
+    "playsbc_trunk_failures_total": ("counter", "Total failed calls on a trunk."),
+    "playsbc_trunk_options_probe_successes_total": ("counter", "Total successful OPTIONS probes by trunk."),
+    "playsbc_trunk_options_probe_failures_total": ("counter", "Total failed OPTIONS probes by trunk."),
+    "playsbc_trunk_options_probe_consecutive_failures": ("gauge", "Current consecutive failed OPTIONS probes by trunk."),
+    "playsbc_realm_info": ("gauge", "Configured PlaySBC lab realm presence."),
+    "playsbc_stream_connects_total": ("counter", "Total outbound SIP stream connection attempts."),
+    "playsbc_stream_reuses_total": ("counter", "Total outbound SIP stream connection reuses."),
+    "playsbc_stream_failures_total": ("counter", "Total outbound SIP stream connection failures."),
+    "playsbc_ha_enabled": ("gauge", "Whether HA shared state is enabled."),
+    "playsbc_ha_configured_nodes": ("gauge", "Number of configured HA nodes."),
+    "playsbc_ha_node_draining": ("gauge", "Whether this PlaySBC node is draining new calls."),
+    "playsbc_ha_dialog_restores_total": ("counter", "Total restored dialogs from shared HA state."),
+    "playsbc_ha_shared_registrations": ("gauge", "Registrations currently present in shared HA state."),
+    "playsbc_ha_shared_dialogs": ("gauge", "Dialogs currently present in shared HA state."),
+    "playsbc_ha_shared_answered_dialogs": ("gauge", "Answered dialogs currently present in shared HA state."),
+    "playsbc_ai_voice_calls_active": ("gauge", "Current active AI voice calls."),
+    "playsbc_ai_voice_calls_total": ("counter", "Total AI voice calls accepted by PlaySBC."),
+    "playsbc_ai_voice_turns_total": ("counter", "Total AI voice turns started."),
+    "playsbc_ai_voice_turn_failures_total": ("counter", "Total AI voice turns that returned an error or fallback."),
+    "playsbc_ai_stt_audio_decodes_total": ("counter", "Total AI voice turns with decoded caller audio."),
+    "playsbc_ai_rasa_requests_total": ("counter", "Total Rasa REST turns attempted."),
+    "playsbc_ai_rasa_failures_total": ("counter", "Total Rasa REST turns that used fallback because of an error."),
+    "playsbc_ai_tts_outputs_total": ("counter", "Total AI TTS output chunks generated or attempted."),
+    "playsbc_ai_tts_rtp_prompts_total": ("counter", "Total AI TTS RTP prompt chunks generated."),
+    "playsbc_ai_bot_actions_total": ("counter", "Total bot control actions accepted from Rasa."),
+    "playsbc_rtpengine_control_requests_total": ("counter", "Total RTPengine control requests attempted by PlaySBC."),
+    "playsbc_rtpengine_control_failures_total": ("counter", "Total RTPengine control request failures observed by PlaySBC."),
+    "playsbc_rtpengine_media_sessions_active": ("gauge", "Current active PlaySBC calls using RTPengine as media backend."),
+}
+
+
+def prometheus_escape_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def prometheus_sample(name: str, value: int | float, labels: Optional[Dict[str, str]] = None) -> str:
+    if not labels:
+        return f"{name} {value}"
+    rendered_labels = ",".join(
+        f'{key}="{prometheus_escape_label(str(label_value))}"' for key, label_value in sorted(labels.items())
+    )
+    return f"{name}{{{rendered_labels}}} {value}"
+
+
+def prometheus_metric_meta(name: str) -> Tuple[str, str]:
+    if name in PROMETHEUS_METRIC_META:
+        return PROMETHEUS_METRIC_META[name]
+    if re.match(r"playsbc_trunk_.+_(attempts|successes|failures|options_probe_successes|options_probe_failures)_total$", name):
+        return "counter", f"Legacy per-trunk PlaySBC counter {name}."
+    if re.match(r"playsbc_trunk_.+_(healthy|active_calls|options_probe_consecutive_failures)$", name):
+        return "gauge", f"Legacy per-trunk PlaySBC gauge {name}."
+    return "gauge", f"PlaySBC metric {name}."
+
+
+def render_prometheus_metrics(samples: Iterable[Tuple[str, int | float, Dict[str, str]]]) -> str:
+    lines: List[str] = []
+    emitted_meta: set[str] = set()
+    for name, value, labels in samples:
+        if name not in emitted_meta:
+            metric_type, help_text = prometheus_metric_meta(name)
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} {metric_type}")
+            emitted_meta.add(name)
+        lines.append(prometheus_sample(name, value, labels))
+    return "\n".join(lines) + "\n"
 
 
 class SbcLogger:
@@ -1920,6 +2006,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.ai_voice_config = AiVoiceConfig.from_dict(ai_voice_gateway)
         self.ai_voice_gateway = AiVoiceGateway(self.ai_voice_config) if self.ai_voice_config.enabled else None
         self.ai_voice_calls_by_inbound: Dict[str, AIVoiceCall] = {}
+        self.ai_voice_calls_total = 0
+        self.ai_voice_turns_total = 0
+        self.ai_voice_turn_failures_total = 0
+        self.ai_stt_audio_decodes_total = 0
+        self.ai_rasa_requests_total = 0
+        self.ai_rasa_failures_total = 0
+        self.ai_tts_outputs_total = 0
+        self.ai_tts_rtp_prompts_total = 0
+        self.ai_bot_actions_total = 0
+        self.rtpengine_control_requests_total = 0
+        self.rtpengine_control_failures_total = 0
         self.ha_config = dict(ha or {})
         self.node_id = ha_node_id(self.ha_config) if ha_enabled(self.ha_config) else "standalone"
         self.cluster_id = str(self.ha_config.get("cluster_id") or "playsbc-lab")
@@ -1952,6 +2049,121 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 self.logger.platform("HA NODE DRAINING", f"node={self.node_id} action=reject_new_invites")
         self.tls_client_context = tls_client_context
         self.tls_port = tls_port
+
+    def prometheus_samples(self) -> List[Tuple[str, int | float, Dict[str, str]]]:
+        base_labels = {"cluster": self.cluster_id, "node": self.node_id}
+        samples: List[Tuple[str, int | float, Dict[str, str]]] = []
+
+        legacy_metrics = self.routing_engine.metrics()
+        legacy_metrics.update(
+            {
+                "playsbc_stream_connects_total": self.stream_connects,
+                "playsbc_stream_reuses_total": self.stream_reuses,
+                "playsbc_stream_failures_total": self.stream_failures,
+                "playsbc_ha_enabled": int(self.shared_state is not None),
+                "playsbc_ha_configured_nodes": len(self.ha_nodes),
+                "playsbc_ha_node_draining": int(self.ha_node_draining),
+                "playsbc_ha_dialog_restores_total": self.ha_dialog_restores,
+            }
+        )
+        if self.shared_state:
+            legacy_metrics.update(self.shared_state.counts())
+        for name, value in sorted(legacy_metrics.items()):
+            samples.append((name, value, {}))
+
+        configured_realms = {"core", "peer"}
+        if self.ai_voice_config.enabled:
+            configured_realms.add("ai")
+        configured_realms.update(trunk.realm for trunk in self.routing_engine.trunks.values() if trunk.realm)
+        configured_realms.update(direction for direction in self.rtpengine_directions if direction)
+        for realm in sorted(configured_realms):
+            samples.append(("playsbc_realm_info", 1, {**base_labels, "realm": realm}))
+
+        samples.extend(
+            [
+                ("playsbc_active_calls", self.routing_engine.active_calls, base_labels),
+                ("playsbc_admission_rejections_total", self.routing_engine.rejected_calls, base_labels),
+                ("playsbc_stream_connects_total", self.stream_connects, {**base_labels, "transport": "stream"}),
+                ("playsbc_stream_reuses_total", self.stream_reuses, {**base_labels, "transport": "stream"}),
+                ("playsbc_stream_failures_total", self.stream_failures, {**base_labels, "transport": "stream"}),
+                ("playsbc_ha_enabled", int(self.shared_state is not None), base_labels),
+                ("playsbc_ha_configured_nodes", len(self.ha_nodes), base_labels),
+                ("playsbc_ha_node_draining", int(self.ha_node_draining), base_labels),
+                ("playsbc_ha_dialog_restores_total", self.ha_dialog_restores, base_labels),
+            ]
+        )
+        if self.shared_state:
+            for name, value in sorted(self.shared_state.counts().items()):
+                samples.append((name, value, base_labels))
+
+        for trunk_name, trunk in sorted(self.routing_engine.trunks.items()):
+            labels = {**base_labels, "trunk": trunk_name, "realm": trunk.realm or "peer"}
+            samples.extend(
+                [
+                    ("playsbc_trunk_healthy", int(trunk.healthy), labels),
+                    ("playsbc_trunk_active_calls", trunk.active_calls, labels),
+                    ("playsbc_trunk_attempts_total", trunk.attempts, labels),
+                    ("playsbc_trunk_successes_total", trunk.successes, labels),
+                    ("playsbc_trunk_failures_total", trunk.failures, labels),
+                    ("playsbc_trunk_options_probe_successes_total", trunk.options_probe_successes, labels),
+                    ("playsbc_trunk_options_probe_failures_total", trunk.options_probe_failures, labels),
+                    (
+                        "playsbc_trunk_options_probe_consecutive_failures",
+                        trunk.options_probe_consecutive_failures,
+                        labels,
+                    ),
+                ]
+            )
+
+        ai_labels = {
+            **base_labels,
+            "realm": "ai",
+            "bot": self.ai_voice_config.bot_name,
+            "provider": self.ai_voice_config.provider,
+            "stt": self.ai_voice_config.stt_provider,
+            "tts": self.ai_voice_config.tts_provider,
+        }
+        samples.extend(
+            [
+                ("playsbc_ai_voice_calls_active", len(self.ai_voice_calls_by_inbound), ai_labels),
+                ("playsbc_ai_voice_calls_total", self.ai_voice_calls_total, ai_labels),
+                ("playsbc_ai_voice_turns_total", self.ai_voice_turns_total, ai_labels),
+                ("playsbc_ai_voice_turn_failures_total", self.ai_voice_turn_failures_total, ai_labels),
+                ("playsbc_ai_stt_audio_decodes_total", self.ai_stt_audio_decodes_total, ai_labels),
+                ("playsbc_ai_rasa_requests_total", self.ai_rasa_requests_total, ai_labels),
+                ("playsbc_ai_rasa_failures_total", self.ai_rasa_failures_total, ai_labels),
+                ("playsbc_ai_tts_outputs_total", self.ai_tts_outputs_total, ai_labels),
+                ("playsbc_ai_tts_rtp_prompts_total", self.ai_tts_rtp_prompts_total, ai_labels),
+                ("playsbc_ai_bot_actions_total", self.ai_bot_actions_total, ai_labels),
+            ]
+        )
+
+        rtpengine_active = sum(
+            1 for call in self.b2bua_calls_by_inbound.values() if call.media_backend == "rtpengine"
+        )
+        rtpengine_active += sum(
+            1 for call in self.ai_voice_calls_by_inbound.values() if call.media_backend == "rtpengine"
+        )
+        rtpengine_url = ""
+        if self.rtpengine_client:
+            rtpengine_url = f"udp://{self.rtpengine_client.host}:{self.rtpengine_client.port}"
+        from_realm = self.rtpengine_directions[0] if len(self.rtpengine_directions) == 2 else "core"
+        to_realm = self.rtpengine_directions[1] if len(self.rtpengine_directions) == 2 else "peer"
+        rtpengine_labels = {
+            **base_labels,
+            "from_realm": from_realm,
+            "to_realm": to_realm,
+            "backend": self.media_backend,
+            "url": rtpengine_url,
+        }
+        samples.extend(
+            [
+                ("playsbc_rtpengine_control_requests_total", self.rtpengine_control_requests_total, rtpengine_labels),
+                ("playsbc_rtpengine_control_failures_total", self.rtpengine_control_failures_total, rtpengine_labels),
+                ("playsbc_rtpengine_media_sessions_active", rtpengine_active, rtpengine_labels),
+            ]
+        )
+        return samples
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -2502,6 +2714,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             media_backend=self.media_backend,
         )
         self.ai_voice_calls_by_inbound[inbound_call_id] = ai_call
+        self.ai_voice_calls_total += 1
         flow_log.flow("SIPp A", "PlaySBC", "INVITE")
         flow_log.flow("PlaySBC", "SIPp A", "100 Trying")
         if not self.ai_voice_gateway:
@@ -2640,6 +2853,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         )
         try:
             ai_call.flow_log.flow("PlaySBC", "RTPengine", "OFFER")
+            self.rtpengine_control_requests_total += 1
             offer_response = await retry_rtpengine_control(
                 "AI OFFER",
                 lambda: self.rtpengine_client.offer(
@@ -2668,6 +2882,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 call_id=ai_call.call_id,
             )
             ai_call.flow_log.flow("PlaySBC", "RTPengine", "ANSWER")
+            self.rtpengine_control_requests_total += 1
             answer_response = await retry_rtpengine_control(
                 "AI ANSWER",
                 lambda: self.rtpengine_client.answer(
@@ -2695,6 +2910,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 call_id=ai_call.call_id,
             )
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
             self.logger.media("AI RTPENGINE FAILED", str(exc), call_id=ai_call.call_id)
             ai_call.flow_log.flow("RTPengine", "PlaySBC", "failed")
             ai_call.flow_log.flow("PlaySBC", "SIPp A", "488 Not Acceptable Here")
@@ -2979,6 +3195,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
         try:
             flow_log.sip("B2BUA", "RTPengine", "OFFER")
+            self.rtpengine_control_requests_total += 1
             offer_response = await retry_rtpengine_control(
                 "OFFER",
                 lambda: self.rtpengine_client.offer(
@@ -3005,6 +3222,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             flow_log.sip("RTPengine", "B2BUA", f"{offer_response.get('result', 'ok')} OFFER")
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
             flow_log.write("RTPENGINE OFFER FAILED", str(exc))
             flow_log.sip("RTPengine", "B2BUA", "OFFER failed")
             flow_log.sip("B2BUA", "SIPp A", "488 Not Acceptable Here")
@@ -3076,6 +3294,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_call.rtpengine_to_tag = to_tag
         try:
             flow_log.sip("B2BUA", "RTPengine", "ANSWER")
+            self.rtpengine_control_requests_total += 1
             answer_response = await retry_rtpengine_control(
                 "ANSWER",
                 lambda: self.rtpengine_client.answer(
@@ -3102,6 +3321,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             flow_log.sip("RTPengine", "B2BUA", f"{answer_response.get('result', 'ok')} ANSWER")
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
             flow_log.write("RTPENGINE ANSWER FAILED", str(exc))
             flow_log.sip("RTPengine", "B2BUA", "ANSWER failed")
             self.send_outbound_ack(b2bua_call)
@@ -3301,6 +3521,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     ) -> None:
         if not self.ai_voice_gateway:
             return
+        self.ai_voice_turns_total += 1
         caller = extract_user(message.header("from")) or "unknown"
         metadata = {
             "call_id": ai_call.call_id,
@@ -3348,6 +3569,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     speech_wav_path = extraction.wav_path
                     if extraction.transcript:
                         user_text = extraction.transcript
+                    self.ai_stt_audio_decodes_total += 1
                     self.logger.ai(
                         "AI SPEECH RTP EXTRACTED",
                         (
@@ -3411,6 +3633,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"url={self.ai_voice_config.rasa_webhook_url} sender={sender} metadata_keys={','.join(sorted(metadata))}",
             call_id=ai_call.call_id,
         )
+        self.ai_rasa_requests_total += 1
         ai_call.flow_log.flow("PlaySBC", bot_node, "Rasa REST POST")
         result: AiTurnResult = await self.ai_voice_gateway.start_turn(
             sender,
@@ -3432,11 +3655,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 call_id=ai_call.call_id,
             )
         if result.error:
+            self.ai_rasa_failures_total += 1
+            self.ai_voice_turn_failures_total += 1
             self.logger.ai(
                 "RASA REST ERROR",
                 f"fallback_used=true error={result.error}",
                 call_id=ai_call.call_id,
             )
+        elif result.fallback_used:
+            self.ai_voice_turn_failures_total += 1
         self.logger.ai(
             "RASA REST RESPONSE",
             (
@@ -3452,6 +3679,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             if index > 1:
                 ai_call.flow_log.flow(bot_node, "PlaySBC", f"response chunk {index}")
         tts_chunks = result.tts_chunks or ([result.tts] if result.tts else [])
+        self.ai_tts_outputs_total += len(tts_chunks)
         if len(tts_chunks) > 1:
             self.logger.ai(
                 "AI TTS STREAM START",
@@ -3503,6 +3731,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         for chunk in tts_chunks:
             if not chunk.rtp_prompt_generated:
                 continue
+            self.ai_tts_rtp_prompts_total += 1
             if ai_call.media_backend == "rtpengine":
                 ai_call.flow_log.flow("PlaySBC", "RTPengine", "G.711 RTP prompt")
             else:
@@ -3522,6 +3751,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     def apply_ai_bot_action(self, ai_call: AIVoiceCall, action: BotAction) -> None:
         ai_call.bot_actions.append(action)
+        self.ai_bot_actions_total += 1
         self.logger.ai(
             "AI BOT ACTION",
             (
@@ -3582,6 +3812,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         assert self.rtpengine_client is not None
         try:
             query_timeout = min(max(self.rtpengine_client.timeout, 0.050), 1.0)
+            self.rtpengine_control_requests_total += 1
             query_response, packet_samples, retry_count = await query_rtpengine_until_stable(
                 lambda: asyncio.wait_for(
                     self.rtpengine_client.query(
@@ -3609,12 +3840,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 call_id=ai_call.call_id,
             )
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
             self.logger.media(
                 "B2BUA RTPENGINE QUERY FAILED",
                 f"error_type={type(exc).__name__} error={str(exc) or 'no additional detail'}",
                 call_id=ai_call.call_id,
             )
         try:
+            self.rtpengine_control_requests_total += 1
             await self.rtpengine_client.delete(
                 call_id=ai_call.rtpengine_call_id or ai_call.call_id,
                 from_tag=ai_call.rtpengine_from_tag,
@@ -3622,6 +3855,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             self.logger.media("B2BUA RTPENGINE DELETE", "status=ok", call_id=ai_call.call_id)
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
             self.logger.media("B2BUA RTPENGINE DELETE FAILED", str(exc), call_id=ai_call.call_id)
 
     def schedule_b2bua_finalizer(self, b2bua_call: B2BUACall, delay: float = 2.0) -> None:
@@ -3683,6 +3917,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         assert self.rtpengine_client is not None
         try:
             query_timeout = min(max(self.rtpengine_client.timeout, 0.050), 1.0)
+            self.rtpengine_control_requests_total += 1
             query_response, packet_samples, retry_count = await query_rtpengine_until_stable(
                 lambda: asyncio.wait_for(
                     self.rtpengine_client.query(
@@ -3712,12 +3947,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     f"rtcp_errors_total={rtcp_totals.get('errors', 0)} "
                     f"query_packet_samples={','.join(str(value) for value in packet_samples)} "
                     f"query_retry_count={retry_count}"
-                )
+            )
             b2bua_call.flow_log.write("RTPENGINE QUERY", detail)
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
             error = str(exc) or "no additional detail"
             b2bua_call.flow_log.write("RTPENGINE QUERY FAILED", f"error_type={type(exc).__name__} error={error}")
         try:
+            self.rtpengine_control_requests_total += 1
             await self.rtpengine_client.delete(
                 call_id=b2bua_call.rtpengine_call_id or b2bua_call.inbound_call_id,
                 from_tag=b2bua_call.rtpengine_from_tag,
@@ -3725,6 +3962,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             b2bua_call.flow_log.write("RTPENGINE DELETE", "status=ok")
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
             b2bua_call.flow_log.write("RTPENGINE DELETE FAILED", str(exc))
 
     def cleanup_registrations(self) -> None:
@@ -4989,21 +5227,7 @@ async def handle_health_request(
         request_line = (await asyncio.wait_for(reader.readline(), timeout=2.0)).decode("ascii", errors="replace")
         path = request_line.split(" ", 2)[1] if len(request_line.split(" ", 2)) >= 2 else "/healthz"
         if path == "/metrics":
-            metrics = protocol.routing_engine.metrics()
-            metrics.update(
-                {
-                    "playsbc_stream_connects_total": protocol.stream_connects,
-                    "playsbc_stream_reuses_total": protocol.stream_reuses,
-                    "playsbc_stream_failures_total": protocol.stream_failures,
-                    "playsbc_ha_enabled": int(protocol.shared_state is not None),
-                    "playsbc_ha_configured_nodes": len(protocol.ha_nodes),
-                    "playsbc_ha_node_draining": int(protocol.ha_node_draining),
-                    "playsbc_ha_dialog_restores_total": protocol.ha_dialog_restores,
-                }
-            )
-            if protocol.shared_state:
-                metrics.update(protocol.shared_state.counts())
-            body = "\n".join(f"{name} {value}" for name, value in sorted(metrics.items())) + "\n"
+            body = render_prometheus_metrics(protocol.prometheus_samples())
         else:
             body = "ready\n" if path == "/readyz" else "ok\n"
         response = (

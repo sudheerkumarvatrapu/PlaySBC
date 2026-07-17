@@ -1560,6 +1560,24 @@ Content-Length: 0
         self.assertIn("toYaml $config", configmap)
         self.assertIn("/etc/playsbc/server.yaml", deployment)
 
+    def test_helm_chart_includes_observability_stack(self):
+        chart = ROOT / "charts" / "playsbc"
+        values = (chart / "values.yaml").read_text(encoding="utf-8")
+        stack = (chart / "templates" / "observability-stack.yaml").read_text(encoding="utf-8")
+        dashboard = (chart / "templates" / "observability.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("observability:", values)
+        self.assertIn("retention: 31d", values)
+        self.assertIn("kind: PersistentVolumeClaim", stack)
+        self.assertIn("--storage.tsdb.retention.time={{ .Values.observability.prometheus.retention }}", stack)
+        self.assertIn("uid: prometheus", stack)
+        self.assertIn("kind: Deployment", stack)
+        self.assertIn("grafana", stack)
+        self.assertIn("realm_model: core-peer", stack)
+        self.assertIn("PlaySBC Core/Peer SBC Lab", dashboard)
+        self.assertIn("sum by (realm,trunk) (playsbc_trunk_healthy", dashboard)
+        self.assertIn("sum by (from_realm,to_realm)", dashboard)
+
     def test_b2bua_profiles_are_listed(self):
         completed = subprocess.run(
             [

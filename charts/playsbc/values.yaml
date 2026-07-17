@@ -13,10 +13,60 @@ service:
   tlsPort: 5061
   healthPort: 8080
   sessionAffinity: ClientIP
+  annotations: {}
 
 hostNetwork: false
 
 resources: {}
+
+observability:
+  enabled: false
+  prometheus:
+    enabled: false
+    image:
+      repository: prom/prometheus
+      tag: v2.55.1
+      pullPolicy: IfNotPresent
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    retention: 31d
+    service:
+      type: ClusterIP
+      port: 9090
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClassName: ""
+    resources: {}
+    scrapeAnnotations: false
+    serviceMonitor:
+      enabled: false
+      interval: 15s
+      scrapeTimeout: 5s
+      labels: {}
+    rules:
+      enabled: false
+      labels: {}
+  grafana:
+    enabled: false
+    image:
+      repository: grafana/grafana
+      tag: 11.4.0
+      pullPolicy: IfNotPresent
+    adminUser: admin
+    adminPassword: playsbc-lab
+    service:
+      type: ClusterIP
+      port: 3000
+    persistence:
+      enabled: true
+      size: 2Gi
+      storageClassName: ""
+    resources: {}
+    dashboard:
+      enabled: false
+      labels:
+        grafana_dashboard: "1"
 
 authSecret:
   enabled: false

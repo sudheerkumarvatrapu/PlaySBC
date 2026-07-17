@@ -138,5 +138,12 @@ ai_voice_gateway:
 
 ## Still To Build
 
+- Play generated TTS RTP back into the live SIP call through RTPengine.
 - Package heavyweight Whisper/Coqui image variants with real models preloaded.
+- Add Rasa Action Server integration for real workflow actions.
+- Add stateful multi-turn contact-center conversations.
+- Add speech plus RFC 4733 DTMF hybrid IVR flows.
+- Add streamed callback/channel support for longer bot responses.
+- Add interruption/barge-in handling for long bot prompts.
 - Execute bot actions with SIP REFER/re-INVITE, conference join, and bot-driven release.
+- Add metrics for STT latency, Rasa latency, TTS latency, fallback rate, streamed chunks, and action count.

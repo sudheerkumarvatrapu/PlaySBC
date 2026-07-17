@@ -46,7 +46,8 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Helm-rendered configuration for every regression profile
 - Every dual-realm regression profile runs with HA enabled by default
 - SBC category logs, combined live PCAP, and Robot-style HTML report with unified ladders and AI speech WAV playback evidence
-- Basic Prometheus-style metrics endpoint at `/metrics` for call, trunk, stream, admission, and HA counters
+- Prometheus text-format `/metrics` endpoint with `HELP`, `TYPE`, and labels for node, realm, trunk, RTPengine direction, and AI providers
+- Helm observability lab stack: Prometheus, Grafana, 31-day retention, PVC-backed storage, core/peer dashboard, scrape annotations, optional `ServiceMonitor`, and alert rules
 - Signalling, media, auth, routing, negative, soak, and 5 cps / 60-second CHT profiles
 - Kubernetes Helm lab with health probes, Secret-backed SIP users, RTPengine pairing, kind/minikube values, and a dialog-affinity experiment
 - HA regression profiles: `ha-shared-state-rtpengine`, `ha-options-health-recovery`, and `ha-node-draining`
@@ -55,10 +56,8 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 
 ### Observability Lab
 
-- Prometheus integration for PlaySBC `/metrics`, with Helm scrape annotations and optional `ServiceMonitor` support.
-- Grafana dashboards for SBC overview, SIP signalling, trunk health, RTPengine media, AI/Rasa gateway, HA state, and regression verdicts.
-- Prometheus metric metadata and labels: add `# HELP`, `# TYPE`, and labels such as `node`, `realm`, `trunk`, `transport`, `codec`, and `profile`.
-- Alert rules for trunk down, high admission rejection rate, RTPengine unavailable, HA node draining, Rasa unavailable, and regression failures.
+- Add direct RTPengine exporter support if the deployed RTPengine image exposes native counters.
+- Add SIP signalling rate, transport, codec, profile, and regression-verdict labels where those can be measured without distorting call handling.
 - Kubernetes regression profiles: `observability-prometheus-scrape`, `observability-grafana-dashboard`, and `observability-alert-rules`.
 - Report evidence that Prometheus scraped PlaySBC after a B2BUA call and that Grafana dashboard JSON loads cleanly.
 
@@ -74,8 +73,15 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 
 ### AI Voice Gateway
 
+- Play generated TTS RTP back into the live SIP call through RTPengine, not only as report evidence.
 - Package heavyweight Whisper and Coqui image variants with real models preloaded, beside the portable lab-fallback wrappers.
 - Add streamed callback/channel support for bot responses that arrive over time rather than in one REST result.
+- Add Rasa Action Server integration for tool-backed bot workflows.
+- Add multi-turn contact-center bot calls with stateful sales, support, billing, repeat, confirm, deny, and agent-transfer paths.
+- Add speech plus RFC 4733 DTMF hybrid IVR flows.
+- Add interruption/barge-in handling for long streamed bot prompts.
+- Expand RASA regression with multi-turn chat, long audio prompts, fallback recovery, and action-server verdicts.
+- Add AI latency metrics for STT decode, Rasa request, TTS generation, streamed chunk duration, fallback count, and action count.
 
 ## Later
 

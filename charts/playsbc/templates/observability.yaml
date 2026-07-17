@@ -1,0 +1,178 @@
+{{- if .Values.observability.prometheus.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "playsbc.fullname" . }}
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+{{- with .Values.observability.prometheus.serviceMonitor.labels }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "playsbc.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: health
+      path: /metrics
+      interval: {{ .Values.observability.prometheus.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.observability.prometheus.serviceMonitor.scrapeTimeout }}
+---
+{{- end }}
+{{- if .Values.observability.prometheus.rules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "playsbc.fullname" . }}-alerts
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+{{- with .Values.observability.prometheus.rules.labels }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  groups:
+    - name: playsbc.rules
+      rules:
+        - alert: PlaySBCAdmissionRejectionsHigh
+          expr: sum(rate(playsbc_admission_rejections_total[5m])) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: PlaySBC is rejecting admitted calls.
+            description: Call admission rejection rate has been non-zero for more than two minutes.
+        - alert: PlaySBCRtpengineControlFailures
+          expr: sum(rate(playsbc_rtpengine_control_failures_total[5m])) > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: RTPengine control path is failing.
+            description: PlaySBC is seeing RTPengine offer, answer, query, or delete failures.
+        - alert: PlaySBCAiRasaFailures
+          expr: sum(rate(playsbc_ai_rasa_failures_total[5m])) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: AI/Rasa voice turns are failing.
+            description: Rasa REST turns are returning errors or falling back.
+        - alert: PlaySBCTrunkDown
+          expr: min(playsbc_trunk_healthy) == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: One or more PlaySBC trunks are unhealthy.
+            description: OPTIONS probing or call failures marked at least one trunk unhealthy.
+        - alert: PlaySBCHaNodeDraining
+          expr: max(playsbc_ha_node_draining) > 0
+          for: 5m
+          labels:
+            severity: info
+          annotations:
+            summary: A PlaySBC HA node is draining.
+            description: At least one HA node is rejecting new calls because drain mode is enabled.
+---
+{{- end }}
+{{- if or .Values.observability.enabled .Values.observability.grafana.enabled .Values.observability.grafana.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "playsbc.fullname" . }}-grafana-dashboard
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+{{- with .Values.observability.grafana.dashboard.labels }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+data:
+  playsbc-dashboard.json: |-
+    {
+      "uid": "playsbc-sbc-lab",
+      "title": "PlaySBC Core/Peer SBC Lab",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "tags": ["playsbc", "sbc", "core-peer", "rtpengine", "rasa"],
+      "time": {"from": "now-1h", "to": "now"},
+      "templating": {
+        "list": [
+          {
+            "name": "job",
+            "type": "query",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "query": "label_values(playsbc_active_calls, job)",
+            "refresh": 1,
+            "includeAll": true,
+            "multi": true,
+            "current": {"text": "All", "value": "$__all"}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Active Calls",
+          "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+          "targets": [{"expr": "sum(playsbc_active_calls{job=~\"$job\"})", "legendFormat": "calls"}]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "RTPengine Sessions",
+          "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+          "targets": [{"expr": "sum(playsbc_rtpengine_media_sessions_active{job=~\"$job\"})", "legendFormat": "sessions"}]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "AI Voice Calls",
+          "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+          "targets": [{"expr": "sum(playsbc_ai_voice_calls_active{job=~\"$job\"})", "legendFormat": "ai calls"}]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Admission Rejects / 5m",
+          "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+          "targets": [{"expr": "sum(increase(playsbc_admission_rejections_total{job=~\"$job\"}[5m]))", "legendFormat": "rejects"}]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Core/Peer Trunk Health",
+          "gridPos": {"x": 0, "y": 4, "w": 12, "h": 7},
+          "targets": [{"expr": "sum by (realm,trunk) (playsbc_trunk_healthy{job=~\"$job\"})", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}trunk{{ "}}" }}"}]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "RTPengine Core -> Peer Control Failures",
+          "gridPos": {"x": 12, "y": 4, "w": 12, "h": 7},
+          "targets": [{"expr": "sum by (from_realm,to_realm) (rate(playsbc_rtpengine_control_failures_total{job=~\"$job\"}[5m]))", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }}"}]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "AI/Rasa Turns By Realm",
+          "gridPos": {"x": 0, "y": 11, "w": 12, "h": 7},
+          "targets": [
+            {"expr": "sum by (realm,bot,stt,tts) (rate(playsbc_ai_voice_turns_total{job=~\"$job\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} {{ "{{" }}stt{{ "}}" }}/{{ "{{" }}tts{{ "}}" }} turns/s"},
+            {"expr": "sum by (realm,bot) (rate(playsbc_ai_rasa_failures_total{job=~\"$job\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} rasa failures/s"}
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "AI TTS RTP Prompts",
+          "gridPos": {"x": 12, "y": 11, "w": 12, "h": 7},
+          "targets": [{"expr": "sum(rate(playsbc_ai_tts_rtp_prompts_total{job=~\"$job\"}[5m]))", "legendFormat": "prompts/s"}]
+        }
+      ]
+    }
+{{- end }}
