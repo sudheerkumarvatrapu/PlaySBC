@@ -9,9 +9,11 @@ PlaySBC /metrics -> Prometheus -> Grafana
 
 ## What It Gives
 
-- Prometheus pod scraping PlaySBC every `15s`.
+- Prometheus pod scraping PlaySBC every `2s` by default for short SIPp lab calls.
 - Grafana pod with a PlaySBC dashboard.
 - Core/peer labels for trunk and RTPengine media views.
+- SIP request and response counters by realm, direction, method, status, and status class.
+- Negotiated media codec and transcoding counters, for example `PCMU -> PCMA`.
 - AI Voice Gateway counters for STT, Rasa, TTS, bot actions, and RTP prompts.
 - Prometheus retention set to `31d` by default.
 - PersistentVolumeClaims for Prometheus and Grafana data when the cluster has a storage class.
@@ -83,18 +85,20 @@ Useful queries:
 
 ```promql
 sum(playsbc_active_calls)
-sum(increase(playsbc_b2bua_calls_total[15m]))
-sum(increase(playsbc_b2bua_calls_completed_total[15m]))
-sum by (realm,method,direction) (increase(playsbc_sip_requests_total[15m]))
-sum by (status_class,direction) (increase(playsbc_sip_responses_total[15m]))
-sum by (realm,trunk) (playsbc_trunk_healthy)
+sum(max_over_time(playsbc_b2bua_calls_total[15m]))
+sum(max_over_time(playsbc_b2bua_calls_completed_total[15m]))
+sum by (realm,method,direction) (max_over_time(playsbc_sip_requests_total[15m]))
+sum by (realm,status,status_class,direction) (max_over_time(playsbc_sip_responses_total[15m]))
+sum by (realm,trunk) (max_over_time(playsbc_trunk_healthy[15m]))
+sum by (backend,inbound_codec,outbound_codec,transcoding) (max_over_time(playsbc_media_negotiations_total[15m]))
+sum by (backend,inbound_codec,outbound_codec) (max_over_time(playsbc_transcoding_sessions_total[15m]))
 sum by (from_realm,to_realm) (playsbc_rtpengine_media_sessions_active)
 sum(increase(playsbc_rtpengine_control_failures_total[15m]))
 sum by (bot,stt,tts) (increase(playsbc_ai_voice_turns_total[15m]))
 sum(increase(playsbc_ai_rasa_failures_total[15m]))
 ```
 
-For fast SIPp regression calls, prefer the `increase(...[window])` counters. `playsbc_active_calls` is an instant gauge and can legitimately be `0` if Prometheus scrapes between short calls.
+For Kubernetes regression, PlaySBC rolls per profile and counters reset from zero. Prefer `max_over_time(...[window])` for per-profile evidence and `playsbc_active_calls` for the current live gauge. After a load profile finishes, current active calls should return to `0`, while range panels intentionally keep the completed-run evidence until the selected time window moves past it.
 
 ## Direct Metrics Check
 
@@ -115,11 +119,15 @@ to_realm
 bot
 stt
 tts
+backend
+inbound_codec
+outbound_codec
+transcoding
 ```
 
 ## Notes
 
-- RTPengine does not expose Prometheus metrics directly in this lab chart yet. PlaySBC exports RTPengine control failures and active RTPengine-backed media sessions from its own call state.
+- RTPengine does not expose Prometheus metrics directly in this lab chart yet. PlaySBC exports RTPengine control failures, active RTPengine-backed media sessions, negotiated codec pairs, and transcoding intent from its own call state.
 - Rasa is observed through PlaySBC AI counters for request, failure, STT, TTS, and bot-action evidence.
 - For Prometheus Operator clusters, you can also enable `ServiceMonitor` and `PrometheusRule` objects:
 

@@ -1577,7 +1577,10 @@ Content-Length: 0
         self.assertIn("PlaySBC Core/Peer SBC Lab", dashboard)
         self.assertIn("playsbc_b2bua_calls_total", dashboard)
         self.assertIn("playsbc_sip_requests_total", dashboard)
-        self.assertIn("sum by (realm,trunk) (playsbc_trunk_healthy", dashboard)
+        self.assertIn("playsbc_sip_responses_total", dashboard)
+        self.assertIn("playsbc_media_negotiations_total", dashboard)
+        self.assertIn("playsbc_transcoding_sessions_total", dashboard)
+        self.assertIn("sum by (realm,trunk) (max_over_time(playsbc_trunk_healthy", dashboard)
         self.assertIn("sum by (from_realm,to_realm)", dashboard)
 
     def test_b2bua_profiles_are_listed(self):

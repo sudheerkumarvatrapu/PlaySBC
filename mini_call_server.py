@@ -644,6 +644,8 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_b2bua_calls_answered_total": ("counter", "Total B2BUA calls answered by PlaySBC."),
     "playsbc_b2bua_calls_completed_total": ("counter", "Total B2BUA calls completed by PlaySBC."),
     "playsbc_b2bua_calls_failed_total": ("counter", "Total B2BUA calls failed before normal completion."),
+    "playsbc_media_negotiations_total": ("counter", "Total answered calls with negotiated media codecs."),
+    "playsbc_transcoding_sessions_total": ("counter", "Total answered calls where PlaySBC negotiated different inbound and outbound audio codecs."),
     "playsbc_registrations_total": ("counter", "Total successful SIP registrations accepted by PlaySBC."),
     "playsbc_trunk_healthy": ("gauge", "Trunk health state, 1 for healthy and 0 for unhealthy."),
     "playsbc_trunk_active_calls": ("gauge", "Current active calls on a trunk."),
@@ -2030,6 +2032,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.b2bua_calls_answered_total = 0
         self.b2bua_calls_completed_total = 0
         self.b2bua_calls_failed_total = 0
+        self.media_negotiations_total: Dict[Tuple[str, str, str, str, str, str], int] = {}
+        self.transcoding_sessions_total: Dict[Tuple[str, str, str, str, str], int] = {}
         self.registrations_total = 0
         self.ha_config = dict(ha or {})
         self.node_id = ha_node_id(self.ha_config) if ha_enabled(self.ha_config) else "standalone"
@@ -2080,6 +2084,18 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "from_realm": self.rtpengine_directions[0] if len(self.rtpengine_directions) == 2 else "core",
             "to_realm": self.rtpengine_directions[1] if len(self.rtpengine_directions) == 2 else "peer",
         }
+
+    def observe_media_negotiation(self, backend: str, inbound_payload: int, outbound_payload: int) -> None:
+        from_realm = self.rtpengine_directions[0] if len(self.rtpengine_directions) == 2 else "core"
+        to_realm = self.rtpengine_directions[1] if len(self.rtpengine_directions) == 2 else "peer"
+        inbound_codec = CODEC_NAMES.get(inbound_payload, str(inbound_payload))
+        outbound_codec = CODEC_NAMES.get(outbound_payload, str(outbound_payload))
+        transcoding = "true" if inbound_payload != outbound_payload else "false"
+        negotiation_key = (backend, from_realm, to_realm, inbound_codec, outbound_codec, transcoding)
+        self.media_negotiations_total[negotiation_key] = self.media_negotiations_total.get(negotiation_key, 0) + 1
+        if inbound_payload != outbound_payload:
+            transcoding_key = (backend, from_realm, to_realm, inbound_codec, outbound_codec)
+            self.transcoding_sessions_total[transcoding_key] = self.transcoding_sessions_total.get(transcoding_key, 0) + 1
 
     def prometheus_samples(self) -> List[Tuple[str, int | float, Dict[str, str]]]:
         base_labels = {"cluster": self.cluster_id, "node": self.node_id}
@@ -2162,6 +2178,41 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ("playsbc_b2bua_calls_failed_total", self.b2bua_calls_failed_total, b2bua_labels),
             ]
         )
+        for (backend, from_realm, to_realm, inbound_codec, outbound_codec, transcoding), value in sorted(
+            self.media_negotiations_total.items()
+        ):
+            samples.append(
+                (
+                    "playsbc_media_negotiations_total",
+                    value,
+                    {
+                        **base_labels,
+                        "backend": backend,
+                        "from_realm": from_realm,
+                        "to_realm": to_realm,
+                        "inbound_codec": inbound_codec,
+                        "outbound_codec": outbound_codec,
+                        "transcoding": transcoding,
+                    },
+                )
+            )
+        for (backend, from_realm, to_realm, inbound_codec, outbound_codec), value in sorted(
+            self.transcoding_sessions_total.items()
+        ):
+            samples.append(
+                (
+                    "playsbc_transcoding_sessions_total",
+                    value,
+                    {
+                        **base_labels,
+                        "backend": backend,
+                        "from_realm": from_realm,
+                        "to_realm": to_realm,
+                        "inbound_codec": inbound_codec,
+                        "outbound_codec": outbound_codec,
+                    },
+                )
+            )
         if self.shared_state:
             for name, value in sorted(self.shared_state.counts().items()):
                 samples.append((name, value, base_labels))
@@ -3170,6 +3221,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             },
         )
         self.b2bua_calls_answered_total += 1
+        self.observe_media_negotiation(
+            "internal",
+            inbound_rtp.preferred_payload,
+            outbound_rtp.preferred_payload,
+        )
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
         self.save_dialog_state(dialog)
@@ -3406,6 +3462,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.cleanup_b2bua_call(b2bua_call)
             return
 
+        inbound_answer_payload = choose_payload(parse_sdp_payloads(answer_sdp), choose_payload(remote_payloads, PCMU))
+        outbound_answer_payload = choose_payload(parse_sdp_payloads(final_response.body), self.default_payload)
         self.send_response(
             message,
             200,
@@ -3418,6 +3476,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             },
         )
         self.b2bua_calls_answered_total += 1
+        self.observe_media_negotiation("rtpengine", inbound_answer_payload, outbound_answer_payload)
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
         self.save_dialog_state(dialog)
@@ -4429,7 +4488,7 @@ def parse_register_expires(expires_header: str, contact_header: str, default: in
 
 
 def parse_sdp_payloads(sdp: str) -> Tuple[int, ...]:
-    match = re.search(r"^m=audio\s+\d+\s+RTP/AVP\s+(.+)$", sdp, re.MULTILINE)
+    match = re.search(r"^m=audio\s+\d+\s+\S+\s+(.+)$", sdp, re.MULTILINE)
     if not match:
         return SUPPORTED_CODECS
 

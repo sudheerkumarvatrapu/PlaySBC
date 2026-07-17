@@ -32,7 +32,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Regression includes `ai-rasa-lab`: SIPp A calls `ai-bot`, PlaySBC answers, sends a Rasa REST turn, logs `log.ai`, and captures SIP/RTP/HTTP evidence.
 - Regression includes `ai-rasa-rtpengine`: RTP/RTCP is anchored by RTPengine while PlaySBC handles SIP/control and the Rasa turn.
 - Optional real Rasa lab is wired for local config, Docker dual-realm, Helm, and Kubernetes via `ai-rasa-real-lab`.
-- Version `1.2.0` adds `ai-rasa-rtpengine-speech`: SIPp plays real G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, PlaySBC posts the transcript to real Rasa, Piper generates the bot-response WAV/RTP prompt, and RTP/RTCP stay anchored by RTPengine.
+- Current AI/Rasa regression includes `ai-rasa-rtpengine-speech`: SIPp plays real G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, PlaySBC posts the transcript to real Rasa, Piper generates the bot-response WAV/RTP prompt, and RTP/RTCP stay anchored by RTPengine.
 - Whisper STT is selectable through `ai-rasa-rtpengine-speech-whisper`, using the same RTPengine/WAV/Rasa/Piper path with the Whisper adapter boundary.
 - Contact-center sales bot profile is wired as `ai-rasa-contact-center-sales`: SIPp A calls a virtual SIPp B bot agent, Vosk transcribes `connect me to sales`, real Rasa runs the sales workflow, Piper generates the bot-agent prompt, and RTP/RTCP stay anchored by RTPengine.
 - Coqui TTS is selectable through `ai-rasa-contact-center-sales-coqui`, using the same contact-center sales bot flow with Coqui-generated prompt evidence.
@@ -46,7 +46,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Helm-rendered configuration for every regression profile
 - Every dual-realm regression profile runs with HA enabled by default
 - SBC category logs, combined live PCAP, and Robot-style HTML report with unified ladders and AI speech WAV playback evidence
-- Prometheus text-format `/metrics` endpoint with `HELP`, `TYPE`, and labels for node, realm, trunk, RTPengine direction, and AI providers
+- Prometheus text-format `/metrics` endpoint with `HELP`, `TYPE`, and labels for node, realm, trunk, SIP requests/responses, RTPengine direction, negotiated codecs, transcoding, and AI providers
 - Helm observability lab stack: Prometheus, Grafana, 31-day retention, PVC-backed storage, core/peer dashboard, scrape annotations, optional `ServiceMonitor`, and alert rules
 - Signalling, media, auth, routing, negative, soak, and 5 cps / 60-second CHT profiles
 - Kubernetes Helm lab with health probes, Secret-backed SIP users, RTPengine pairing, kind/minikube values, and a dialog-affinity experiment
@@ -57,7 +57,7 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 ### Observability Lab
 
 - Add direct RTPengine exporter support if the deployed RTPengine image exposes native counters.
-- Add SIP signalling rate, transport, codec, profile, and regression-verdict labels where those can be measured without distorting call handling.
+- Add SIP signalling rate, profile, and regression-verdict labels where those can be measured without distorting call handling.
 - Kubernetes regression profiles: `observability-prometheus-scrape`, `observability-grafana-dashboard`, and `observability-alert-rules`.
 - Report evidence that Prometheus scraped PlaySBC after a B2BUA call and that Grafana dashboard JSON loads cleanly.
 

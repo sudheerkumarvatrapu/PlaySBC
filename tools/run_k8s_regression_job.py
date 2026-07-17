@@ -132,6 +132,7 @@ def role_manifest(args: argparse.Namespace) -> dict[str, object]:
                     "pods",
                     "pods/exec",
                     "pods/log",
+                    "persistentvolumeclaims",
                     "secrets",
                     "services",
                 ],

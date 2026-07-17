@@ -114,6 +114,8 @@ metadata:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "playsbc.name" . }}-prometheus
@@ -252,6 +254,8 @@ metadata:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "playsbc.name" . }}-grafana

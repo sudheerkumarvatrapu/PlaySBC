@@ -49,6 +49,16 @@ class SipParsingTests(unittest.TestCase):
         self.assertEqual(server.parse_sdp_remote_addr(sdp), ("127.0.0.1", 26000))
         self.assertEqual(server.parse_sdp_remote_rtcp_addr(sdp, ("127.0.0.1", 26000)), ("127.0.0.1", 26001))
 
+    def test_sdp_payload_detection_accepts_secure_rtp_profiles(self):
+        sdp = (
+            "c=IN IP4 127.0.0.1\r\n"
+            "m=audio 26000 RTP/SAVP 0 101\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+            "a=rtpmap:101 telephone-event/8000\r\n"
+        )
+
+        self.assertEqual(server.parse_sdp_payloads(sdp), (0, 101))
+
     def test_parse_sip_uri_with_default_and_explicit_ports(self):
         explicit = server.parse_sip_uri("<sip:1002@127.0.0.1:25082>")
         self.assertEqual(explicit.user, "1002")
@@ -432,6 +442,7 @@ class PrometheusMetricTests(unittest.TestCase):
         protocol.rtpengine_control_requests_total = 2
         protocol.observe_sip_request("INVITE", "udp", "rx", "core")
         protocol.observe_sip_response(200, "udp", "tx", "core")
+        protocol.observe_media_negotiation("rtpengine", server.PCMU, server.PCMA)
         protocol.b2bua_calls_total = 1
         protocol.b2bua_calls_completed_total = 1
         protocol.registrations_total = 1
@@ -462,6 +473,14 @@ class PrometheusMetricTests(unittest.TestCase):
         )
         self.assertIn(
             'playsbc_b2bua_calls_completed_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",node="standalone",to_realm="peer"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_media_negotiations_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",inbound_codec="PCMU",node="standalone",outbound_codec="PCMA",to_realm="peer",transcoding="true"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_transcoding_sessions_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",inbound_codec="PCMU",node="standalone",outbound_codec="PCMA",to_realm="peer"} 1',
             body,
         )
         self.assertIn('playsbc_registrations_total{cluster="playsbc-lab",node="standalone"} 1', body)
