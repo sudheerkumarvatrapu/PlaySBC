@@ -125,30 +125,30 @@ data:
         {
           "id": 1,
           "type": "stat",
-          "title": "Active Calls",
+          "title": "Calls In Range",
           "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(playsbc_active_calls{job=~\"${job:regex}\"})", "legendFormat": "calls"}]
+          "targets": [{"expr": "(sum(increase(playsbc_b2bua_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0)) + (sum(increase(playsbc_ai_voice_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0))", "legendFormat": "calls"}]
         },
         {
           "id": 2,
           "type": "stat",
-          "title": "RTPengine Sessions",
+          "title": "Completed Calls",
           "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(playsbc_rtpengine_media_sessions_active{job=~\"${job:regex}\"})", "legendFormat": "sessions"}]
+          "targets": [{"expr": "sum(increase(playsbc_b2bua_calls_completed_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "completed"}]
         },
         {
           "id": 3,
           "type": "stat",
-          "title": "AI Voice Calls",
+          "title": "SIP Requests",
           "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(playsbc_ai_voice_calls_active{job=~\"${job:regex}\"})", "legendFormat": "ai calls"}]
+          "targets": [{"expr": "sum(increase(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "requests"}]
         },
         {
           "id": 4,
           "type": "stat",
-          "title": "Admission Rejects / 5m",
+          "title": "Max Active Calls",
           "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(increase(playsbc_admission_rejections_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "rejects"}]
+          "targets": [{"expr": "max(max_over_time(playsbc_active_calls{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "active"}]
         },
         {
           "id": 5,
@@ -160,9 +160,9 @@ data:
         {
           "id": 6,
           "type": "timeseries",
-          "title": "RTPengine Core -> Peer Control Failures",
+          "title": "SIP Requests By Realm",
           "gridPos": {"x": 12, "y": 4, "w": 12, "h": 7},
-          "targets": [{"expr": "sum by (from_realm,to_realm) (rate(playsbc_rtpengine_control_failures_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }}"}]
+          "targets": [{"expr": "sum by (realm,method,direction) (increase(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}direction{{ "}}" }} {{ "{{" }}method{{ "}}" }}"}]
         },
         {
           "id": 7,
@@ -177,9 +177,12 @@ data:
         {
           "id": 8,
           "type": "timeseries",
-          "title": "AI TTS RTP Prompts",
+          "title": "RTPengine Core -> Peer",
           "gridPos": {"x": 12, "y": 11, "w": 12, "h": 7},
-          "targets": [{"expr": "sum(rate(playsbc_ai_tts_rtp_prompts_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "prompts/s"}]
+          "targets": [
+            {"expr": "sum by (from_realm,to_realm) (playsbc_rtpengine_media_sessions_active{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }} active"},
+            {"expr": "sum by (from_realm,to_realm) (increase(playsbc_rtpengine_control_failures_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }} failures"}
+          ]
         }
       ]
     }

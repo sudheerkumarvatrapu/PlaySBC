@@ -638,6 +638,13 @@ class RoutingEngine:
 PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_active_calls": ("gauge", "Current active calls admitted by PlaySBC."),
     "playsbc_admission_rejections_total": ("counter", "Total calls rejected by call admission control."),
+    "playsbc_sip_requests_total": ("counter", "Total SIP requests observed by PlaySBC."),
+    "playsbc_sip_responses_total": ("counter", "Total SIP responses observed by PlaySBC."),
+    "playsbc_b2bua_calls_total": ("counter", "Total B2BUA calls attempted by PlaySBC."),
+    "playsbc_b2bua_calls_answered_total": ("counter", "Total B2BUA calls answered by PlaySBC."),
+    "playsbc_b2bua_calls_completed_total": ("counter", "Total B2BUA calls completed by PlaySBC."),
+    "playsbc_b2bua_calls_failed_total": ("counter", "Total B2BUA calls failed before normal completion."),
+    "playsbc_registrations_total": ("counter", "Total successful SIP registrations accepted by PlaySBC."),
     "playsbc_trunk_healthy": ("gauge", "Trunk health state, 1 for healthy and 0 for unhealthy."),
     "playsbc_trunk_active_calls": ("gauge", "Current active calls on a trunk."),
     "playsbc_trunk_attempts_total": ("counter", "Total attempted calls on a trunk."),
@@ -2017,6 +2024,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.ai_bot_actions_total = 0
         self.rtpengine_control_requests_total = 0
         self.rtpengine_control_failures_total = 0
+        self.sip_requests_total: Dict[Tuple[str, str, str, str], int] = {}
+        self.sip_responses_total: Dict[Tuple[str, str, str, str], int] = {}
+        self.b2bua_calls_total = 0
+        self.b2bua_calls_answered_total = 0
+        self.b2bua_calls_completed_total = 0
+        self.b2bua_calls_failed_total = 0
+        self.registrations_total = 0
         self.ha_config = dict(ha or {})
         self.node_id = ha_node_id(self.ha_config) if ha_enabled(self.ha_config) else "standalone"
         self.cluster_id = str(self.ha_config.get("cluster_id") or "playsbc-lab")
@@ -2049,6 +2063,23 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 self.logger.platform("HA NODE DRAINING", f"node={self.node_id} action=reject_new_invites")
         self.tls_client_context = tls_client_context
         self.tls_port = tls_port
+
+    def observe_sip_request(self, method: str, transport: str, direction: str, realm: str) -> None:
+        key = (method.upper() or "UNKNOWN", normalize_sip_transport(transport), direction, realm)
+        self.sip_requests_total[key] = self.sip_requests_total.get(key, 0) + 1
+
+    def observe_sip_response(self, status: int, transport: str, direction: str, realm: str) -> None:
+        status_text = str(status or 0)
+        status_class = f"{status_text[:1]}xx" if status_text and status_text[0].isdigit() else "unknown"
+        key = (status_text, status_class, normalize_sip_transport(transport), direction, realm)
+        self.sip_responses_total[key] = self.sip_responses_total.get(key, 0) + 1
+
+    def b2bua_metric_labels(self) -> Dict[str, str]:
+        return {
+            "backend": self.media_backend,
+            "from_realm": self.rtpengine_directions[0] if len(self.rtpengine_directions) == 2 else "core",
+            "to_realm": self.rtpengine_directions[1] if len(self.rtpengine_directions) == 2 else "peer",
+        }
 
     def prometheus_samples(self) -> List[Tuple[str, int | float, Dict[str, str]]]:
         base_labels = {"cluster": self.cluster_id, "node": self.node_id}
@@ -2083,6 +2114,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             [
                 ("playsbc_active_calls", self.routing_engine.active_calls, base_labels),
                 ("playsbc_admission_rejections_total", self.routing_engine.rejected_calls, base_labels),
+                ("playsbc_registrations_total", self.registrations_total, base_labels),
                 ("playsbc_stream_connects_total", self.stream_connects, {**base_labels, "transport": "stream"}),
                 ("playsbc_stream_reuses_total", self.stream_reuses, {**base_labels, "transport": "stream"}),
                 ("playsbc_stream_failures_total", self.stream_failures, {**base_labels, "transport": "stream"}),
@@ -2090,6 +2122,44 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ("playsbc_ha_configured_nodes", len(self.ha_nodes), base_labels),
                 ("playsbc_ha_node_draining", int(self.ha_node_draining), base_labels),
                 ("playsbc_ha_dialog_restores_total", self.ha_dialog_restores, base_labels),
+            ]
+        )
+        for (method, transport, direction, realm), value in sorted(self.sip_requests_total.items()):
+            samples.append(
+                (
+                    "playsbc_sip_requests_total",
+                    value,
+                    {
+                        **base_labels,
+                        "method": method,
+                        "transport": transport,
+                        "direction": direction,
+                        "realm": realm,
+                    },
+                )
+            )
+        for (status, status_class, transport, direction, realm), value in sorted(self.sip_responses_total.items()):
+            samples.append(
+                (
+                    "playsbc_sip_responses_total",
+                    value,
+                    {
+                        **base_labels,
+                        "status": status,
+                        "status_class": status_class,
+                        "transport": transport,
+                        "direction": direction,
+                        "realm": realm,
+                    },
+                )
+            )
+        b2bua_labels = {**base_labels, **self.b2bua_metric_labels()}
+        samples.extend(
+            [
+                ("playsbc_b2bua_calls_total", self.b2bua_calls_total, b2bua_labels),
+                ("playsbc_b2bua_calls_answered_total", self.b2bua_calls_answered_total, b2bua_labels),
+                ("playsbc_b2bua_calls_completed_total", self.b2bua_calls_completed_total, b2bua_labels),
+                ("playsbc_b2bua_calls_failed_total", self.b2bua_calls_failed_total, b2bua_labels),
             ]
         )
         if self.shared_state:
@@ -2309,6 +2379,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
         self.logger.write(transport_name, f"{transport_name.upper()} RX", f"protocol=sip source={addr[0]}:{addr[1]} bytes={len(data)}")
         if message.is_response:
+            self.observe_sip_response(message.status_code or 0, transport_name, "rx", "peer")
             logging.info("SIP response %s from %s:%s", message.status_code, *addr)
             self.logger.sip(
                 "SIP RX RESPONSE",
@@ -2319,6 +2390,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         logging.info("SIP %s from %s:%s", message.method, *addr)
+        self.observe_sip_request(message.method, transport_name, "rx", "core")
         self.logger.sip(
             "SIP RX REQUEST",
             f"transport={transport_name} method={message.method} source={addr[0]}:{addr[1]} target={message.start_line} cseq={message.header('cseq')}",
@@ -2408,6 +2480,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 expires_at=time.time() + expires,
             )
             self.save_registration_state(registration)
+            self.registrations_total += 1
             self.send_response(message, 200, "OK")
             logging.info("Registered %s -> %s expires=%s", user, contact_uri, expires)
             return
@@ -3007,6 +3080,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             flow_log=flow_log,
             route_result=route,
         )
+        self.b2bua_calls_total += 1
         self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
         self.b2bua_calls_by_outbound[outbound_call_id] = b2bua_call
 
@@ -3095,6 +3169,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 "Content-Type": "application/sdp",
             },
         )
+        self.b2bua_calls_answered_total += 1
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
         self.save_dialog_state(dialog)
@@ -3246,6 +3321,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             rtpengine_call_id=inbound_call_id,
             rtpengine_from_tag=from_tag,
         )
+        self.b2bua_calls_total += 1
         self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
         self.b2bua_calls_by_outbound[outbound_call_id] = b2bua_call
 
@@ -3341,6 +3417,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 "Content-Type": "application/sdp",
             },
         )
+        self.b2bua_calls_answered_total += 1
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
         self.save_dialog_state(dialog)
@@ -3406,6 +3483,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 call_id=b2bua_call.inbound_call_id,
             )
         packet = build_sip_request("INVITE", b2bua_call.outbound_target.uri, headers, body)
+        self.observe_sip_request("INVITE", transport_name, "tx", "peer")
         self._send_packet(packet, b2bua_call.outbound_target.address, transport_name=transport_name)
         b2bua_call.flow_log.sip(
             "B2BUA",
@@ -3435,6 +3513,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.outbound_destination(b2bua_call),
             transport_name=transport_name,
         )
+        self.observe_sip_request("ACK", transport_name, "tx", "peer")
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "ACK")
         session = self.media.get_session(b2bua_call.outbound_call_id)
         if session:
@@ -3460,6 +3539,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.outbound_destination(b2bua_call),
             transport_name=transport_name,
         )
+        self.observe_sip_request("CANCEL", transport_name, "tx", "peer")
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "CANCEL")
 
     def send_outbound_bye(self, b2bua_call: B2BUACall) -> None:
@@ -3481,6 +3561,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.outbound_destination(b2bua_call),
             transport_name=transport_name,
         )
+        self.observe_sip_request("BYE", transport_name, "tx", "peer")
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "BYE")
         session = self.media.get_session(b2bua_call.outbound_call_id)
         if session:
@@ -3873,6 +3954,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if b2bua_call.finalized:
             return
         b2bua_call.finalized = True
+        if reason == "cleanup":
+            self.b2bua_calls_failed_total += 1
+        else:
+            self.b2bua_calls_completed_total += 1
         if b2bua_call.route_result and not b2bua_call.admission_released:
             self.routing_engine.release(b2bua_call.route_result)
             b2bua_call.admission_released = True
@@ -4115,6 +4200,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"transport={request.transport} status={status} reason={reason} destination={request.source[0]}:{request.source[1]} cseq={request.header('cseq')}",
             call_id=request.header("call-id"),
         )
+        self.observe_sip_response(status, request.transport, "tx", "core")
         self._send_packet(packet, request.source, transport_name=request.transport, connection=request.connection)
         if request.transport == "udp":
             self.transactions.cache_response(

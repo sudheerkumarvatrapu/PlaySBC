@@ -1575,6 +1575,8 @@ Content-Length: 0
         self.assertIn("grafana", stack)
         self.assertIn("realm_model: core-peer", stack)
         self.assertIn("PlaySBC Core/Peer SBC Lab", dashboard)
+        self.assertIn("playsbc_b2bua_calls_total", dashboard)
+        self.assertIn("playsbc_sip_requests_total", dashboard)
         self.assertIn("sum by (realm,trunk) (playsbc_trunk_healthy", dashboard)
         self.assertIn("sum by (from_realm,to_realm)", dashboard)
 

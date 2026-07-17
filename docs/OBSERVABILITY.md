@@ -83,12 +83,18 @@ Useful queries:
 
 ```promql
 sum(playsbc_active_calls)
+sum(increase(playsbc_b2bua_calls_total[15m]))
+sum(increase(playsbc_b2bua_calls_completed_total[15m]))
+sum by (realm,method,direction) (increase(playsbc_sip_requests_total[15m]))
+sum by (status_class,direction) (increase(playsbc_sip_responses_total[15m]))
 sum by (realm,trunk) (playsbc_trunk_healthy)
 sum by (from_realm,to_realm) (playsbc_rtpengine_media_sessions_active)
-sum(rate(playsbc_rtpengine_control_failures_total[5m]))
-sum by (bot,stt,tts) (rate(playsbc_ai_voice_turns_total[5m]))
-sum(rate(playsbc_ai_rasa_failures_total[5m]))
+sum(increase(playsbc_rtpengine_control_failures_total[15m]))
+sum by (bot,stt,tts) (increase(playsbc_ai_voice_turns_total[15m]))
+sum(increase(playsbc_ai_rasa_failures_total[15m]))
 ```
+
+For fast SIPp regression calls, prefer the `increase(...[window])` counters. `playsbc_active_calls` is an instant gauge and can legitimately be `0` if Prometheus scrapes between short calls.
 
 ## Direct Metrics Check
 

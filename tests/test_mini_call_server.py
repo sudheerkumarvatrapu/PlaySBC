@@ -430,6 +430,11 @@ class PrometheusMetricTests(unittest.TestCase):
         )
         protocol.ai_rasa_requests_total = 3
         protocol.rtpengine_control_requests_total = 2
+        protocol.observe_sip_request("INVITE", "udp", "rx", "core")
+        protocol.observe_sip_response(200, "udp", "tx", "core")
+        protocol.b2bua_calls_total = 1
+        protocol.b2bua_calls_completed_total = 1
+        protocol.registrations_total = 1
 
         body = server.render_prometheus_metrics(protocol.prometheus_samples())
 
@@ -447,6 +452,19 @@ class PrometheusMetricTests(unittest.TestCase):
             'playsbc_rtpengine_control_requests_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",node="standalone",to_realm="peer",url="udp://127.0.0.1:2223"} 2',
             body,
         )
+        self.assertIn(
+            'playsbc_sip_requests_total{cluster="playsbc-lab",direction="rx",method="INVITE",node="standalone",realm="core",transport="udp"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_sip_responses_total{cluster="playsbc-lab",direction="tx",node="standalone",realm="core",status="200",status_class="2xx",transport="udp"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_b2bua_calls_completed_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",node="standalone",to_realm="peer"} 1',
+            body,
+        )
+        self.assertIn('playsbc_registrations_total{cluster="playsbc-lab",node="standalone"} 1', body)
 
 
 class RtpengineRetryTests(unittest.TestCase):
