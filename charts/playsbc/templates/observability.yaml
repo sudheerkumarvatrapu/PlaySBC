@@ -1,11 +1,18 @@
-{{- if .Values.observability.prometheus.serviceMonitor.enabled }}
+{{- $observability := .Values.observability | default dict }}
+{{- $obsEnabled := get $observability "enabled" | default false }}
+{{- $prometheus := get $observability "prometheus" | default dict }}
+{{- $serviceMonitor := get $prometheus "serviceMonitor" | default dict }}
+{{- $rules := get $prometheus "rules" | default dict }}
+{{- $grafana := get $observability "grafana" | default dict }}
+{{- $dashboard := get $grafana "dashboard" | default dict }}
+{{- if get $serviceMonitor "enabled" | default false }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "playsbc.fullname" . }}
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
-{{- with .Values.observability.prometheus.serviceMonitor.labels }}
+{{- with (get $serviceMonitor "labels") }}
 {{ toYaml . | indent 4 }}
 {{- end }}
 spec:
@@ -19,18 +26,18 @@ spec:
   endpoints:
     - port: health
       path: /metrics
-      interval: {{ .Values.observability.prometheus.serviceMonitor.interval }}
-      scrapeTimeout: {{ .Values.observability.prometheus.serviceMonitor.scrapeTimeout }}
+      interval: {{ get $serviceMonitor "interval" | default "15s" }}
+      scrapeTimeout: {{ get $serviceMonitor "scrapeTimeout" | default "5s" }}
 ---
 {{- end }}
-{{- if .Values.observability.prometheus.rules.enabled }}
+{{- if get $rules "enabled" | default false }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: {{ include "playsbc.fullname" . }}-alerts
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
-{{- with .Values.observability.prometheus.rules.labels }}
+{{- with (get $rules "labels") }}
 {{ toYaml . | indent 4 }}
 {{- end }}
 spec:
@@ -79,14 +86,14 @@ spec:
             description: At least one HA node is rejecting new calls because drain mode is enabled.
 ---
 {{- end }}
-{{- if or .Values.observability.enabled .Values.observability.grafana.enabled .Values.observability.grafana.dashboard.enabled }}
+{{- if or $obsEnabled (get $grafana "enabled" | default false) (get $dashboard "enabled" | default false) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "playsbc.fullname" . }}-grafana-dashboard
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
-{{- with .Values.observability.grafana.dashboard.labels }}
+{{- with (get $dashboard "labels") }}
 {{ toYaml . | indent 4 }}
 {{- end }}
 data:

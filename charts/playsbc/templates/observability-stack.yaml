@@ -1,4 +1,26 @@
-{{- if or .Values.observability.enabled .Values.observability.prometheus.enabled .Values.observability.grafana.enabled }}
+{{- $observability := .Values.observability | default dict }}
+{{- $obsEnabled := get $observability "enabled" | default false }}
+{{- $prometheus := get $observability "prometheus" | default dict }}
+{{- $grafana := get $observability "grafana" | default dict }}
+{{- $promEnabled := get $prometheus "enabled" | default false }}
+{{- $grafanaEnabled := get $grafana "enabled" | default false }}
+{{- $promImage := get $prometheus "image" | default dict }}
+{{- $promService := get $prometheus "service" | default dict }}
+{{- $promPersistence := get $prometheus "persistence" | default dict }}
+{{- $promResources := get $prometheus "resources" | default dict }}
+{{- $grafanaImage := get $grafana "image" | default dict }}
+{{- $grafanaService := get $grafana "service" | default dict }}
+{{- $grafanaPersistence := get $grafana "persistence" | default dict }}
+{{- $grafanaResources := get $grafana "resources" | default dict }}
+{{- $promPersistenceEnabled := true }}
+{{- if hasKey $promPersistence "enabled" }}
+{{- $promPersistenceEnabled = get $promPersistence "enabled" }}
+{{- end }}
+{{- $grafanaPersistenceEnabled := true }}
+{{- if hasKey $grafanaPersistence "enabled" }}
+{{- $grafanaPersistenceEnabled = get $grafanaPersistence "enabled" }}
+{{- end }}
+{{- if or $obsEnabled $promEnabled $grafanaEnabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,8 +30,8 @@ metadata:
 data:
   prometheus.yml: |-
     global:
-      scrape_interval: {{ .Values.observability.prometheus.scrapeInterval }}
-      evaluation_interval: {{ .Values.observability.prometheus.evaluationInterval }}
+      scrape_interval: {{ get $prometheus "scrapeInterval" | default "15s" }}
+      evaluation_interval: {{ get $prometheus "evaluationInterval" | default "15s" }}
     rule_files:
       - /etc/prometheus/rules.yml
     scrape_configs:
@@ -66,7 +88,7 @@ data:
             annotations:
               summary: A PlaySBC HA node is draining.
 ---
-{{- if .Values.observability.prometheus.persistence.enabled }}
+{{- if $promPersistenceEnabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -76,12 +98,12 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-{{- if .Values.observability.prometheus.persistence.storageClassName }}
-  storageClassName: {{ .Values.observability.prometheus.persistence.storageClassName | quote }}
+{{- if get $promPersistence "storageClassName" }}
+  storageClassName: {{ get $promPersistence "storageClassName" | quote }}
 {{- end }}
   resources:
     requests:
-      storage: {{ .Values.observability.prometheus.persistence.size }}
+      storage: {{ get $promPersistence "size" | default "5Gi" }}
 ---
 {{- end }}
 apiVersion: apps/v1
@@ -105,12 +127,12 @@ spec:
     spec:
       containers:
         - name: prometheus
-          image: "{{ .Values.observability.prometheus.image.repository }}:{{ .Values.observability.prometheus.image.tag }}"
-          imagePullPolicy: {{ .Values.observability.prometheus.image.pullPolicy }}
+          image: "{{ get $promImage "repository" | default "prom/prometheus" }}:{{ get $promImage "tag" | default "v2.55.1" }}"
+          imagePullPolicy: {{ get $promImage "pullPolicy" | default "IfNotPresent" }}
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time={{ .Values.observability.prometheus.retention }}
+            - --storage.tsdb.retention.time={{ get $prometheus "retention" | default "31d" }}
             - --web.enable-lifecycle
           ports:
             - name: http
@@ -135,13 +157,13 @@ spec:
             - name: data
               mountPath: /prometheus
           resources:
-{{ toYaml .Values.observability.prometheus.resources | indent 12 }}
+{{ toYaml $promResources | indent 12 }}
       volumes:
         - name: config
           configMap:
             name: {{ include "playsbc.fullname" . }}-prometheus-config
         - name: data
-{{- if .Values.observability.prometheus.persistence.enabled }}
+{{- if $promPersistenceEnabled }}
           persistentVolumeClaim:
             claimName: {{ include "playsbc.fullname" . }}-prometheus
 {{- else }}
@@ -155,17 +177,15 @@ metadata:
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
-  type: {{ .Values.observability.prometheus.service.type }}
+  type: {{ get $promService "type" | default "ClusterIP" }}
   selector:
     app.kubernetes.io/name: {{ include "playsbc.name" . }}-prometheus
     app.kubernetes.io/instance: {{ .Release.Name }}
   ports:
     - name: http
-      port: {{ .Values.observability.prometheus.service.port }}
+      port: {{ get $promService "port" | default 9090 }}
       targetPort: http
       protocol: TCP
-{{- end }}
-{{- if or .Values.observability.enabled .Values.observability.grafana.enabled }}
 ---
 apiVersion: v1
 kind: Secret
@@ -175,8 +195,8 @@ metadata:
 {{ include "playsbc.labels" . | indent 4 }}
 type: Opaque
 stringData:
-  admin-user: {{ .Values.observability.grafana.adminUser | quote }}
-  admin-password: {{ .Values.observability.grafana.adminPassword | quote }}
+  admin-user: {{ get $grafana "adminUser" | default "admin" | quote }}
+  admin-password: {{ get $grafana "adminPassword" | default "playsbc-lab" | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -192,7 +212,7 @@ data:
         uid: prometheus
         type: prometheus
         access: proxy
-        url: http://{{ include "playsbc.fullname" . }}-prometheus:{{ .Values.observability.prometheus.service.port }}
+        url: http://{{ include "playsbc.fullname" . }}-prometheus:{{ get $promService "port" | default 9090 }}
         isDefault: true
   dashboards.yml: |-
     apiVersion: 1
@@ -206,7 +226,7 @@ data:
         options:
           path: /var/lib/grafana/dashboards
 ---
-{{- if .Values.observability.grafana.persistence.enabled }}
+{{- if $grafanaPersistenceEnabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -216,12 +236,12 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-{{- if .Values.observability.grafana.persistence.storageClassName }}
-  storageClassName: {{ .Values.observability.grafana.persistence.storageClassName | quote }}
+{{- if get $grafanaPersistence "storageClassName" }}
+  storageClassName: {{ get $grafanaPersistence "storageClassName" | quote }}
 {{- end }}
   resources:
     requests:
-      storage: {{ .Values.observability.grafana.persistence.size }}
+      storage: {{ get $grafanaPersistence "size" | default "2Gi" }}
 ---
 {{- end }}
 apiVersion: apps/v1
@@ -245,8 +265,8 @@ spec:
     spec:
       containers:
         - name: grafana
-          image: "{{ .Values.observability.grafana.image.repository }}:{{ .Values.observability.grafana.image.tag }}"
-          imagePullPolicy: {{ .Values.observability.grafana.image.pullPolicy }}
+          image: "{{ get $grafanaImage "repository" | default "grafana/grafana" }}:{{ get $grafanaImage "tag" | default "11.4.0" }}"
+          imagePullPolicy: {{ get $grafanaImage "pullPolicy" | default "IfNotPresent" }}
           env:
             - name: GF_SECURITY_ADMIN_USER
               valueFrom:
@@ -289,7 +309,7 @@ spec:
             - name: data
               mountPath: /var/lib/grafana
           resources:
-{{ toYaml .Values.observability.grafana.resources | indent 12 }}
+{{ toYaml $grafanaResources | indent 12 }}
       volumes:
         - name: provisioning
           configMap:
@@ -298,7 +318,7 @@ spec:
           configMap:
             name: {{ include "playsbc.fullname" . }}-grafana-dashboard
         - name: data
-{{- if .Values.observability.grafana.persistence.enabled }}
+{{- if $grafanaPersistenceEnabled }}
           persistentVolumeClaim:
             claimName: {{ include "playsbc.fullname" . }}-grafana
 {{- else }}
@@ -312,13 +332,13 @@ metadata:
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
-  type: {{ .Values.observability.grafana.service.type }}
+  type: {{ get $grafanaService "type" | default "ClusterIP" }}
   selector:
     app.kubernetes.io/name: {{ include "playsbc.name" . }}-grafana
     app.kubernetes.io/instance: {{ .Release.Name }}
   ports:
     - name: http
-      port: {{ .Values.observability.grafana.service.port }}
+      port: {{ get $grafanaService "port" | default 3000 }}
       targetPort: http
       protocol: TCP
 {{- end }}

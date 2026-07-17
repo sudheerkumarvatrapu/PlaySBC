@@ -1569,7 +1569,7 @@ Content-Length: 0
         self.assertIn("observability:", values)
         self.assertIn("retention: 31d", values)
         self.assertIn("kind: PersistentVolumeClaim", stack)
-        self.assertIn("--storage.tsdb.retention.time={{ .Values.observability.prometheus.retention }}", stack)
+        self.assertIn('--storage.tsdb.retention.time={{ get $prometheus "retention" | default "31d" }}', stack)
         self.assertIn("uid: prometheus", stack)
         self.assertIn("kind: Deployment", stack)
         self.assertIn("grafana", stack)

@@ -4,14 +4,18 @@ metadata:
   name: {{ include "playsbc.fullname" . }}
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
-{{- if or .Values.observability.prometheus.scrapeAnnotations .Values.service.annotations }}
+{{- $observability := .Values.observability | default dict }}
+{{- $prometheus := get $observability "prometheus" | default dict }}
+{{- $scrapeAnnotations := get $prometheus "scrapeAnnotations" | default false }}
+{{- $serviceAnnotations := .Values.service.annotations | default dict }}
+{{- if or $scrapeAnnotations $serviceAnnotations }}
   annotations:
-{{- if .Values.observability.prometheus.scrapeAnnotations }}
+{{- if $scrapeAnnotations }}
     prometheus.io/scrape: "true"
     prometheus.io/path: /metrics
     prometheus.io/port: "{{ .Values.service.healthPort }}"
 {{- end }}
-{{- with .Values.service.annotations }}
+{{- with $serviceAnnotations }}
 {{ toYaml . | indent 4 }}
 {{- end }}
 {{- end }}
