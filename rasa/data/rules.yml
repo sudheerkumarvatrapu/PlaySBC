@@ -41,6 +41,11 @@ rules:
       - intent: deny
       - action: utter_deny
 
+  - rule: Long support response
+    steps:
+      - intent: long_response
+      - action: utter_long_response
+
   - rule: Clarify ambiguous request
     steps:
       - intent: clarify

@@ -32,5 +32,6 @@ playsbc:
       stt_provider: lab-scripted
       tts_provider: text-only
       response_mode: rest
+      tts_chunk_chars: 220
       bot_actions_enabled: true
       fallback_text: Real Rasa lab bot is unavailable

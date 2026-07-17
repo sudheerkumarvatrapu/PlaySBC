@@ -100,6 +100,22 @@ RASA_PROFILE_LABELS = {
         "tts_node": "Piper TTS",
         "mode": "SIPp plays real G.711 speech, RTPengine anchors RTP/RTCP, PlaySBC decodes RTP to WAV, Vosk transcribes, real Rasa responds, and Piper generates RTP prompt evidence",
     },
+    "ai-rasa-rtpengine-speech-whisper": {
+        "title": "AI Voice Gateway - Whisper STT + Real Rasa",
+        "suite": "Kubernetes AI/Rasa Whisper RTPengine",
+        "rasa_node": "Real Rasa Pod",
+        "stt_node": "Whisper STT",
+        "tts_node": "Piper TTS",
+        "mode": "SIPp plays G.711 speech, RTPengine anchors RTP/RTCP, PlaySBC decodes RTP to WAV, Whisper transcribes through the adapter boundary, real Rasa responds, and Piper generates RTP prompt evidence",
+    },
+    "ai-rasa-long-response-streaming": {
+        "title": "AI Voice Gateway - Long Response Streaming",
+        "suite": "Kubernetes AI/Rasa Streaming",
+        "rasa_node": "Real Rasa Pod",
+        "stt_node": "Scripted STT",
+        "tts_node": "Piper TTS",
+        "mode": "SIPp plays speech, RTPengine anchors RTP/RTCP, real Rasa returns a long support response, and PlaySBC emits ordered Piper TTS chunks with per-chunk RTP prompt evidence",
+    },
     "ai-rasa-contact-center-sales": {
         "title": "AI Contact Center - SIPp B Sales Bot Agent",
         "suite": "Kubernetes AI/Rasa Contact Center",
@@ -107,6 +123,14 @@ RASA_PROFILE_LABELS = {
         "stt_node": "Vosk STT",
         "tts_node": "Piper TTS",
         "mode": "SIPp A calls a virtual SIPp B sales agent, RTPengine anchors RTP/RTCP, Vosk transcribes sales speech, real Rasa runs the sales workflow, and Piper returns the bot-agent prompt",
+    },
+    "ai-rasa-contact-center-sales-coqui": {
+        "title": "AI Contact Center - Sales Bot Agent + Coqui",
+        "suite": "Kubernetes AI/Rasa Contact Center Coqui",
+        "rasa_node": "SIPp B Bot Agent",
+        "stt_node": "Vosk STT",
+        "tts_node": "Coqui TTS",
+        "mode": "SIPp A calls a virtual SIPp B sales agent, RTPengine anchors RTP/RTCP, Vosk transcribes sales speech, real Rasa runs the sales workflow, and Coqui generates the bot-agent prompt",
     },
     "ai-rasa-chat-nlu": {
         "title": "AI Rasa Chat NLU - Intent Matrix",
@@ -966,7 +990,15 @@ class K8sRegressionRunner:
             result = self.kubectl(*parts, check=False)
             (bundle / filename).write_text(result.stdout + result.stderr, encoding="utf-8")
         self.collect_playsbc_pod_evidence(bundle)
-        self.collect_playsbc_persistent_logs(bundle)
+        if profile_name in RASA_NLU_PROFILES:
+            self.write_log(
+                bundle,
+                "log.platform",
+                "PLAY SBC PERSISTENT LOG COPY SKIPPED",
+                "chat/NLU profiles use rasa-nlu-results.json and log.rasa-nlu as primary evidence; SIP/RTP logs are not applicable",
+            )
+        else:
+            self.collect_playsbc_persistent_logs(bundle)
         if include_rasa:
             self.collect_rasa_pod_evidence(bundle)
 
@@ -1931,7 +1963,13 @@ class K8sRegressionRunner:
     def ladder_participants(self, profile: SimpleNamespace) -> tuple[str, ...]:
         profile_name = str(getattr(profile, "profile", ""))
         if "ai-rasa" in profile_name:
-            if profile_name in {"ai-rasa-rtpengine-speech", "ai-rasa-contact-center-sales"}:
+            if profile_name in {
+                "ai-rasa-rtpengine-speech",
+                "ai-rasa-rtpengine-speech-whisper",
+                "ai-rasa-long-response-streaming",
+                "ai-rasa-contact-center-sales",
+                "ai-rasa-contact-center-sales-coqui",
+            }:
                 stt_node, rasa_node, tts_node = ai_ladder_nodes(profile)
                 return ("Core SIPp A", "RTPengine", "PlaySBC", stt_node, rasa_node, tts_node)
             participants = ["Core SIPp A", "PlaySBC"]
@@ -2013,18 +2051,36 @@ class K8sRegressionRunner:
             flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
-        if profile_name in {"ai-rasa-rtpengine-speech", "ai-rasa-contact-center-sales"}:
+        speech_profiles = {
+            "ai-rasa-rtpengine-speech",
+            "ai-rasa-rtpengine-speech-whisper",
+            "ai-rasa-long-response-streaming",
+            "ai-rasa-contact-center-sales",
+            "ai-rasa-contact-center-sales-coqui",
+        }
+        sales_profiles = {"ai-rasa-contact-center-sales", "ai-rasa-contact-center-sales-coqui"}
+        if profile_name in speech_profiles:
             flow.sip("Core SIPp A", "RTPengine", "G.711 speech RTP")
             flow.sip("RTPengine", "PlaySBC", "anchored RTP")
             flow.sip("PlaySBC", stt_node, "decode WAV")
-            transcript = "text: connect me to sales" if profile_name == "ai-rasa-contact-center-sales" else "text: i need support"
+            if profile_name in sales_profiles:
+                transcript = "text: connect me to sales"
+            elif profile_name == "ai-rasa-long-response-streaming":
+                transcript = "text: detailed support update"
+            else:
+                transcript = "text: i need support"
             flow.sip(stt_node, "PlaySBC", transcript)
         else:
             flow.sip("PlaySBC", stt_node, "scripted STT")
             flow.sip(stt_node, "PlaySBC", "intent text")
         if profile_uses_real_rasa(profile):
             flow.sip("PlaySBC", rasa_node, "REST POST /webhook")
-            response_label = "REST 200 sales workflow" if profile_name == "ai-rasa-contact-center-sales" else "REST 200 support"
+            if profile_name in sales_profiles:
+                response_label = "REST 200 sales workflow"
+            elif profile_name == "ai-rasa-long-response-streaming":
+                response_label = "REST 200 long response"
+            else:
+                response_label = "REST 200 support"
             flow.sip(rasa_node, "PlaySBC", response_label)
         elif profile_name == "ai-rasa-rtpengine":
             flow.sip("PlaySBC", rasa_node, "REST POST /mock")
@@ -2032,9 +2088,13 @@ class K8sRegressionRunner:
         else:
             flow.sip("PlaySBC", rasa_node, "REST POST /mock")
             flow.sip(rasa_node, "PlaySBC", "single reply")
-        if profile_name in {"ai-rasa-rtpengine-speech", "ai-rasa-contact-center-sales"}:
-            flow.sip("PlaySBC", tts_node, "bot text")
-            flow.sip(tts_node, "PlaySBC", "Piper WAV")
+        if profile_name in speech_profiles:
+            if profile_name == "ai-rasa-long-response-streaming":
+                flow.sip("PlaySBC", tts_node, "bot text chunks")
+                flow.sip(tts_node, "PlaySBC", "Piper WAV chunks")
+            else:
+                flow.sip("PlaySBC", tts_node, "bot text")
+                flow.sip(tts_node, "PlaySBC", f"{tts_node.replace(' TTS', '')} WAV")
             flow.sip("PlaySBC", "RTPengine", "G.711 prompt RTP")
         else:
             flow.sip("PlaySBC", tts_node, "text-only TTS")

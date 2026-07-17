@@ -49,6 +49,16 @@ class SipParsingTests(unittest.TestCase):
         self.assertEqual(server.parse_sdp_remote_addr(sdp), ("127.0.0.1", 26000))
         self.assertEqual(server.parse_sdp_remote_rtcp_addr(sdp, ("127.0.0.1", 26000)), ("127.0.0.1", 26001))
 
+    def test_sdp_payload_detection_accepts_secure_rtp_profiles(self):
+        sdp = (
+            "c=IN IP4 127.0.0.1\r\n"
+            "m=audio 26000 RTP/SAVP 0 101\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+            "a=rtpmap:101 telephone-event/8000\r\n"
+        )
+
+        self.assertEqual(server.parse_sdp_payloads(sdp), (0, 101))
+
     def test_parse_sip_uri_with_default_and_explicit_ports(self):
         explicit = server.parse_sip_uri("<sip:1002@127.0.0.1:25082>")
         self.assertEqual(explicit.user, "1002")
@@ -378,6 +388,104 @@ class ResponseTests(unittest.TestCase):
         )
 
 
+class PrometheusMetricTests(unittest.TestCase):
+    def test_prometheus_renderer_adds_metadata_and_escapes_labels(self):
+        body = server.render_prometheus_metrics(
+            [
+                ("playsbc_active_calls", 1, {}),
+                ("playsbc_active_calls", 2, {"node": 'node"one', "cluster": "lab\\one"}),
+            ]
+        )
+
+        self.assertIn("# HELP playsbc_active_calls Current active calls admitted by PlaySBC.", body)
+        self.assertIn("# TYPE playsbc_active_calls gauge", body)
+        self.assertIn("playsbc_active_calls 1", body)
+        self.assertIn('playsbc_active_calls{cluster="lab\\\\one",node="node\\"one"} 2', body)
+
+    def test_protocol_metrics_include_core_peer_rtpengine_and_ai_labels(self):
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media=None,
+            logger=server.SbcLogger(None),
+            default_payload=server.PCMU,
+            auth_realm="playsbc",
+            users={},
+            bridge_rooms=(),
+            b2bua_routes={},
+            route_policies=(),
+            b2bua_ladder_logs=False,
+            trunk_groups=(
+                {
+                    "name": "peer-trunks",
+                    "members": [
+                        {
+                            "name": "peer-primary",
+                            "uri": "sip:{user}@peer.example:5060",
+                            "realm": "peer",
+                        }
+                    ],
+                },
+            ),
+            media_backend="rtpengine",
+            rtpengine_client=server.RtpengineClient("udp://127.0.0.1:2223"),
+            rtpengine_directions=("core", "peer"),
+            ai_voice_gateway={
+                "enabled": True,
+                "provider": "rasa",
+                "bot_name": "rasa-support",
+                "stt_provider": "whisper",
+                "tts_provider": "coqui",
+            },
+        )
+        protocol.ai_rasa_requests_total = 3
+        protocol.rtpengine_control_requests_total = 2
+        protocol.observe_sip_request("INVITE", "udp", "rx", "core")
+        protocol.observe_sip_response(200, "udp", "tx", "core")
+        protocol.observe_media_negotiation("rtpengine", server.PCMU, server.PCMA)
+        protocol.b2bua_calls_total = 1
+        protocol.b2bua_calls_completed_total = 1
+        protocol.registrations_total = 1
+
+        body = server.render_prometheus_metrics(protocol.prometheus_samples())
+
+        self.assertIn('playsbc_realm_info{cluster="playsbc-lab",node="standalone",realm="core"} 1', body)
+        self.assertIn('playsbc_realm_info{cluster="playsbc-lab",node="standalone",realm="peer"} 1', body)
+        self.assertIn(
+            'playsbc_trunk_healthy{cluster="playsbc-lab",node="standalone",realm="peer",trunk="peer-primary"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_ai_rasa_requests_total{bot="rasa-support",cluster="playsbc-lab",node="standalone",provider="rasa",realm="ai",stt="whisper",tts="coqui"} 3',
+            body,
+        )
+        self.assertIn(
+            'playsbc_rtpengine_control_requests_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",node="standalone",to_realm="peer",url="udp://127.0.0.1:2223"} 2',
+            body,
+        )
+        self.assertIn(
+            'playsbc_sip_requests_total{cluster="playsbc-lab",direction="rx",method="INVITE",node="standalone",realm="core",transport="udp"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_sip_responses_total{cluster="playsbc-lab",direction="tx",node="standalone",realm="core",status="200",status_class="2xx",transport="udp"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_b2bua_calls_completed_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",node="standalone",to_realm="peer"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_media_negotiations_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",inbound_codec="PCMU",node="standalone",outbound_codec="PCMA",to_realm="peer",transcoding="true"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_transcoding_sessions_total{backend="rtpengine",cluster="playsbc-lab",from_realm="core",inbound_codec="PCMU",node="standalone",outbound_codec="PCMA",to_realm="peer"} 1',
+            body,
+        )
+        self.assertIn('playsbc_registrations_total{cluster="playsbc-lab",node="standalone"} 1', body)
+
+
 class RtpengineRetryTests(unittest.TestCase):
     def make_flow_log(self):
         route = server.RouteResult(
@@ -627,6 +735,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(parsed["bridge_rooms"], ["bridge"])
         self.assertEqual(parsed["route_policies"][0]["name"], "registered-endpoints")
         self.assertEqual(parsed["route_policies"][0]["target"], "registration")
+
+    def test_simple_yaml_parser_folds_helm_wrapped_plain_scalars(self):
+        parsed = server.parse_simple_yaml(
+            """
+            ai_voice_gateway:
+              stt_command: python3 tools/whisper_stt_wrapper.py --audio {audio_path} --fallback-transcript
+                "{text}" --allow-lab-fallback
+              tts_command: python3 tools/piper_tts_wrapper.py --text "{text}" --output {audio_path}
+            """
+        )
+
+        self.assertEqual(
+            parsed["ai_voice_gateway"]["stt_command"],
+            'python3 tools/whisper_stt_wrapper.py --audio {audio_path} --fallback-transcript "{text}" --allow-lab-fallback',
+        )
+        self.assertEqual(
+            parsed["ai_voice_gateway"]["tts_command"],
+            'python3 tools/piper_tts_wrapper.py --text "{text}" --output {audio_path}',
+        )
 
     def test_invalid_rtpengine_config_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

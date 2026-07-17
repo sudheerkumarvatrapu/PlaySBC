@@ -32,6 +32,7 @@ ai_voice_gateway:
   tts_provider: text-only
   tts_command: ""
   response_mode: rest
+  tts_chunk_chars: 220
   bot_actions_enabled: true
   fallback_text: Real Rasa lab bot is unavailable
 

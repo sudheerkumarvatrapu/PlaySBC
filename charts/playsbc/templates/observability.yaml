@@ -1,0 +1,259 @@
+{{- $observability := .Values.observability | default dict }}
+{{- $obsEnabled := get $observability "enabled" | default false }}
+{{- $prometheus := get $observability "prometheus" | default dict }}
+{{- $serviceMonitor := get $prometheus "serviceMonitor" | default dict }}
+{{- $rules := get $prometheus "rules" | default dict }}
+{{- $grafana := get $observability "grafana" | default dict }}
+{{- $dashboard := get $grafana "dashboard" | default dict }}
+{{- if get $serviceMonitor "enabled" | default false }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "playsbc.fullname" . }}
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+{{- with (get $serviceMonitor "labels") }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "playsbc.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: health
+      path: /metrics
+      interval: {{ get $serviceMonitor "interval" | default "15s" }}
+      scrapeTimeout: {{ get $serviceMonitor "scrapeTimeout" | default "5s" }}
+---
+{{- end }}
+{{- if get $rules "enabled" | default false }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "playsbc.fullname" . }}-alerts
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+{{- with (get $rules "labels") }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  groups:
+    - name: playsbc.rules
+      rules:
+        - alert: PlaySBCAdmissionRejectionsHigh
+          expr: sum(rate(playsbc_admission_rejections_total[5m])) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: PlaySBC is rejecting admitted calls.
+            description: Call admission rejection rate has been non-zero for more than two minutes.
+        - alert: PlaySBCRtpengineControlFailures
+          expr: sum(rate(playsbc_rtpengine_control_failures_total[5m])) > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: RTPengine control path is failing.
+            description: PlaySBC is seeing RTPengine offer, answer, query, or delete failures.
+        - alert: PlaySBCAiRasaFailures
+          expr: sum(rate(playsbc_ai_rasa_failures_total[5m])) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: AI/Rasa voice turns are failing.
+            description: Rasa REST turns are returning errors or falling back.
+        - alert: PlaySBCTrunkDown
+          expr: min(playsbc_trunk_healthy) == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: One or more PlaySBC trunks are unhealthy.
+            description: OPTIONS probing or call failures marked at least one trunk unhealthy.
+        - alert: PlaySBCHaNodeDraining
+          expr: max(playsbc_ha_node_draining) > 0
+          for: 5m
+          labels:
+            severity: info
+          annotations:
+            summary: A PlaySBC HA node is draining.
+            description: At least one HA node is rejecting new calls because drain mode is enabled.
+---
+{{- end }}
+{{- if or $obsEnabled (get $grafana "enabled" | default false) (get $dashboard "enabled" | default false) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "playsbc.fullname" . }}-grafana-dashboard
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+{{- with (get $dashboard "labels") }}
+{{- range $key, $value := . }}
+    {{ $key }}: {{ $value | quote }}
+{{- end }}
+{{- end }}
+data:
+  playsbc-dashboard.json: |-
+    {
+      "uid": "playsbc-sbc-lab",
+      "title": "PlaySBC Core/Peer SBC Lab",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "tags": ["playsbc", "sbc", "core-peer", "rtpengine", "rasa"],
+      "time": {"from": "now-1h", "to": "now"},
+      "templating": {
+        "list": [
+          {
+            "name": "job",
+            "type": "query",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "query": "label_values(playsbc_active_calls, job)",
+            "refresh": 1,
+            "includeAll": true,
+            "allValue": ".*",
+            "multi": true,
+            "current": {"text": "All", "value": ".*"}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Current Active Calls",
+          "description": "Instant active-call gauge. This should return to 0 after a regression profile finishes.",
+          "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "(sum(playsbc_active_calls{job=~\"${job:regex}\"}) or vector(0)) + (sum(playsbc_ai_voice_calls_active{job=~\"${job:regex}\"}) or vector(0))", "legendFormat": "active now"}]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Calls Started In Range",
+          "description": "Highest observed started-call counter in the selected range. This is historical evidence, not current active state.",
+          "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "(sum(max_over_time(playsbc_b2bua_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0)) + (sum(max_over_time(playsbc_ai_voice_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0))", "legendFormat": "started"}]
+        },
+        {
+          "id": 14,
+          "type": "stat",
+          "title": "Completed Calls In Range",
+          "description": "Highest observed completed-call counter in the selected range. For a finished 300-call load profile this should match SIPp's successful-call count.",
+          "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum(max_over_time(playsbc_b2bua_calls_completed_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "completed"}]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "SIP Requests Observed",
+          "description": "Observed SIP request counters in the selected range. During Kubernetes regression, PlaySBC rolls per profile, so this is traffic evidence rather than a strict call-count multiplier.",
+          "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum(max_over_time(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "requests"}]
+        },
+        {
+          "id": 9,
+          "type": "stat",
+          "title": "SIP Responses Observed",
+          "description": "Observed SIP response counters in the selected range, including provisional, success, redirection, and error responses.",
+          "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum(max_over_time(playsbc_sip_responses_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "responses"}]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Peak Active In Range",
+          "description": "Historical high-water mark for active calls in the selected time range. This intentionally stays non-zero while the selected range includes a load run.",
+          "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "max(max_over_time(playsbc_active_calls{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "peak active"}]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Core/Peer Trunk Health Observed",
+          "description": "Shows trunk health samples seen in the selected range. This panel populates when trunk-group profiles run, such as failover, trunk metrics, or OPTIONS health recovery.",
+          "gridPos": {"x": 0, "y": 4, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum by (realm,trunk) (max_over_time(playsbc_trunk_healthy{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}trunk{{ "}}" }}"}]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "SIP Requests Observed By Realm",
+          "description": "Observed SIP request counters grouped by realm, direction, and method for the selected range.",
+          "gridPos": {"x": 12, "y": 4, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum by (realm,method,direction) (max_over_time(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}direction{{ "}}" }} {{ "{{" }}method{{ "}}" }}"}]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "SIP Responses Observed By Status",
+          "description": "Observed SIP responses grouped by realm, direction, status code, and status class for the selected range.",
+          "gridPos": {"x": 0, "y": 11, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum by (realm,status,status_class,direction) (max_over_time(playsbc_sip_responses_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}direction{{ "}}" }} {{ "{{" }}status{{ "}}" }} {{ "{{" }}status_class{{ "}}" }}"}]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "AI/Rasa Turns By Realm",
+          "gridPos": {"x": 12, "y": 11, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [
+            {"expr": "sum by (realm,bot,stt,tts) (rate(playsbc_ai_voice_turns_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} {{ "{{" }}stt{{ "}}" }}/{{ "{{" }}tts{{ "}}" }} turns/s"},
+            {"expr": "sum by (realm,bot) (rate(playsbc_ai_rasa_failures_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} rasa failures/s"}
+          ]
+        },
+        {
+          "id": 8,
+          "type": "stat",
+          "title": "Media Negotiated",
+          "description": "Answered calls with a negotiated audio codec pair. Labels expose backend, core/peer realms, inbound codec, outbound codec, and transcoding=true/false.",
+          "gridPos": {"x": 0, "y": 18, "w": 6, "h": 5},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum(max_over_time(playsbc_media_negotiations_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "negotiated"}]
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "Transcoding Sessions",
+          "description": "Answered calls where the negotiated inbound and outbound audio codecs differ, for example PCMU on core and PCMA on peer.",
+          "gridPos": {"x": 6, "y": 18, "w": 6, "h": 5},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum(max_over_time(playsbc_transcoding_sessions_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "transcoding"}]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Codec Negotiation Matrix",
+          "description": "Negotiated audio codec pairs by backend. Example: rtpengine PCMU -> PCMA transcoding=true.",
+          "gridPos": {"x": 12, "y": 18, "w": 12, "h": 5},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [{"expr": "sum by (backend,inbound_codec,outbound_codec,transcoding) (max_over_time(playsbc_media_negotiations_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}backend{{ "}}" }} {{ "{{" }}inbound_codec{{ "}}" }} -> {{ "{{" }}outbound_codec{{ "}}" }} transcode={{ "{{" }}transcoding{{ "}}" }}"}]
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "RTPengine Core -> Peer",
+          "gridPos": {"x": 0, "y": 23, "w": 24, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [
+            {"expr": "sum by (from_realm,to_realm) (playsbc_rtpengine_media_sessions_active{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }} active"},
+            {"expr": "sum by (from_realm,to_realm) (increase(playsbc_rtpengine_control_failures_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }} failures"}
+          ]
+        }
+      ]
+    }
+{{- end }}

@@ -38,6 +38,8 @@ class TtsResult:
     audio_path: str = ""
     rtp_path: str = ""
     error: str = ""
+    chunk_index: int = 1
+    chunk_count: int = 1
 
 
 class SpeechToTextAdapter:
@@ -94,14 +96,35 @@ class TextToSpeechAdapter:
         output_path: str = "",
         rtp_path: str = "",
         codec: str = "PCMU",
+        chunk_index: int = 1,
+        chunk_count: int = 1,
     ) -> TtsResult:
         started = time.monotonic()
         provider = self.provider.lower()
         if provider in {"", "text-only", "lab-text"}:
-            return TtsResult("text-only", text, False, False, True, time.monotonic() - started)
+            return TtsResult(
+                "text-only",
+                text,
+                False,
+                False,
+                True,
+                time.monotonic() - started,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
 
         if provider not in {"piper", "coqui"}:
-            return TtsResult(provider, text, False, False, False, time.monotonic() - started, error="unsupported_tts_provider")
+            return TtsResult(
+                provider,
+                text,
+                False,
+                False,
+                False,
+                time.monotonic() - started,
+                error="unsupported_tts_provider",
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
 
         if not self.command:
             if output_path and rtp_path:
@@ -116,8 +139,20 @@ class TextToSpeechAdapter:
                     audio_path=prompt.wav_path,
                     rtp_path=prompt.rtp_pcap_path,
                     error="tts_command_not_configured; used_lab_fallback",
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
                 )
-            return TtsResult(provider, text, False, False, False, time.monotonic() - started, error="tts_command_not_configured")
+            return TtsResult(
+                provider,
+                text,
+                False,
+                False,
+                False,
+                time.monotonic() - started,
+                error="tts_command_not_configured",
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
 
         command = format_engine_command(self.command, text=text, audio_path=output_path)
         try:
@@ -128,11 +163,31 @@ class TextToSpeechAdapter:
             )
             stdout, stderr = await asyncio.wait_for(completed.communicate(), timeout=30.0)
         except Exception as exc:  # pragma: no cover - depends on local engine binaries.
-            return TtsResult(provider, text, False, False, False, time.monotonic() - started, error=str(exc))
+            return TtsResult(
+                provider,
+                text,
+                False,
+                False,
+                False,
+                time.monotonic() - started,
+                error=str(exc),
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
 
         if completed.returncode != 0:
             detail = stderr.decode("utf-8", errors="replace").strip() or f"returncode={completed.returncode}"
-            return TtsResult(provider, text, False, False, False, time.monotonic() - started, error=detail)
+            return TtsResult(
+                provider,
+                text,
+                False,
+                False,
+                False,
+                time.monotonic() - started,
+                error=detail,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
 
         audio_path = output_path or stdout.decode("utf-8", errors="replace").strip()
         rtp_generated = False
@@ -151,6 +206,8 @@ class TextToSpeechAdapter:
                     time.monotonic() - started,
                     audio_path=audio_path,
                     error=f"tts_rtp_prompt_failed: {exc}",
+                    chunk_index=chunk_index,
+                    chunk_count=chunk_count,
                 )
         return TtsResult(
             provider,
@@ -161,6 +218,8 @@ class TextToSpeechAdapter:
             time.monotonic() - started,
             audio_path=audio_path,
             rtp_path=rtp_path if rtp_generated else "",
+            chunk_index=chunk_index,
+            chunk_count=chunk_count,
         )
 
 

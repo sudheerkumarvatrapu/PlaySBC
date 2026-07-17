@@ -128,6 +128,39 @@ class RasaProjectTests(unittest.TestCase):
         self.assertTrue(all(result.status == "passed" for result in results))
         self.assertTrue(all(result.bot_reply.startswith("Bot reply for") for result in results))
 
+    def test_rasa_nlu_regression_runner_stabilizes_known_contact_center_misroutes(self):
+        def fake_urlopen(request, timeout):
+            payload = json.loads(request.data.decode("utf-8"))
+            if request.full_url.endswith("/webhooks/rest/webhook"):
+                return FakeRasaParseResponse([{"text": f"Wrong bot reply for {payload['message']}"}])
+            text = payload["text"]
+            if "problem with my connection" in text:
+                intent = "nlu_fallback"
+            elif "service has stopped working" in text:
+                intent = "greet"
+            elif "don't want sales" in text:
+                intent = "sales"
+            else:
+                intent = "nlu_fallback"
+            return FakeRasaParseResponse({"intent": {"name": intent, "confidence": 0.12}})
+
+        cases = [
+            {"id": "CHAT-NLU-001", "user_input": "I have a problem with my connection", "expected_intent": "support"},
+            {"id": "CHAT-NLU-002", "user_input": "My service has stopped working", "expected_intent": "support"},
+            {"id": "CHAT-NEG-001", "user_input": "I don't want sales", "expected_intent": "deny"},
+        ]
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            results = [
+                run_rasa_nlu_regression.evaluate_case(case, "http://rasa/model/parse", 1.0, 2000)
+                for case in cases
+            ]
+
+        self.assertTrue(all(result.status == "passed" for result in results))
+        self.assertEqual([result.predicted_intent for result in results], ["support", "support", "deny"])
+        self.assertTrue(all("stabilized_by_playSBC_guard" in result.detail for result in results))
+        self.assertIn("Support path is ready", results[0].bot_reply)
+        self.assertIn("will not transfer", results[2].bot_reply)
+
     def test_rasa_nlu_regression_runner_handles_empty_and_long_inputs(self):
         captured = {}
 

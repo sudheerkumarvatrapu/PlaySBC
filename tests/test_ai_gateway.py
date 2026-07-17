@@ -162,6 +162,31 @@ class RasaRestClientTests(unittest.TestCase):
         self.assertEqual(result.bot_actions[0].action, "transfer")
         self.assertEqual(result.bot_actions[0].target, "sip:agent@peer.example")
 
+    def test_ai_voice_gateway_streams_long_responses_as_ordered_tts_chunks(self):
+        async def fake_send(_client, _sender, _message, _metadata):
+            return [
+                FakeBotResponse("First answer sentence."),
+                FakeBotResponse("Second answer sentence that should stay ordered."),
+                FakeBotResponse("Third answer sentence closes the response."),
+            ]
+
+        with mock.patch.object(RasaRestClient, "send_message_async", fake_send):
+            gateway = AiVoiceGateway(
+                AiVoiceConfig(
+                    enabled=True,
+                    response_mode="streaming",
+                    tts_chunk_chars=80,
+                )
+            )
+            result = asyncio.run(gateway.start_turn("call-stream", {}))
+
+        self.assertEqual(result.response_mode, "streaming")
+        self.assertEqual(result.tts_chunk_count, 3)
+        self.assertEqual([chunk.chunk_index for chunk in result.tts_chunks], [1, 2, 3])
+        self.assertEqual([chunk.chunk_count for chunk in result.tts_chunks], [3, 3, 3])
+        self.assertEqual(result.tts_chunks[0].text, "First answer sentence.")
+        self.assertEqual(result.tts.provider, "text-only")
+
     def test_tts_adapter_reports_unconfigured_real_engine_without_failing_lab(self):
         result = asyncio.run(TextToSpeechAdapter("piper").synthesize("hello"))
 
