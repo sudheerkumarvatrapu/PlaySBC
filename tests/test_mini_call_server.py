@@ -569,6 +569,74 @@ class RtpengineRetryTests(unittest.TestCase):
         self.assertEqual(samples, (6000, 6000))
         self.assertEqual(retries, 1)
 
+    def test_ai_rtpengine_final_query_uses_post_answer_snapshot_if_session_aged_out(self):
+        class FakeRtpengineClient:
+            timeout = 0.1
+
+            def __init__(self):
+                self.queries = 0
+
+            async def query(self, call_id, from_tag="", to_tag=""):
+                self.queries += 1
+                if self.queries <= 2:
+                    return {
+                        "result": "ok",
+                        "totals": {"RTP": {"packets": 24, "bytes": 3840, "errors": 0}},
+                        "tags": {from_tag: {"tag": from_tag}, to_tag: {"tag": to_tag}},
+                    }
+                raise server.RtpengineError("Unknown call-id")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = server.SbcLogger(Path(tmp))
+            protocol = server.SipServerProtocol(
+                "127.0.0.1",
+                25062,
+                media=None,
+                logger=logger,
+                default_payload=server.PCMU,
+                auth_realm="playsbc",
+                users={},
+                bridge_rooms=(),
+                b2bua_routes={},
+                route_policies=(),
+                b2bua_ladder_logs=False,
+                media_backend="rtpengine",
+                rtpengine_client=FakeRtpengineClient(),
+                rtpengine_directions=("core", "peer"),
+            )
+            route = server.RouteResult(
+                target=server.SipUri("ai-bot", "ai-gateway.local", 5060, "udp"),
+                policy_name="ai",
+                source="ai-gateway",
+            )
+            ai_call = server.AIVoiceCall(
+                call_id="ai-call",
+                target_user="ai-bot",
+                route_result=route,
+                flow_log=server.AIVoiceFlowLog(logger, "ai-call"),
+                media_backend="rtpengine",
+                rtpengine_call_id="ai-call",
+                rtpengine_from_tag="from-tag",
+                rtpengine_to_tag="to-tag",
+            )
+
+            self.assertTrue(asyncio.run(protocol.query_ai_rtpengine_call(ai_call, attempts=2)))
+            self.assertTrue(
+                asyncio.run(
+                    protocol.query_ai_rtpengine_call(
+                        ai_call,
+                        attempts=1,
+                        allow_cached_on_unknown=True,
+                    )
+                )
+            )
+
+            media_log = (Path(tmp) / "log.media").read_text(encoding="utf-8")
+            self.assertIn("B2BUA RTPENGINE QUERY", media_log)
+            self.assertIn("AI RTPENGINE QUERY CACHED", media_log)
+            self.assertNotIn("B2BUA RTPENGINE QUERY FAILED", media_log)
+            self.assertEqual(protocol.rtpengine_control_failures_total, 0)
+
 class DigestAuthTests(unittest.TestCase):
     def test_parse_digest_header_and_response(self):
         header = (

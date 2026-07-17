@@ -137,37 +137,37 @@ data:
           "id": 2,
           "type": "stat",
           "title": "Calls Started In Range",
-          "description": "Highest observed started-call counter in the selected range. This is historical evidence, not current active state.",
+          "description": "Started calls observed in the selected range. Uses counter increase so Kubernetes profile pod rollovers do not hide traffic.",
           "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
           "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "blue"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "(sum(max_over_time(playsbc_b2bua_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0)) + (sum(max_over_time(playsbc_ai_voice_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0))", "legendFormat": "started"}]
+          "targets": [{"expr": "(sum(increase(playsbc_b2bua_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0)) + (sum(increase(playsbc_ai_voice_calls_total{job=~\"${job:regex}\"}[$__range])) or vector(0))", "legendFormat": "started"}]
         },
         {
           "id": 14,
           "type": "stat",
           "title": "Completed Calls In Range",
-          "description": "Highest observed completed-call counter in the selected range. For a finished 300-call load profile this should match SIPp's successful-call count.",
+          "description": "Completed calls observed in the selected range. For a finished 300-call load profile this should match SIPp's successful-call count.",
           "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
           "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "sum(max_over_time(playsbc_b2bua_calls_completed_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "completed"}]
+          "targets": [{"expr": "sum(increase(playsbc_b2bua_calls_completed_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "completed"}]
         },
         {
           "id": 3,
           "type": "stat",
           "title": "SIP Requests Observed",
-          "description": "Observed SIP request counters in the selected range. During Kubernetes regression, PlaySBC rolls per profile, so this is traffic evidence rather than a strict call-count multiplier.",
+          "description": "SIP requests observed in the selected range. Uses counter increase across pod rollovers.",
           "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
           "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "blue"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "sum(max_over_time(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "requests"}]
+          "targets": [{"expr": "sum(increase(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "requests"}]
         },
         {
           "id": 9,
           "type": "stat",
           "title": "SIP Responses Observed",
-          "description": "Observed SIP response counters in the selected range, including provisional, success, redirection, and error responses.",
+          "description": "SIP responses observed in the selected range, including provisional, success, redirection, and error responses.",
           "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
           "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "purple"}, "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "sum(max_over_time(playsbc_sip_responses_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "responses"}]
+          "targets": [{"expr": "sum(increase(playsbc_sip_responses_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "responses"}]
         },
         {
           "id": 4,
@@ -176,7 +176,7 @@ data:
           "description": "Historical high-water mark for active calls in the selected time range. This intentionally stays non-zero while the selected range includes a load run.",
           "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
           "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "orange"}, "thresholds": {"mode": "absolute", "steps": [{"color": "orange", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "max(max_over_time(playsbc_active_calls{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "peak active"}]
+          "targets": [{"expr": "max_over_time(sum(playsbc_active_calls{job=~\"${job:regex}\"})[$__range:]) or vector(0)", "legendFormat": "peak active"}]
         },
         {
           "id": 5,
@@ -191,16 +191,16 @@ data:
           "id": 6,
           "type": "timeseries",
           "title": "SIP Requests Observed By Realm",
-          "description": "Observed SIP request counters grouped by realm, direction, and method for the selected range.",
+          "description": "SIP request increases grouped by realm, direction, and method for the selected range.",
           "gridPos": {"x": 12, "y": 4, "w": 12, "h": 7},
           "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "sum by (realm,method,direction) (max_over_time(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}direction{{ "}}" }} {{ "{{" }}method{{ "}}" }}"}]
+          "targets": [{"expr": "sum by (realm,method,direction) (increase(playsbc_sip_requests_total{job=~\"${job:regex}\"}[$__rate_interval]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}direction{{ "}}" }} {{ "{{" }}method{{ "}}" }}"}]
         },
         {
           "id": 7,
           "type": "timeseries",
           "title": "SIP Responses Observed By Status",
-          "description": "Observed SIP responses grouped by realm, direction, status code, and status class for the selected range.",
+          "description": "SIP response increases grouped by realm, direction, status code, and status class.",
           "gridPos": {"x": 0, "y": 11, "w": 12, "h": 7},
           "fieldConfig": {
             "defaults": {"color": {"mode": "palette-classic"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}},
@@ -208,7 +208,7 @@ data:
               {"matcher": {"id": "byRegexp", "options": ".* [45]xx$"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
             ]
           },
-          "targets": [{"expr": "sum by (realm,status,status_class,direction) (max_over_time(playsbc_sip_responses_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}direction{{ "}}" }} {{ "{{" }}status{{ "}}" }} {{ "{{" }}status_class{{ "}}" }}"}]
+          "targets": [{"expr": "sum by (realm,status,status_class,direction) (increase(playsbc_sip_responses_total{job=~\"${job:regex}\"}[$__rate_interval]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}direction{{ "}}" }} {{ "{{" }}status{{ "}}" }} {{ "{{" }}status_class{{ "}}" }}"}]
         },
         {
           "id": 10,
@@ -233,7 +233,7 @@ data:
           "description": "Answered calls with a negotiated audio codec pair. Labels expose backend, core/peer realms, inbound codec, outbound codec, and transcoding=true/false.",
           "gridPos": {"x": 0, "y": 18, "w": 6, "h": 5},
           "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "teal"}, "thresholds": {"mode": "absolute", "steps": [{"color": "teal", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "sum(max_over_time(playsbc_media_negotiations_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "negotiated"}]
+          "targets": [{"expr": "sum(increase(playsbc_media_negotiations_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "negotiated"}]
         },
         {
           "id": 11,
@@ -242,7 +242,7 @@ data:
           "description": "Answered calls where the negotiated inbound and outbound audio codecs differ, for example PCMU on core and PCMA on peer.",
           "gridPos": {"x": 6, "y": 18, "w": 6, "h": 5},
           "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "purple"}, "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "sum(max_over_time(playsbc_transcoding_sessions_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "transcoding"}]
+          "targets": [{"expr": "sum(increase(playsbc_transcoding_sessions_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "transcoding"}]
         },
         {
           "id": 12,
@@ -251,7 +251,7 @@ data:
           "description": "Negotiated audio codec pairs by backend. Example: rtpengine PCMU -> PCMA transcoding=true.",
           "gridPos": {"x": 12, "y": 18, "w": 12, "h": 5},
           "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
-          "targets": [{"expr": "sum by (backend,inbound_codec,outbound_codec,transcoding) (max_over_time(playsbc_media_negotiations_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}backend{{ "}}" }} {{ "{{" }}inbound_codec{{ "}}" }} -> {{ "{{" }}outbound_codec{{ "}}" }} transcode={{ "{{" }}transcoding{{ "}}" }}"}]
+          "targets": [{"expr": "sum by (backend,inbound_codec,outbound_codec,transcoding) (increase(playsbc_media_negotiations_total{job=~\"${job:regex}\"}[$__rate_interval]))", "legendFormat": "{{ "{{" }}backend{{ "}}" }} {{ "{{" }}inbound_codec{{ "}}" }} -> {{ "{{" }}outbound_codec{{ "}}" }} transcode={{ "{{" }}transcoding{{ "}}" }}"}]
         },
         {
           "id": 13,

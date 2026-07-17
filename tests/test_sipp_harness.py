@@ -1580,6 +1580,10 @@ Content-Length: 0
         self.assertIn("playsbc_sip_responses_total", dashboard)
         self.assertIn("playsbc_media_negotiations_total", dashboard)
         self.assertIn("playsbc_transcoding_sessions_total", dashboard)
+        self.assertIn("sum(increase(playsbc_b2bua_calls_completed_total", dashboard)
+        self.assertIn("sum(increase(playsbc_sip_requests_total", dashboard)
+        self.assertIn("sum(increase(playsbc_sip_responses_total", dashboard)
+        self.assertIn("max_over_time(sum(playsbc_active_calls", dashboard)
         self.assertIn("sum by (realm,trunk) (max_over_time(playsbc_trunk_healthy", dashboard)
         self.assertIn("sum by (from_realm,to_realm)", dashboard)
 

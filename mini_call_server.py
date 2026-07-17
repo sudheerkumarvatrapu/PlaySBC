@@ -1308,6 +1308,10 @@ class AIVoiceCall:
     rtpengine_call_id: str = ""
     rtpengine_from_tag: str = ""
     rtpengine_to_tag: str = ""
+    rtpengine_query_observed: bool = False
+    rtpengine_query_summary: str = ""
+    rtpengine_query_packet_samples: Tuple[int, ...] = field(default_factory=tuple)
+    rtpengine_query_retries: int = 0
     bot_actions: List[BotAction] = field(default_factory=list)
     task: Optional[asyncio.Task] = None
     finalized: bool = False
@@ -3033,6 +3037,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ),
                 call_id=ai_call.call_id,
             )
+            await self.query_ai_rtpengine_call(ai_call, attempts=2)
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
             self.rtpengine_control_failures_total += 1
             self.logger.media("AI RTPENGINE FAILED", str(exc), call_id=ai_call.call_id)
@@ -3950,6 +3955,28 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
     async def _delete_ai_rtpengine_call(self, ai_call: AIVoiceCall) -> None:
         assert self.rtpengine_client is not None
+        await self.query_ai_rtpengine_call(ai_call, allow_cached_on_unknown=True)
+        try:
+            self.rtpengine_control_requests_total += 1
+            await self.rtpengine_client.delete(
+                call_id=ai_call.rtpengine_call_id or ai_call.call_id,
+                from_tag=ai_call.rtpengine_from_tag,
+                to_tag=ai_call.rtpengine_to_tag,
+            )
+            self.logger.media("B2BUA RTPENGINE DELETE", "status=ok", call_id=ai_call.call_id)
+        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            self.rtpengine_control_failures_total += 1
+            self.logger.media("B2BUA RTPENGINE DELETE FAILED", str(exc), call_id=ai_call.call_id)
+
+    async def query_ai_rtpengine_call(
+        self,
+        ai_call: AIVoiceCall,
+        attempts: int = 4,
+        allow_cached_on_unknown: bool = False,
+    ) -> bool:
+        if ai_call.media_backend != "rtpengine" or not self.rtpengine_client:
+            return False
+        assert self.rtpengine_client is not None
         try:
             query_timeout = min(max(self.rtpengine_client.timeout, 0.050), 1.0)
             self.rtpengine_control_requests_total += 1
@@ -3968,7 +3995,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 for key in sorted(query_response)
                 if key in {"result", "created", "last signal", "totals", "tags"}
             }
+            summary["source"] = "live"
             detail = json.dumps(summary, sort_keys=True)
+            ai_call.rtpengine_query_observed = True
+            ai_call.rtpengine_query_summary = detail
+            ai_call.rtpengine_query_packet_samples = packet_samples
+            ai_call.rtpengine_query_retries = retry_count
             self.logger.media(
                 "B2BUA RTPENGINE QUERY",
                 detail,
@@ -3979,24 +4011,38 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 f"query_packet_samples={','.join(str(value) for value in packet_samples)} query_retry_count={retry_count}",
                 call_id=ai_call.call_id,
             )
+            return True
         except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
+            if (
+                allow_cached_on_unknown
+                and isinstance(exc, RtpengineError)
+                and "Unknown call-id" in str(exc)
+                and ai_call.rtpengine_query_observed
+            ):
+                self.logger.media(
+                    "AI RTPENGINE QUERY CACHED",
+                    (
+                        f"source=post_answer_snapshot final_query=unknown_call_id "
+                        f"cached_summary={ai_call.rtpengine_query_summary}"
+                    ),
+                    call_id=ai_call.call_id,
+                )
+                self.logger.media(
+                    "AI RTPENGINE QUERY SUMMARY",
+                    (
+                        f"query_packet_samples={','.join(str(value) for value in ai_call.rtpengine_query_packet_samples)} "
+                        f"query_retry_count={ai_call.rtpengine_query_retries} source=post_answer_snapshot"
+                    ),
+                    call_id=ai_call.call_id,
+                )
+                return True
             self.rtpengine_control_failures_total += 1
             self.logger.media(
                 "B2BUA RTPENGINE QUERY FAILED",
                 f"error_type={type(exc).__name__} error={str(exc) or 'no additional detail'}",
                 call_id=ai_call.call_id,
             )
-        try:
-            self.rtpengine_control_requests_total += 1
-            await self.rtpengine_client.delete(
-                call_id=ai_call.rtpengine_call_id or ai_call.call_id,
-                from_tag=ai_call.rtpengine_from_tag,
-                to_tag=ai_call.rtpengine_to_tag,
-            )
-            self.logger.media("B2BUA RTPENGINE DELETE", "status=ok", call_id=ai_call.call_id)
-        except (asyncio.TimeoutError, OSError, RtpengineError) as exc:
-            self.rtpengine_control_failures_total += 1
-            self.logger.media("B2BUA RTPENGINE DELETE FAILED", str(exc), call_id=ai_call.call_id)
+            return False
 
     def schedule_b2bua_finalizer(self, b2bua_call: B2BUACall, delay: float = 2.0) -> None:
         try:
