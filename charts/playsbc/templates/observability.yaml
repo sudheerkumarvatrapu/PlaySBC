@@ -115,8 +115,9 @@ data:
             "query": "label_values(playsbc_active_calls, job)",
             "refresh": 1,
             "includeAll": true,
+            "allValue": ".*",
             "multi": true,
-            "current": {"text": "All", "value": "$__all"}
+            "current": {"text": "All", "value": ".*"}
           }
         ]
       },
@@ -126,42 +127,42 @@ data:
           "type": "stat",
           "title": "Active Calls",
           "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(playsbc_active_calls{job=~\"$job\"})", "legendFormat": "calls"}]
+          "targets": [{"expr": "sum(playsbc_active_calls{job=~\"${job:regex}\"})", "legendFormat": "calls"}]
         },
         {
           "id": 2,
           "type": "stat",
           "title": "RTPengine Sessions",
           "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(playsbc_rtpengine_media_sessions_active{job=~\"$job\"})", "legendFormat": "sessions"}]
+          "targets": [{"expr": "sum(playsbc_rtpengine_media_sessions_active{job=~\"${job:regex}\"})", "legendFormat": "sessions"}]
         },
         {
           "id": 3,
           "type": "stat",
           "title": "AI Voice Calls",
           "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(playsbc_ai_voice_calls_active{job=~\"$job\"})", "legendFormat": "ai calls"}]
+          "targets": [{"expr": "sum(playsbc_ai_voice_calls_active{job=~\"${job:regex}\"})", "legendFormat": "ai calls"}]
         },
         {
           "id": 4,
           "type": "stat",
           "title": "Admission Rejects / 5m",
           "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
-          "targets": [{"expr": "sum(increase(playsbc_admission_rejections_total{job=~\"$job\"}[5m]))", "legendFormat": "rejects"}]
+          "targets": [{"expr": "sum(increase(playsbc_admission_rejections_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "rejects"}]
         },
         {
           "id": 5,
           "type": "timeseries",
           "title": "Core/Peer Trunk Health",
           "gridPos": {"x": 0, "y": 4, "w": 12, "h": 7},
-          "targets": [{"expr": "sum by (realm,trunk) (playsbc_trunk_healthy{job=~\"$job\"})", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}trunk{{ "}}" }}"}]
+          "targets": [{"expr": "sum by (realm,trunk) (playsbc_trunk_healthy{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}trunk{{ "}}" }}"}]
         },
         {
           "id": 6,
           "type": "timeseries",
           "title": "RTPengine Core -> Peer Control Failures",
           "gridPos": {"x": 12, "y": 4, "w": 12, "h": 7},
-          "targets": [{"expr": "sum by (from_realm,to_realm) (rate(playsbc_rtpengine_control_failures_total{job=~\"$job\"}[5m]))", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }}"}]
+          "targets": [{"expr": "sum by (from_realm,to_realm) (rate(playsbc_rtpengine_control_failures_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }}"}]
         },
         {
           "id": 7,
@@ -169,8 +170,8 @@ data:
           "title": "AI/Rasa Turns By Realm",
           "gridPos": {"x": 0, "y": 11, "w": 12, "h": 7},
           "targets": [
-            {"expr": "sum by (realm,bot,stt,tts) (rate(playsbc_ai_voice_turns_total{job=~\"$job\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} {{ "{{" }}stt{{ "}}" }}/{{ "{{" }}tts{{ "}}" }} turns/s"},
-            {"expr": "sum by (realm,bot) (rate(playsbc_ai_rasa_failures_total{job=~\"$job\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} rasa failures/s"}
+            {"expr": "sum by (realm,bot,stt,tts) (rate(playsbc_ai_voice_turns_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} {{ "{{" }}stt{{ "}}" }}/{{ "{{" }}tts{{ "}}" }} turns/s"},
+            {"expr": "sum by (realm,bot) (rate(playsbc_ai_rasa_failures_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} rasa failures/s"}
           ]
         },
         {
@@ -178,7 +179,7 @@ data:
           "type": "timeseries",
           "title": "AI TTS RTP Prompts",
           "gridPos": {"x": 12, "y": 11, "w": 12, "h": 7},
-          "targets": [{"expr": "sum(rate(playsbc_ai_tts_rtp_prompts_total{job=~\"$job\"}[5m]))", "legendFormat": "prompts/s"}]
+          "targets": [{"expr": "sum(rate(playsbc_ai_tts_rtp_prompts_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "prompts/s"}]
         }
       ]
     }
