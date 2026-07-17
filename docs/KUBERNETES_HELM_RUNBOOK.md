@@ -190,7 +190,7 @@ Startup complete
 
 ## Optional Real Rasa Lab
 
-The complete Kubernetes regression catalog includes mock Rasa, real Rasa, and real Vosk/Piper speech profiles. This values file enables the real Rasa REST bot inside Kubernetes:
+The complete Kubernetes regression catalog includes mock Rasa, real Rasa, Vosk/Piper speech, Whisper STT, Coqui TTS, streaming response, contact-center, and chat/NLU profiles. This values file enables the real Rasa REST bot inside Kubernetes:
 
 ```bash
 helm upgrade --install playsbc charts/playsbc \
@@ -221,7 +221,7 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
-This mode runs `ai-rasa-lab`, `ai-rasa-rtpengine`, `ai-rasa-real-lab`, `ai-rasa-rtpengine-speech`, `ai-rasa-contact-center-sales`, `ai-rasa-chat-nlu`, and `ai-rasa-chat-negative`. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
+This mode runs the focused AI/Rasa catalog: mock Rasa, RTPengine AI, real Rasa, Vosk/Piper speech, Whisper speech, long-response streaming, Piper/Coqui contact-center bot-agent flows, and chat/NLU positive/negative checks. It deletes old local `logs/RASA-Regression` output before each run unless `--keep-old-logs` is used.
 
 If the kind node cannot pull DockerHub images, load Rasa first:
 
@@ -251,7 +251,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_k8s_regression.py --list-profiles
 ```
 
-Run the full 52-profile in-cluster Kubernetes suite:
+Run the full in-cluster Kubernetes suite:
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
@@ -335,7 +335,7 @@ Coverage:
 - UDP, TCP, TLS/SRTP interworking, RTCP, and DTMF profiles.
 - REGISTER, digest auth success/failure, registered inbound/outbound calls.
 - ESBC route policy, trunk, failover, normalization, admission, health, and metrics profiles.
-- AI/Rasa lab profiles. The default catalog includes mock Rasa, real Rasa, speech STT/TTS, the contact-center sales bot profile, and real Rasa chat/NLU verifier profiles. Run `--profile ai-rasa-real-lab`, `--profile ai-rasa-rtpengine-speech`, `--profile ai-rasa-contact-center-sales`, `--profile ai-rasa-chat-nlu`, or `--profile ai-rasa-chat-negative` for targeted real Rasa checks.
+- AI/Rasa lab profiles. The default catalog includes mock Rasa, real Rasa, speech STT/TTS, Whisper STT, Coqui TTS, long-response streaming, contact-center sales bot profiles, and real Rasa chat/NLU verifier profiles. Run `--profile ai-rasa-real-lab`, `--profile ai-rasa-rtpengine-speech`, `--profile ai-rasa-rtpengine-speech-whisper`, `--profile ai-rasa-long-response-streaming`, `--profile ai-rasa-contact-center-sales`, `--profile ai-rasa-contact-center-sales-coqui`, `--profile ai-rasa-chat-nlu`, or `--profile ai-rasa-chat-negative` for targeted real Rasa checks.
 - Negative SIP cases such as invalid BYE, unknown route, failed outbound leg, CANCEL, and retransmission.
 - Small load, soak, and 5 cps / 60 second CHT load profiles.
 

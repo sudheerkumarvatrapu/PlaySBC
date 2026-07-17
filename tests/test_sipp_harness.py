@@ -2203,8 +2203,14 @@ Content-Length: 0
         self.assertIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-long-response-streaming", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-long-response-streaming", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-contact-center-sales", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-contact-center-sales", run_regression_suite.ALL_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-contact-center-sales-coqui", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-contact-center-sales-coqui", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertEqual(
             run_regression_suite.RASA_B2BUA_PROFILES,
             (
@@ -2212,7 +2218,10 @@ Content-Length: 0
                 "ai-rasa-rtpengine",
                 "ai-rasa-real-lab",
                 "ai-rasa-rtpengine-speech",
+                "ai-rasa-rtpengine-speech-whisper",
+                "ai-rasa-long-response-streaming",
                 "ai-rasa-contact-center-sales",
+                "ai-rasa-contact-center-sales-coqui",
             ),
         )
         self.assertIn("rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2239,7 +2248,10 @@ Content-Length: 0
         self.assertIn("ai-rasa-rtpengine", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-real-lab", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-long-response-streaming", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-contact-center-sales", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+        self.assertIn("ai-rasa-contact-center-sales-coqui", run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("real-topology-rtpengine-transcoding", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("esbc-trunk-failover", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2675,6 +2687,46 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(args.route_policies[0]["target"], "ai-gateway:sales-support")
         self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
 
+    def test_dual_realm_ai_whisper_profile_uses_whisper_adapter_boundary(self):
+        args = run_dual_realm_profile.profile_args("ai-rasa-rtpengine-speech-whisper", "ai-whisper", "b2bua-Regression")
+
+        self.assertEqual(args.rasa_deployment, "real")
+        self.assertTrue(run_dual_realm_profile.needs_real_rasa(args))
+        self.assertEqual(args.media_backend, "rtpengine")
+        self.assertEqual(args.ai_voice_gateway["stt_provider"], "whisper")
+        self.assertIn("whisper_stt_wrapper.py", args.ai_voice_gateway["stt_command"])
+        self.assertIn("--allow-lab-fallback", args.ai_voice_gateway["stt_command"])
+        self.assertEqual(args.ai_voice_gateway["tts_provider"], "piper")
+        self.assertEqual(args.route_policies[0]["target"], "ai-gateway:rasa-support")
+        self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
+
+    def test_dual_realm_ai_streaming_profile_generates_chunked_tts_prompts(self):
+        args = run_dual_realm_profile.profile_args("ai-rasa-long-response-streaming", "ai-stream", "b2bua-Regression")
+
+        self.assertFalse(run_dual_realm_profile.needs_ai_mock(args))
+        self.assertTrue(run_dual_realm_profile.needs_real_rasa(args))
+        self.assertEqual(args.media_backend, "rtpengine")
+        self.assertEqual(args.ai_voice_gateway["response_mode"], "streaming")
+        self.assertEqual(args.ai_voice_gateway["tts_chunk_chars"], 120)
+        self.assertEqual(args.ai_voice_gateway["tts_provider"], "piper")
+        self.assertIn("piper_tts_wrapper.py", args.ai_voice_gateway["tts_command"])
+        self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
+
+    def test_dual_realm_contact_center_coqui_profile_uses_coqui_tts(self):
+        args = run_dual_realm_profile.profile_args("ai-rasa-contact-center-sales-coqui", "ai-coqui", "b2bua-Regression")
+
+        self.assertEqual(args.rasa_deployment, "real")
+        self.assertTrue(run_dual_realm_profile.needs_real_rasa(args))
+        self.assertEqual(args.media_backend, "rtpengine")
+        self.assertEqual(args.ai_voice_gateway["agent_label"], "SIPp B Bot Agent")
+        self.assertEqual(args.ai_voice_gateway["contact_center_queue"], "sales")
+        self.assertEqual(args.ai_voice_gateway["stt_provider"], "vosk")
+        self.assertEqual(args.ai_voice_gateway["tts_provider"], "coqui")
+        self.assertIn("coqui_tts_wrapper.py", args.ai_voice_gateway["tts_command"])
+        self.assertIn("--allow-lab-fallback", args.ai_voice_gateway["tts_command"])
+        self.assertEqual(args.route_policies[0]["target"], "ai-gateway:sales-support")
+        self.assertEqual(run_b2bua_sipp_smoke.rtcp_expected_sender_names(args), ("rtcp-a",))
+
     def test_dual_realm_ha_profiles_render_shared_state_and_pairing(self):
         basic = run_dual_realm_profile.profile_args("basic-signalling", "ha-all-basic", "b2bua-Regression")
         self.assertTrue(basic.ha["enabled"])
@@ -2889,11 +2941,46 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(profile.ai_voice_gateway["stt_provider"], "vosk")
         self.assertEqual(profile.ai_voice_gateway["tts_provider"], "piper")
 
+    def test_kubernetes_whisper_profile_uses_whisper_stt_adapter(self):
+        profile = run_k8s_regression.profile_values("ai-rasa-rtpengine-speech-whisper", "unit-rasa")
+
+        self.assertEqual(run_k8s_regression.media_pcap_path(profile, "uac"), "/scenarios/pcap/ai_rasa_speech_g711u.pcap")
+        self.assertTrue(run_k8s_regression.profile_uses_real_rasa(profile))
+        self.assertEqual(profile.media_backend, "rtpengine")
+        self.assertEqual(profile.ai_voice_gateway["stt_provider"], "whisper")
+        self.assertIn("whisper_stt_wrapper.py", profile.ai_voice_gateway["stt_command"])
+        self.assertEqual(profile.ai_voice_gateway["tts_provider"], "piper")
+
+    def test_kubernetes_streaming_profile_uses_mock_multi_reply_and_chunked_tts(self):
+        profile = run_k8s_regression.profile_values("ai-rasa-long-response-streaming", "unit-rasa")
+
+        self.assertEqual(run_k8s_regression.media_pcap_path(profile, "uac"), "/scenarios/pcap/ai_rasa_speech_g711u.pcap")
+        self.assertTrue(run_k8s_regression.profile_uses_real_rasa(profile))
+        self.assertEqual(profile.media_backend, "rtpengine")
+        self.assertEqual(profile.ai_voice_gateway["response_mode"], "streaming")
+        self.assertEqual(profile.ai_voice_gateway["tts_chunk_chars"], 120)
+        self.assertEqual(profile.ai_voice_gateway["tts_provider"], "piper")
+
+    def test_kubernetes_contact_center_coqui_profile_uses_coqui_tts_adapter(self):
+        profile = run_k8s_regression.profile_values("ai-rasa-contact-center-sales-coqui", "unit-rasa")
+
+        self.assertEqual(run_k8s_regression.media_pcap_path(profile, "uac"), "/scenarios/pcap/ai_contact_center_sales_g711u.pcap")
+        self.assertTrue(run_k8s_regression.profile_uses_real_rasa(profile))
+        self.assertEqual(profile.media_backend, "rtpengine")
+        self.assertEqual(profile.ai_voice_gateway["agent_label"], "SIPp B Bot Agent")
+        self.assertEqual(profile.ai_voice_gateway["contact_center_skill"], "sales-support")
+        self.assertEqual(profile.ai_voice_gateway["stt_provider"], "vosk")
+        self.assertEqual(profile.ai_voice_gateway["tts_provider"], "coqui")
+        self.assertIn("coqui_tts_wrapper.py", profile.ai_voice_gateway["tts_command"])
+
     def test_kubernetes_real_rasa_profiles_inject_current_repo_project(self):
         project = run_k8s_regression.rasa_project_values()
 
         self.assertIn("Sales support agent is ready", project["domain"])
+        self.assertIn("Streaming support update is ready", project["domain"])
+        self.assertIn("long_response", project["domain"])
         self.assertIn("I need sales support", project["nlu"])
+        self.assertIn("give me a detailed support update", project["nlu"])
         self.assertIn("rest:", project["credentials"])
 
     def test_kubernetes_rasa_profiles_have_distinct_report_names_and_ladders(self):
@@ -2917,10 +3004,25 @@ class RealTopologyTests(unittest.TestCase):
                 "Real Rasa Pod",
                 "SIPp plays real G.711 speech",
             ),
+            "ai-rasa-rtpengine-speech-whisper": (
+                "AI Voice Gateway - Whisper STT + Real Rasa",
+                "Whisper STT",
+                "Whisper transcribes through the adapter boundary",
+            ),
+            "ai-rasa-long-response-streaming": (
+                "AI Voice Gateway - Long Response Streaming",
+                "Real Rasa Pod",
+                "real Rasa returns a long support response",
+            ),
             "ai-rasa-contact-center-sales": (
                 "AI Contact Center - SIPp B Sales Bot Agent",
                 "SIPp B Bot Agent",
                 "virtual SIPp B sales agent",
+            ),
+            "ai-rasa-contact-center-sales-coqui": (
+                "AI Contact Center - Sales Bot Agent + Coqui",
+                "Coqui TTS",
+                "Coqui generates the bot-agent prompt",
             ),
         }
 
@@ -2945,6 +3047,18 @@ class RealTopologyTests(unittest.TestCase):
                     self.assertIn("connect me to sales", ladder)
                     self.assertIn("REST 200 sales workflow", ladder)
                     self.assertIn("SIPp B Bot Agent", ladder)
+                if profile_name == "ai-rasa-rtpengine-speech-whisper":
+                    self.assertIn("Whisper STT", ladder)
+                    self.assertIn("Piper WAV", ladder)
+                if profile_name == "ai-rasa-long-response-streaming":
+                    self.assertIn("text: detailed support up", ladder)
+                    self.assertIn("REST 200 long response", ladder)
+                    self.assertIn("bot text chunks", ladder)
+                    self.assertIn("Piper WAV chunks", ladder)
+                if profile_name == "ai-rasa-contact-center-sales-coqui":
+                    self.assertIn("connect me to sales", ladder)
+                    self.assertIn("REST 200 sales workflow", ladder)
+                    self.assertIn("Coqui WAV", ladder)
 
     def test_kubernetes_rasa_chat_nlu_profiles_are_selectable(self):
         self.assertIn("ai-rasa-chat-nlu", run_k8s_regression.ALL_PROFILES)
@@ -2998,7 +3112,10 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("600", command)
         self.assertIn("/workspace/logs/RASA-Regression", command)
         self.assertIn("/workspace/logs/RASA-reports", command)
-        self.assertEqual(len(run_k8s_regression.RASA_PROFILES), 7)
+        self.assertEqual(len(run_k8s_regression.RASA_PROFILES), 10)
+        self.assertIn("ai-rasa-rtpengine-speech-whisper", run_k8s_regression.RASA_PROFILES)
+        self.assertIn("ai-rasa-long-response-streaming", run_k8s_regression.RASA_PROFILES)
+        self.assertIn("ai-rasa-contact-center-sales-coqui", run_k8s_regression.RASA_PROFILES)
 
     def test_kubernetes_full_suite_keeps_existing_output_layout(self):
         args = run_k8s_regression_job.parse_args(["--all-profiles"])

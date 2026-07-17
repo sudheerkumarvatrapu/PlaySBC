@@ -33,7 +33,10 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Regression includes `ai-rasa-rtpengine`: RTP/RTCP is anchored by RTPengine while PlaySBC handles SIP/control and the Rasa turn.
 - Optional real Rasa lab is wired for local config, Docker dual-realm, Helm, and Kubernetes via `ai-rasa-real-lab`.
 - Version `1.2.0` adds `ai-rasa-rtpengine-speech`: SIPp plays real G.711 speech, PlaySBC decodes RTP to WAV, Vosk transcribes `i need support`, PlaySBC posts the transcript to real Rasa, Piper generates the bot-response WAV/RTP prompt, and RTP/RTCP stay anchored by RTPengine.
+- Whisper STT is selectable through `ai-rasa-rtpengine-speech-whisper`, using the same RTPengine/WAV/Rasa/Piper path with the Whisper adapter boundary.
 - Contact-center sales bot profile is wired as `ai-rasa-contact-center-sales`: SIPp A calls a virtual SIPp B bot agent, Vosk transcribes `connect me to sales`, real Rasa runs the sales workflow, Piper generates the bot-agent prompt, and RTP/RTCP stay anchored by RTPengine.
+- Coqui TTS is selectable through `ai-rasa-contact-center-sales-coqui`, using the same contact-center sales bot flow with Coqui-generated prompt evidence.
+- Long Rasa replies are covered by `ai-rasa-long-response-streaming`, where real Rasa long-response text is split into ordered TTS chunks with per-chunk WAV/RTP prompt evidence.
 - Real Rasa project assets live under `rasa/`, with `tools/check_rasa.py` as the readiness gate.
 
 ### Lab Platform
@@ -71,7 +74,8 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 
 ### AI Voice Gateway
 
-- Add optional Whisper and Coqui image variants beside the current Vosk/Piper speech lab path.
+- Package heavyweight Whisper and Coqui image variants with real models preloaded, beside the portable lab-fallback wrappers.
+- Add streamed callback/channel support for bot responses that arrive over time rather than in one REST result.
 
 ## Later
 

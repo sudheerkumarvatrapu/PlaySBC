@@ -6,8 +6,10 @@ Rasa owns the conversation brain behind a REST webhook.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .adapters import SpeechToTextAdapter, SttResult, TextToSpeechAdapter, TtsResult
@@ -49,6 +51,7 @@ class AiVoiceConfig:
     speech_transcript: str = ""
     tts_output_codec: str = "PCMU"
     response_mode: str = "rest"
+    tts_chunk_chars: int = 220
     bot_actions_enabled: bool = True
     dtmf_intents: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_DTMF_INTENTS))
 
@@ -83,6 +86,7 @@ class AiVoiceConfig:
             speech_transcript=str(raw.get("speech_transcript", "")),
             tts_output_codec=str(raw.get("tts_output_codec", "PCMU")).upper(),
             response_mode=str(raw.get("response_mode", "rest")).lower(),
+            tts_chunk_chars=max(40, int(raw.get("tts_chunk_chars", 220))),
             bot_actions_enabled=bool(raw.get("bot_actions_enabled", True)),
             dtmf_intents={str(key): str(text) for key, text in (intents or DEFAULT_DTMF_INTENTS).items()},
         )
@@ -111,6 +115,7 @@ class AiVoiceConfig:
             "speech_transcript": self.speech_transcript,
             "tts_output_codec": self.tts_output_codec,
             "response_mode": self.response_mode,
+            "tts_chunk_chars": self.tts_chunk_chars,
             "bot_actions_enabled": self.bot_actions_enabled,
             "dtmf_intents": dict(self.dtmf_intents),
         }
@@ -134,6 +139,7 @@ class AiTurnResult:
     duration_seconds: float
     stt: Optional[SttResult] = None
     tts: Optional[TtsResult] = None
+    tts_chunks: List[TtsResult] = field(default_factory=list)
     bot_actions: List[BotAction] = field(default_factory=list)
     response_mode: str = "rest"
 
@@ -141,6 +147,10 @@ class AiTurnResult:
     def rendered_text(self) -> str:
         texts = [response.text for response in self.bot_responses if response.text]
         return " ".join(texts) if texts else ""
+
+    @property
+    def tts_chunk_count(self) -> int:
+        return len(self.tts_chunks) if self.tts_chunks else (1 if self.tts else 0)
 
 
 class DtmfIntentMapper:
@@ -208,18 +218,21 @@ class AiVoiceGateway:
                 duration_seconds=time.monotonic() - started,
                 stt=stt_result,
                 tts=tts_result,
+                tts_chunks=[tts_result],
                 bot_actions=[],
                 response_mode=self.config.response_mode,
             )
         try:
             responses = await self.rasa.send_message_async(sender, user_text, metadata or {})
             rendered_text = " ".join(response.text for response in responses if response.text)
-            tts_result = await self.tts.synthesize(
+            tts_chunks = await self.synthesize_response_chunks(
+                responses,
                 rendered_text,
                 output_path=tts_output_path,
                 rtp_path=tts_rtp_path,
                 codec=tts_codec,
             )
+            tts_result = tts_chunks[-1] if tts_chunks else None
             return AiTurnResult(
                 sender=sender,
                 user_text=user_text,
@@ -229,6 +242,7 @@ class AiVoiceGateway:
                 duration_seconds=time.monotonic() - started,
                 stt=stt_result,
                 tts=tts_result,
+                tts_chunks=tts_chunks,
                 bot_actions=self.extract_bot_actions(responses),
                 response_mode=self.config.response_mode,
             )
@@ -249,6 +263,7 @@ class AiVoiceGateway:
                 duration_seconds=time.monotonic() - started,
                 stt=stt_result,
                 tts=tts_result,
+                tts_chunks=[tts_result],
                 bot_actions=[],
                 response_mode=self.config.response_mode,
             )
@@ -277,3 +292,84 @@ class AiVoiceGateway:
                 )
             )
         return actions
+
+    async def synthesize_response_chunks(
+        self,
+        responses: List[RasaBotResponse],
+        rendered_text: str,
+        output_path: str = "",
+        rtp_path: str = "",
+        codec: str = "PCMU",
+    ) -> List[TtsResult]:
+        chunks = self.response_text_chunks(responses, rendered_text)
+        results: List[TtsResult] = []
+        chunk_count = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            results.append(
+                await self.tts.synthesize(
+                    chunk,
+                    output_path=chunked_path(output_path, index, chunk_count),
+                    rtp_path=chunked_path(rtp_path, index, chunk_count),
+                    codec=codec,
+                    chunk_index=index,
+                    chunk_count=chunk_count,
+                )
+            )
+        return results
+
+    def response_text_chunks(self, responses: List[RasaBotResponse], rendered_text: str) -> List[str]:
+        if self.config.response_mode != "streaming":
+            return [rendered_text] if rendered_text else []
+        chunks: List[str] = []
+        source_texts = [response.text.strip() for response in responses if response.text.strip()]
+        for text in source_texts or ([rendered_text.strip()] if rendered_text.strip() else []):
+            chunks.extend(split_text_chunks(text, self.config.tts_chunk_chars))
+        return chunks
+
+
+def chunked_path(path: str, index: int, count: int) -> str:
+    if not path or count <= 1:
+        return path
+    original = Path(path)
+    return str(original.with_name(f"{original.stem}-chunk{index:02d}{original.suffix}"))
+
+
+def split_text_chunks(text: str, max_chars: int) -> List[str]:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return []
+    max_chars = max(40, max_chars)
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+    chunks: List[str] = []
+    current = ""
+    for sentence in sentences or [normalized]:
+        if not current:
+            current = sentence
+            continue
+        if len(current) + 1 + len(sentence) <= max_chars:
+            current = f"{current} {sentence}"
+        else:
+            chunks.extend(split_long_text(current, max_chars))
+            current = sentence
+    if current:
+        chunks.extend(split_long_text(current, max_chars))
+    return chunks
+
+
+def split_long_text(text: str, max_chars: int) -> List[str]:
+    if len(text) <= max_chars:
+        return [text]
+    words = text.split()
+    chunks: List[str] = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= max_chars:
+            current = f"{current} {word}"
+        else:
+            chunks.append(current)
+            current = word
+    if current:
+        chunks.append(current)
+    return chunks

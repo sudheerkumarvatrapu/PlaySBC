@@ -49,9 +49,11 @@ COPY sip /app/sip
 COPY sipp/scenarios/pcap /app/sipp/scenarios/pcap
 COPY tools/check_rtpengine.py /app/tools/check_rtpengine.py
 COPY tools/check_rasa.py /app/tools/check_rasa.py
+COPY tools/coqui_tts_wrapper.py /app/tools/coqui_tts_wrapper.py
 COPY tools/mock_rasa_server.py /app/tools/mock_rasa_server.py
 COPY tools/piper_tts_wrapper.py /app/tools/piper_tts_wrapper.py
 COPY tools/send_rtcp_reports.py /app/tools/send_rtcp_reports.py
+COPY tools/whisper_stt_wrapper.py /app/tools/whisper_stt_wrapper.py
 COPY tools/vosk_stt_wrapper.py /app/tools/vosk_stt_wrapper.py
 
 ENV PLAYSBC_PIPER_MODEL=/opt/playsbc/models/piper/en_US-lessac-low.onnx

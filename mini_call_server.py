@@ -3442,6 +3442,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             (
                 f"response_count={len(result.bot_responses)} fallback_used={str(result.fallback_used).lower()} "
                 f"duration_seconds={result.duration_seconds:.3f} response_mode={result.response_mode} "
+                f"tts_chunk_count={result.tts_chunk_count} "
                 f"text={json.dumps(result.rendered_text)}"
             ),
             call_id=ai_call.call_id,
@@ -3450,11 +3451,41 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         for index, response in enumerate(result.bot_responses, start=1):
             if index > 1:
                 ai_call.flow_log.flow(bot_node, "PlaySBC", f"response chunk {index}")
-        ai_call.flow_log.flow("PlaySBC", tts_node, "bot text")
-        ai_call.flow_log.flow(tts_node, "PlaySBC", self.ai_voice_config.tts_provider)
+        tts_chunks = result.tts_chunks or ([result.tts] if result.tts else [])
+        if len(tts_chunks) > 1:
+            self.logger.ai(
+                "AI TTS STREAM START",
+                (
+                    f"mode={result.response_mode} chunk_count={len(tts_chunks)} "
+                    f"renderer={self.ai_voice_config.tts_provider} codec={self.ai_voice_config.tts_output_codec}"
+                ),
+                call_id=ai_call.call_id,
+            )
+        for chunk in tts_chunks:
+            chunk_label = f"bot text chunk {chunk.chunk_index}/{chunk.chunk_count}" if chunk.chunk_count > 1 else "bot text"
+            audio_label = (
+                f"{self.ai_voice_config.tts_provider} WAV chunk {chunk.chunk_index}/{chunk.chunk_count}"
+                if chunk.chunk_count > 1
+                else self.ai_voice_config.tts_provider
+            )
+            ai_call.flow_log.flow("PlaySBC", tts_node, chunk_label)
+            ai_call.flow_log.flow(tts_node, "PlaySBC", audio_label)
+            if chunk.chunk_count > 1:
+                self.logger.ai(
+                    "AI TTS STREAM CHUNK",
+                    (
+                        f"chunk={chunk.chunk_index}/{chunk.chunk_count} renderer={chunk.provider} "
+                        f"audio_generated={str(chunk.audio_generated).lower()} "
+                        f"rtp_prompt_generated={str(chunk.rtp_prompt_generated).lower()} "
+                        f"engine_ready={str(chunk.engine_ready).lower()} error={json.dumps(chunk.error)} "
+                        f"audio_path={json.dumps(chunk.audio_path)} rtp_path={json.dumps(chunk.rtp_path)} "
+                        f"text={json.dumps(chunk.text)}"
+                    ),
+                    call_id=ai_call.call_id,
+                )
         tts = result.tts
-        audio_generated = str(tts.audio_generated).lower() if tts else "false"
-        rtp_prompt_generated = str(tts.rtp_prompt_generated).lower() if tts else "false"
+        audio_generated = str(any(chunk.audio_generated for chunk in tts_chunks)).lower() if tts_chunks else "false"
+        rtp_prompt_generated = str(any(chunk.rtp_prompt_generated for chunk in tts_chunks)).lower() if tts_chunks else "false"
         tts_provider = tts.provider if tts else self.ai_voice_config.tts_provider
         tts_error = tts.error if tts else ""
         self.logger.ai(
@@ -3462,13 +3493,16 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             (
                 f"renderer={tts_provider} audio_generated={audio_generated} "
                 f"rtp_prompt_generated={rtp_prompt_generated} error={json.dumps(tts_error)} "
+                f"chunk_count={len(tts_chunks)} "
                 f"audio_path={json.dumps(tts.audio_path if tts else '')} "
                 f"rtp_path={json.dumps(tts.rtp_path if tts else '')} "
                 f"text={json.dumps(result.rendered_text)}"
             ),
             call_id=ai_call.call_id,
         )
-        if tts and tts.rtp_prompt_generated:
+        for chunk in tts_chunks:
+            if not chunk.rtp_prompt_generated:
+                continue
             if ai_call.media_backend == "rtpengine":
                 ai_call.flow_log.flow("PlaySBC", "RTPengine", "G.711 RTP prompt")
             else:
@@ -3476,7 +3510,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.logger.media(
                 "AI TTS RTP PROMPT",
                 (
-                    f"status=generated rtp_pcap={tts.rtp_path} audio_path={tts.audio_path} "
+                    f"status=generated chunk={chunk.chunk_index}/{chunk.chunk_count} "
+                    f"rtp_pcap={chunk.rtp_path} audio_path={chunk.audio_path} "
                     f"codec={self.ai_voice_config.tts_output_codec} media_backend={ai_call.media_backend} "
                     "delivery_model=rtpengine_media_anchor_evidence"
                 ),

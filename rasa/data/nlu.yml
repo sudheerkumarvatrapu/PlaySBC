@@ -91,6 +91,15 @@ nlu:
       - cancel that
       - don't do that
 
+  - intent: long_response
+    examples: |
+      - give me a detailed support update
+      - please give me a detailed support update
+      - explain the support status in detail
+      - provide a long support response
+      - I need the full support update
+      - give me the detailed queue status
+
   - intent: clarify
     examples: |
       - Billing or maybe support

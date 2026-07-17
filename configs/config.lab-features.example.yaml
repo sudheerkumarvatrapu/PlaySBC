@@ -70,6 +70,7 @@ ai_voice_gateway:
   tts_provider: text-only
   tts_command: ""
   response_mode: rest
+  tts_chunk_chars: 220
   bot_actions_enabled: true
   initial_message: hello from playsbc voice
   fallback_text: Rasa lab bot is unavailable

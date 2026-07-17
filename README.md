@@ -354,7 +354,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regressio
   --kind-load-images
 ```
 
-The in-cluster Job runner creates temporary SIPp core/peer pods in the `playsbc` namespace, runs the 52-profile catalog including Rasa voice and chat/NLU profiles, restores Helm values, and writes `logs/k8s-job/<run-id>/k8s-reports/latest.html`. Full Kubernetes commands are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
+The in-cluster Job runner creates temporary SIPp core/peer pods in the `playsbc` namespace, runs the full B2BUA/RTPengine/ESBC/HA/AI catalog, restores Helm values, and writes `logs/k8s-job/<run-id>/k8s-reports/latest.html`. Full Kubernetes commands are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
 
 Optional real Rasa lab:
 
@@ -367,7 +367,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regressio
   --kind-load-images
 ```
 
-The regular full suite uses the existing `logs/k8s-job` layout. Rasa-only mode deletes old `logs/RASA-Regression` output and writes `logs/RASA-Regression/<run-id>/RASA-reports/latest.html`. It runs mock AI, real Rasa, Vosk/Piper speech, the contact-center sales bot, and real Rasa chat/NLU verifier profiles; see [docs/AI_VOICE_GATEWAY.md](docs/AI_VOICE_GATEWAY.md).
+The regular full suite uses the existing `logs/k8s-job` layout. Rasa-only mode deletes old `logs/RASA-Regression` output and writes `logs/RASA-Regression/<run-id>/RASA-reports/latest.html`. It runs mock AI, real Rasa, Vosk/Piper speech, Whisper STT, Coqui TTS, streaming response, contact-center bot, and real Rasa chat/NLU verifier profiles; see [docs/AI_VOICE_GATEWAY.md](docs/AI_VOICE_GATEWAY.md).
 
 Cleanup:
 

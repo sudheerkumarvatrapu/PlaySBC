@@ -353,6 +353,7 @@ playsbc:
       tts_provider: text-only
       tts_command: ""
       response_mode: rest
+      tts_chunk_chars: 220
       bot_actions_enabled: true
       initial_message: hello
       fallback_text: AI assistant is not available right now.

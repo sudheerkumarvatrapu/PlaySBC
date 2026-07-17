@@ -9,6 +9,7 @@ intents:
   - repeat
   - confirm
   - deny
+  - long_response
   - clarify
   - no_input
   - language_limitation
@@ -48,6 +49,8 @@ responses:
     - text: "Confirmed. The AI control path is alive."
   utter_deny:
     - text: "Okay, I will not transfer you. You can ask for support, sales, billing, or an agent."
+  utter_long_response:
+    - text: "Streaming support update is ready. First, I checked the service status and the call path is healthy. Second, I can keep this caller in the support queue while PlaySBC records the RTP evidence. Third, I can summarize the next action and wait for a human handoff if needed."
   utter_clarify:
     - text: "I can help with support, sales, billing, or an agent. Which one do you need?"
   utter_no_input:
