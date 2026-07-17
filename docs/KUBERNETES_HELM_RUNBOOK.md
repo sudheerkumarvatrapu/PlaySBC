@@ -49,6 +49,63 @@ kubectl get ns
 kubectl get pods -A
 ```
 
+## Standard Full Regression Flow
+
+Use this as the normal repeatable process: upgrade PlaySBC/RTPengine to the release, enable observability, wait for all deployments, then run every Kubernetes regression profile with the release images.
+
+```bash
+cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
+
+kubectl config use-context kind-playsbc
+kubectl config set-context --current --namespace=playsbc
+
+helm upgrade --install playsbc \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.3.0/playsbc-1.3.0.tgz \
+  --namespace playsbc \
+  --create-namespace \
+  --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
+  --set-string image.tag=1.3.0 \
+  --set image.pullPolicy=Always \
+  --set rtpengine.enabled=true \
+  --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
+  --set-string rtpengine.image.tag=1.3.0 \
+  --set rtpengine.image.pullPolicy=Always \
+  --set playsbc.config.media_backend=rtpengine \
+  --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223 \
+  --set observability.enabled=true \
+  --set observability.prometheus.retention=31d \
+  --set observability.prometheus.persistence.size=5Gi \
+  --set observability.grafana.persistence.size=2Gi
+
+kubectl -n playsbc rollout status deployment/playsbc-playsbc --timeout=180s
+kubectl -n playsbc rollout status deployment/playsbc-playsbc-rtpengine --timeout=180s
+kubectl -n playsbc rollout status deployment/playsbc-playsbc-prometheus --timeout=180s
+kubectl -n playsbc rollout status deployment/playsbc-playsbc-grafana --timeout=180s
+
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.3.0 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.3.0 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.3.0 \
+  --set-playsbc-image \
+  --no-load-playsbc-image \
+  --no-load-sipp-image \
+  --kind-cluster playsbc
+```
+
+The runner deletes old full-suite `logs/k8s-job` output by default, then writes:
+
+```text
+logs/k8s-job/<run-id>/runner.log
+logs/k8s-job/<run-id>/k8s-reports/latest.html
+```
+
+Optional Grafana port-forward:
+
+```bash
+kubectl -n playsbc port-forward svc/playsbc-playsbc-grafana 3000:3000
+```
+
 ## Deploy The Release
 
 ```bash
