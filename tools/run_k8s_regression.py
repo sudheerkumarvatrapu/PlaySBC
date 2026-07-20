@@ -719,6 +719,149 @@ class K8sRegressionRunner:
     def rollout_restart(self, workload_ref: str) -> CommandResult:
         return self.kubectl("rollout", "restart", workload_ref, check=True)
 
+    def workload_pod_names(self, target: str) -> list[str]:
+        if target == "rtpengine":
+            selector = f"app.kubernetes.io/name=playsbc-rtpengine,app.kubernetes.io/instance={self.args.helm_release}"
+        else:
+            selector = f"app.kubernetes.io/name=playsbc,app.kubernetes.io/instance={self.args.helm_release}"
+        result = self.kubectl("get", "pods", "-l", selector, "-o", "json", check=False)
+        try:
+            pods = json.loads(result.stdout or "{}").get("items", [])
+        except json.JSONDecodeError:
+            pods = []
+        names = [
+            str(pod.get("metadata", {}).get("name", ""))
+            for pod in pods
+            if str(pod.get("metadata", {}).get("name", ""))
+        ]
+        return sorted(names)
+
+    def workload_pod_name(self, target: str, index: int) -> str:
+        if self.active_active_enabled():
+            base = self.args.rtpengine_deployment if target == "rtpengine" else self.args.deployment
+            return f"{base}-{index}"
+        pods = self.workload_pod_names(target)
+        if not pods:
+            raise RuntimeError(f"No {target} pod found for HA action")
+        return pods[min(index, len(pods) - 1)]
+
+    def pod_snapshot(self, pod_name: str) -> dict[str, Any]:
+        result = self.kubectl("get", "pod", pod_name, "-o", "json", check=False, timeout=10)
+        if result.returncode != 0:
+            return {}
+        try:
+            parsed = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def pod_uid(self, pod_name: str) -> str:
+        snapshot = self.pod_snapshot(pod_name)
+        return str(snapshot.get("metadata", {}).get("uid", ""))
+
+    def pod_is_ready(self, snapshot: dict[str, Any]) -> bool:
+        if snapshot.get("metadata", {}).get("deletionTimestamp"):
+            return False
+        conditions = snapshot.get("status", {}).get("conditions", [])
+        if not isinstance(conditions, list):
+            return False
+        return any(
+            isinstance(condition, dict)
+            and condition.get("type") == "Ready"
+            and condition.get("status") == "True"
+            for condition in conditions
+        )
+
+    def wait_pod_ready(self, pod_name: str, bundle: Path, previous_uid: str = "") -> None:
+        deadline = time.monotonic() + float(self.args.rollout_timeout)
+        last_detail = ""
+        while time.monotonic() < deadline:
+            snapshot = self.pod_snapshot(pod_name)
+            uid = str(snapshot.get("metadata", {}).get("uid", ""))
+            phase = str(snapshot.get("status", {}).get("phase", ""))
+            last_detail = f"pod={pod_name} uid={uid or 'missing'} phase={phase or 'missing'}"
+            if snapshot and uid and uid != previous_uid and self.pod_is_ready(snapshot):
+                self.write_log(bundle, "log.platform", "K8S HA POD READY", last_detail)
+                return
+            time.sleep(1.0)
+        self.write_log(bundle, "log.platform", "K8S HA POD READY FAILED", last_detail)
+        raise RuntimeError(f"pod/{pod_name} did not become a new Ready pod")
+
+    def control_playsbc_pod(self, pod_name: str, action: str, bundle: Path) -> None:
+        path = "/control/drain" if action == "drain" else "/control/undrain"
+        python = (
+            "import urllib.request; "
+            f"print(urllib.request.urlopen('http://127.0.0.1:8080{path}', timeout=3).read().decode())"
+        )
+        result = self.kubectl(
+            "exec",
+            pod_name,
+            "-c",
+            "playsbc",
+            "--",
+            "python3",
+            "-c",
+            python,
+            check=False,
+            timeout=10,
+        )
+        self.write_log(
+            bundle,
+            "log.platform",
+            "K8S HA CONTROL",
+            f"pod={pod_name} action={action} returncode={result.returncode}\n{result.stdout}{result.stderr}",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"control {action} failed on {pod_name}")
+
+    def run_ha_action(self, profile: SimpleNamespace, bundle: Path, phases: PhaseLog, phase: str) -> None:
+        action = getattr(profile, "k8s_ha_action", {}) or {}
+        if not isinstance(action, dict) or action.get("phase") != phase:
+            return
+        started = time.monotonic()
+        target = str(action.get("target") or "playsbc")
+        operation = str(action.get("operation") or "delete-pod")
+        pod_index = int(action.get("pod_index", 0) or 0)
+        settle_seconds = float(action.get("settle_seconds", 0.0) or 0.0)
+        detail_lines = [f"profile={profile.profile} phase={phase} target={target} operation={operation}"]
+
+        if operation == "delete-pod":
+            pod_name = self.workload_pod_name(target, pod_index)
+            previous_uid = self.pod_uid(pod_name)
+            delete_result = self.kubectl("delete", "pod", pod_name, "--wait=false", check=False, timeout=30)
+            detail_lines.append(f"deleted_pod={pod_name} returncode={delete_result.returncode}")
+            detail_lines.append(f"previous_uid={previous_uid or 'unknown'}")
+            detail_lines.append(delete_result.stdout + delete_result.stderr)
+            self.write_log(bundle, "log.platform", "K8S HA ACTION", "\n".join(detail_lines))
+            if delete_result.returncode != 0:
+                raise RuntimeError(delete_result.stderr.strip() or delete_result.stdout.strip())
+            self.wait_pod_ready(pod_name, bundle, previous_uid=previous_uid)
+        elif operation == "drain-all":
+            pods = self.workload_pod_names("playsbc")
+            if not pods:
+                raise RuntimeError("No PlaySBC pods found for drain-all")
+            for pod_name in pods:
+                self.control_playsbc_pod(pod_name, "drain", bundle)
+            detail_lines.append(f"drained_pods={','.join(pods)}")
+            self.write_log(bundle, "log.platform", "K8S HA ACTION", "\n".join(detail_lines))
+        elif operation == "undrain-all":
+            pods = self.workload_pod_names("playsbc")
+            for pod_name in pods:
+                self.control_playsbc_pod(pod_name, "undrain", bundle)
+            detail_lines.append(f"undrained_pods={','.join(pods)}")
+            self.write_log(bundle, "log.platform", "K8S HA ACTION", "\n".join(detail_lines))
+        else:
+            raise RuntimeError(f"Unsupported K8s HA operation: {operation}")
+
+        if settle_seconds > 0:
+            time.sleep(settle_seconds)
+        phases.append(
+            "HA Fault Injection",
+            "passed",
+            started,
+            "; ".join(line.strip() for line in detail_lines if line.strip()),
+        )
+
     def kubectl(self, *parts: str, timeout: Optional[int] = None, input_text: Optional[str] = None, check: bool = False) -> CommandResult:
         command = [self.args.kubectl_bin]
         if self.args.namespace:
@@ -1456,7 +1599,7 @@ class K8sRegressionRunner:
 
     def active_active_ha_config(self, profile: SimpleNamespace) -> dict[str, Any]:
         profile_ha = format_config_value(getattr(profile, "ha", {}) or {}, profile)
-        profile_ha = profile_ha if isinstance(profile_ha, dict) else {}
+        profile_ha = copy.deepcopy(profile_ha) if isinstance(profile_ha, dict) else {}
         if not self.active_active_enabled():
             return profile_ha
         playsbc_replicas = max(1, int(getattr(self.args, "playsbc_replicas", 2)))
@@ -1491,6 +1634,51 @@ class K8sRegressionRunner:
             },
             "rtpengine_pairs": rtpengine_pairs,
         }
+        alias_map = {
+            "playsbc-a": f"{self.args.deployment}-0",
+            "playsbc-b": f"{self.args.deployment}-1",
+            "playsbc-0": f"{self.args.deployment}-0",
+            "playsbc-1": f"{self.args.deployment}-1",
+        }
+        if profile_ha.get("node_id") and profile_ha.get("node_id") != "$POD_NAME":
+            profile_ha.setdefault("node_aliases", [])
+            aliases = profile_ha["node_aliases"]
+            if not isinstance(aliases, list):
+                aliases = [aliases]
+            aliases.append(profile_ha["node_id"])
+            profile_ha["node_aliases"] = aliases
+            profile_ha["node_id"] = "$POD_NAME"
+        if str(profile_ha.get("shared_state_path", "")).startswith("/tmp/"):
+            profile_ha.pop("shared_state_path", None)
+        if isinstance(profile_ha.get("nodes"), list):
+            normalized_nodes: list[dict[str, Any]] = []
+            for item in profile_ha["nodes"]:
+                if not isinstance(item, dict):
+                    continue
+                node = copy.deepcopy(item)
+                original_id = str(node.get("node_id") or node.get("id") or "")
+                mapped_id = alias_map.get(original_id, original_id)
+                if mapped_id:
+                    node["node_id"] = mapped_id
+                aliases = node.get("aliases") or []
+                if not isinstance(aliases, list):
+                    aliases = [aliases]
+                if original_id and original_id != mapped_id:
+                    aliases.append(original_id)
+                if aliases:
+                    node["aliases"] = list(dict.fromkeys(str(alias) for alias in aliases))
+                normalized_nodes.append(node)
+            profile_ha["nodes"] = normalized_nodes
+        if isinstance(profile_ha.get("rtpengine_pairs"), list):
+            normalized_pairs: list[dict[str, Any]] = []
+            for item in profile_ha["rtpengine_pairs"]:
+                if not isinstance(item, dict):
+                    continue
+                pair = copy.deepcopy(item)
+                original_id = str(pair.get("node_id") or pair.get("playsbc_node") or "")
+                pair["node_id"] = alias_map.get(original_id, original_id)
+                normalized_pairs.append(pair)
+            profile_ha["rtpengine_pairs"] = normalized_pairs
         return deep_merge_dict(default_ha, profile_ha)
 
     def profile_config(self, profile: SimpleNamespace) -> dict[str, object]:
@@ -1791,6 +1979,22 @@ class K8sRegressionRunner:
                 teardown_started,
                 "Deleted temporary SIPp regression pods." if not self.args.keep_pods else "Kept temporary SIPp pods for debugging.",
             )
+            settle_seconds = float(getattr(self.args, "metrics_settle_seconds", 0.0) or 0.0)
+            if settle_seconds > 0:
+                settle_started = time.monotonic()
+                time.sleep(settle_seconds)
+                self.write_log(
+                    bundle,
+                    "log.platform",
+                    "K8S METRICS SCRAPE SETTLE",
+                    f"seconds={settle_seconds:.3f} purpose=allow_prometheus_final_profile_scrape",
+                )
+                phases.append(
+                    "Metrics Scrape Settle",
+                    "passed",
+                    settle_started,
+                    f"Waited {settle_seconds:.3f}s before evidence collection and next profile rollout.",
+                )
             evidence_started = time.monotonic()
             self.collect_k8s_evidence(bundle, profile)
             phases.append(
@@ -1973,6 +2177,7 @@ class K8sRegressionRunner:
 
         self.apply_profile_config(profile, bundle, phases)
         uac_scenario, uas_scenario, register_scenario = self.prepare_profile_scenarios(profile, core_pod, peer_pod)
+        self.run_ha_action(profile, bundle, phases, "precall")
 
         execution_started = time.monotonic()
         returncodes: list[int] = []
@@ -2021,7 +2226,24 @@ class K8sRegressionRunner:
                 uac_args = self.b2bua_uac_args(profile, uac_scenario, core_ip)
                 profile_timeout = k8s_sipp_timeout_seconds(profile)
                 timeout = max(self.args.sipp_timeout, profile_timeout + 30)
-                if should_run_k8s_rtcp(profile):
+                action = getattr(profile, "k8s_ha_action", {}) or {}
+                if isinstance(action, dict) and action.get("phase") == "midcall":
+                    uac_process = self.start_sipp_process(core_pod, "core-sipp-a-uac", uac_args, bundle)
+                    commands.append(command_text(self.sipp_exec_command(core_pod, uac_args)))
+                    time.sleep(float(action.get("delay_seconds", getattr(profile, "media_start_delay", 1.0)) or 1.0))
+                    self.run_ha_action(profile, bundle, phases, "midcall")
+                    try:
+                        uac_rc = uac_process.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        uac_process.terminate()
+                        uac_rc = 124
+                    finally:
+                        self.close_process_files(uac_process)
+                    returncodes.append(int(uac_rc))
+                    self.write_log(bundle, "log.sipp", "CORE-SIPP-A-UAC RESULT", f"returncode={uac_rc}")
+                    self.finalize_sipp_step_logs(bundle / "core-sipp-a-uac")
+                    self.collect_sipp_traces(core_pod, bundle / "core-sipp-a-uac")
+                elif should_run_k8s_rtcp(profile):
                     uac_process = self.start_sipp_process(core_pod, "core-sipp-a-uac", uac_args, bundle)
                     commands.append(command_text(self.sipp_exec_command(core_pod, uac_args)))
                     time.sleep(float(getattr(profile, "media_start_delay", 1.0)))
@@ -2042,6 +2264,12 @@ class K8sRegressionRunner:
                     returncodes.append(result.returncode)
                     commands.append(command_text(result.command))
 
+            if getattr(profile, "k8s_verify_drain_reject", False):
+                reject_args = self.b2bua_uac_args(profile, "/scenarios/b2bua_uac_failed_outbound.xml", core_ip)
+                result = self.run_sipp_step(core_pod, "core-drain-reject-uac", reject_args, bundle, timeout=30)
+                returncodes.append(result.returncode)
+                commands.append(command_text(result.command))
+
             returncodes.extend(self.wait_for_rtcp_processes(profile, rtcp_processes, bundle))
             rtcp_processes = []
 
@@ -2057,6 +2285,7 @@ class K8sRegressionRunner:
                 self.write_log(bundle, "log.sipp", f"{step_name.upper()} RESULT", f"returncode={rc}")
                 self.finalize_sipp_step_logs(bundle / step_name)
                 self.collect_sipp_traces(pod, bundle / step_name)
+            self.run_ha_action(profile, bundle, phases, "postcall")
         finally:
             for _name, process in rtcp_processes:
                 if process.poll() is None:
@@ -2131,6 +2360,8 @@ class K8sRegressionRunner:
             participants.extend(ai_ladder_nodes(profile))
             return tuple(participants)
         participants = ["Core SIPp A", "PlaySBC", "Peer SIPp B"]
+        if profile_name.startswith("ha-"):
+            participants.insert(1, "K8s HA")
         if profile_uses_rtpengine(profile):
             participants.append("RTPengine")
         return tuple(participants)
@@ -2265,6 +2496,10 @@ class K8sRegressionRunner:
         }
         cancel_flow = "cancel" in profile.profile
         outbound_failure = "failed-outbound" in profile.profile or "trunk-failure" in profile.profile
+        action = getattr(profile, "k8s_ha_action", {}) or {}
+        if isinstance(action, dict) and action.get("phase") == "precall" and "K8s HA" in flow.participants:
+            target = "RTPengine" if action.get("target") == "rtpengine" and "RTPengine" in flow.participants else "PlaySBC"
+            flow.sip("K8s HA", target, "pre-call pod delete")
         flow.sip("Core SIPp A", "PlaySBC", "INVITE")
         flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
         if expect_failure:
@@ -2302,10 +2537,22 @@ class K8sRegressionRunner:
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("Core SIPp A", "PlaySBC", "ACK")
         flow.sip("PlaySBC", "Peer SIPp B", "ACK")
+        if isinstance(action, dict) and action.get("phase") == "midcall" and "K8s HA" in flow.participants:
+            if action.get("operation") == "drain-all":
+                flow.sip("K8s HA", "PlaySBC", "runtime drain all")
+            else:
+                target = "RTPengine" if action.get("target") == "rtpengine" and "RTPengine" in flow.participants else "PlaySBC"
+                flow.sip("K8s HA", target, "mid-call pod delete")
         flow.sip("Core SIPp A", "PlaySBC", "BYE")
         flow.sip("PlaySBC", "Core SIPp A", "200 OK")
         flow.sip("PlaySBC", "Peer SIPp B", "BYE")
         flow.sip("Peer SIPp B", "PlaySBC", "200 OK")
+        if isinstance(action, dict) and action.get("phase") == "postcall" and "K8s HA" in flow.participants:
+            target = "RTPengine" if action.get("target") == "rtpengine" and "RTPengine" in flow.participants else "PlaySBC"
+            flow.sip("K8s HA", target, "post-call pod delete")
+        if getattr(profile, "k8s_verify_drain_reject", False) and "K8s HA" in flow.participants:
+            flow.sip("Core SIPp A", "PlaySBC", "new INVITE while draining")
+            flow.sip("PlaySBC", "Core SIPp A", "503 Node Draining")
 
     def profile_options(self, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
         setup_started = time.monotonic()
@@ -2547,6 +2794,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--call-hold-ms", type=int, default=1000)
     parser.add_argument("--uas-start-delay", type=float, default=1.0)
     parser.add_argument("--keep-pods", action="store_true")
+    parser.add_argument("--metrics-settle-seconds", type=float, default=2.0, help="Wait after each profile so Prometheus can scrape final counters before the next rollout")
     args = parser.parse_args(argv)
     if args.rasa_profiles and (args.all_profiles or args.profile):
         raise SystemExit("--rasa-profiles cannot be combined with --all-profiles or --profile")

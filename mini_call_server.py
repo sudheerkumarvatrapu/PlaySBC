@@ -52,7 +52,7 @@ except Exception:  # pragma: no cover - audioop is unavailable in newer Python b
 
 
 CRLF = "\r\n"
-PLAYSBC_VERSION = "1.2.1"
+PLAYSBC_VERSION = "1.4.0"
 PCMU = 0
 PCMA = 8
 SUPPORTED_CODECS = (PCMU, PCMA)
@@ -663,9 +663,11 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_ha_configured_nodes": ("gauge", "Number of configured HA nodes."),
     "playsbc_ha_node_draining": ("gauge", "Whether this PlaySBC node is draining new calls."),
     "playsbc_ha_dialog_restores_total": ("counter", "Total restored dialogs from shared HA state."),
+    "playsbc_ha_b2bua_restores_total": ("counter", "Total restored B2BUA leg records from shared HA state."),
     "playsbc_ha_shared_registrations": ("gauge", "Registrations currently present in shared HA state."),
     "playsbc_ha_shared_dialogs": ("gauge", "Dialogs currently present in shared HA state."),
     "playsbc_ha_shared_answered_dialogs": ("gauge", "Answered dialogs currently present in shared HA state."),
+    "playsbc_ha_shared_b2bua_calls": ("gauge", "B2BUA leg records currently present in shared HA state."),
     "playsbc_ai_voice_calls_active": ("gauge", "Current active AI voice calls."),
     "playsbc_ai_voice_calls_total": ("counter", "Total AI voice calls accepted by PlaySBC."),
     "playsbc_ai_voice_turns_total": ("counter", "Total AI voice turns started."),
@@ -847,6 +849,25 @@ class SharedStateStore:
                 owner_node TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS b2bua_calls (
+                inbound_call_id TEXT PRIMARY KEY,
+                outbound_call_id TEXT NOT NULL,
+                outbound_target_uri TEXT NOT NULL,
+                outbound_from_header TEXT NOT NULL,
+                target_user TEXT NOT NULL,
+                route_policy TEXT NOT NULL,
+                route_source TEXT NOT NULL,
+                media_backend TEXT NOT NULL,
+                rtpengine_call_id TEXT NOT NULL,
+                rtpengine_from_tag TEXT NOT NULL,
+                rtpengine_to_tag TEXT NOT NULL,
+                outbound_to_header TEXT NOT NULL,
+                outbound_contact_uri TEXT NOT NULL,
+                outbound_invite_via_header TEXT NOT NULL,
+                outbound_cseq INTEGER NOT NULL,
+                owner_node TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
             """
         )
 
@@ -913,10 +934,12 @@ class SharedStateStore:
         registrations = self.connection.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
         dialogs = self.connection.execute("SELECT COUNT(*) FROM dialogs").fetchone()[0]
         answered_dialogs = self.connection.execute("SELECT COUNT(*) FROM dialogs WHERE state = 'ANSWERED'").fetchone()[0]
+        b2bua_calls = self.connection.execute("SELECT COUNT(*) FROM b2bua_calls").fetchone()[0]
         return {
             "playsbc_ha_shared_registrations": int(registrations),
             "playsbc_ha_shared_dialogs": int(dialogs),
             "playsbc_ha_shared_answered_dialogs": int(answered_dialogs),
+            "playsbc_ha_shared_b2bua_calls": int(b2bua_calls),
         }
 
     def dialog_owner(self, call_id: str) -> str:
@@ -989,6 +1012,72 @@ class SharedStateStore:
             acknowledged_at=float(row["acknowledged_at"]) if row["acknowledged_at"] is not None else None,
             terminated_at=float(row["terminated_at"]) if row["terminated_at"] is not None else None,
         )
+
+    def save_b2bua_call(self, call: "B2BUACall") -> None:
+        self.connection.execute(
+            """
+            INSERT INTO b2bua_calls (
+                inbound_call_id, outbound_call_id, outbound_target_uri, outbound_from_header,
+                target_user, route_policy, route_source, media_backend, rtpengine_call_id,
+                rtpengine_from_tag, rtpengine_to_tag, outbound_to_header, outbound_contact_uri,
+                outbound_invite_via_header, outbound_cseq, owner_node, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(inbound_call_id) DO UPDATE SET
+                outbound_call_id=excluded.outbound_call_id,
+                outbound_target_uri=excluded.outbound_target_uri,
+                outbound_from_header=excluded.outbound_from_header,
+                target_user=excluded.target_user,
+                route_policy=excluded.route_policy,
+                route_source=excluded.route_source,
+                media_backend=excluded.media_backend,
+                rtpengine_call_id=excluded.rtpengine_call_id,
+                rtpengine_from_tag=excluded.rtpengine_from_tag,
+                rtpengine_to_tag=excluded.rtpengine_to_tag,
+                outbound_to_header=excluded.outbound_to_header,
+                outbound_contact_uri=excluded.outbound_contact_uri,
+                outbound_invite_via_header=excluded.outbound_invite_via_header,
+                outbound_cseq=excluded.outbound_cseq,
+                owner_node=excluded.owner_node,
+                updated_at=excluded.updated_at
+            """,
+            (
+                call.inbound_call_id,
+                call.outbound_call_id,
+                call.outbound_target.uri,
+                call.outbound_from_header,
+                call.target_user,
+                call.route_policy,
+                call.route_source,
+                call.media_backend,
+                call.rtpengine_call_id,
+                call.rtpengine_from_tag,
+                call.rtpengine_to_tag,
+                call.outbound_to_header,
+                call.outbound_contact_uri,
+                call.outbound_invite_via_header,
+                call.outbound_cseq,
+                self.node_id,
+                time.time(),
+            ),
+        )
+        self.logger.platform(
+            "HA B2BUA CALL SYNC",
+            (
+                f"node={self.node_id} inbound_call_id={call.inbound_call_id} "
+                f"outbound_call_id={call.outbound_call_id} media_backend={call.media_backend}"
+            ),
+        )
+
+    def load_b2bua_call(self, inbound_call_id: str) -> Optional[sqlite3.Row]:
+        return self.connection.execute(
+            "SELECT * FROM b2bua_calls WHERE inbound_call_id = ?",
+            (inbound_call_id,),
+        ).fetchone()
+
+    def delete_b2bua_call(self, inbound_call_id: str) -> None:
+        self.connection.execute("DELETE FROM b2bua_calls WHERE inbound_call_id = ?", (inbound_call_id,))
+        self.logger.platform("HA B2BUA CALL DELETE", f"node={self.node_id} inbound_call_id={inbound_call_id}")
 
     def close(self) -> None:
         self.connection.close()
@@ -2046,6 +2135,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.ha_load_balancing_policy = ha_load_balancing_policy(self.ha_config)
         self.ha_node_draining = ha_node_draining(self.ha_config)
         self.ha_dialog_restores = 0
+        self.ha_b2bua_restores = 0
         shared_path = ha_shared_state_path(self.ha_config)
         self.shared_state = SharedStateStore(shared_path, self.node_id, logger) if ha_enabled(self.ha_config) else None
         self.background_tasks: List[asyncio.Task] = []
@@ -2115,6 +2205,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 "playsbc_ha_configured_nodes": len(self.ha_nodes),
                 "playsbc_ha_node_draining": int(self.ha_node_draining),
                 "playsbc_ha_dialog_restores_total": self.ha_dialog_restores,
+                "playsbc_ha_b2bua_restores_total": self.ha_b2bua_restores,
             }
         )
         if self.shared_state:
@@ -2142,6 +2233,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ("playsbc_ha_configured_nodes", len(self.ha_nodes), base_labels),
                 ("playsbc_ha_node_draining", int(self.ha_node_draining), base_labels),
                 ("playsbc_ha_dialog_restores_total", self.ha_dialog_restores, base_labels),
+                ("playsbc_ha_b2bua_restores_total", self.ha_b2bua_restores, base_labels),
             ]
         )
         for (method, transport, direction, realm), value in sorted(self.sip_requests_total.items()):
@@ -2721,7 +2813,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if method == "ACK":
             call_id = message.header("call-id")
             session = self.media.get_session(call_id)
-            b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+            b2bua_call = self.b2bua_calls_by_inbound.get(call_id) or self.restore_b2bua_call_state(call_id)
             ai_call = self.ai_voice_calls_by_inbound.get(call_id)
             if session or b2bua_call or ai_call:
                 try:
@@ -2779,7 +2871,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 return
             if session:
                 session.log("BYE RECEIVED", f"source={message.source[0]}:{message.source[1]}")
-            b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+            b2bua_call = self.b2bua_calls_by_inbound.get(call_id) or self.restore_b2bua_call_state(call_id)
             if b2bua_call:
                 b2bua_call.flow_log.sip("SIPp A", "B2BUA", "BYE")
             ai_call = self.ai_voice_calls_by_inbound.get(call_id)
@@ -3234,6 +3326,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
         self.save_dialog_state(dialog)
+        self.save_b2bua_call_state(b2bua_call)
         inbound_rtp.log(
             "DIALOG STATE",
             (
@@ -3485,6 +3578,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         flow_log.sip("B2BUA", "SIPp A", "200 OK")
         dialog.mark_answered()
         self.save_dialog_state(dialog)
+        self.save_b2bua_call_state(b2bua_call)
 
     async def wait_for_outbound_invite(
         self,
@@ -4072,6 +4166,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_call.flow_log.write("CALL END", f"reason={reason}")
         b2bua_call.flow_log.render_ladder()
         self.schedule_rtpengine_delete(b2bua_call)
+        self.delete_b2bua_call_state(b2bua_call.inbound_call_id)
         self.b2bua_calls_by_inbound.pop(b2bua_call.inbound_call_id, None)
         self.b2bua_calls_by_outbound.pop(b2bua_call.outbound_call_id, None)
         self.pending_outbound_responses.pop(b2bua_call.outbound_call_id, None)
@@ -4182,6 +4277,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if self.shared_state:
             self.shared_state.save_dialog(dialog)
 
+    def save_b2bua_call_state(self, b2bua_call: B2BUACall) -> None:
+        if self.shared_state:
+            self.shared_state.save_b2bua_call(b2bua_call)
+
+    def delete_b2bua_call_state(self, inbound_call_id: str) -> None:
+        if self.shared_state:
+            self.shared_state.delete_b2bua_call(inbound_call_id)
+
     def restore_dialog_state(self, call_id: str) -> Optional[SipDialog]:
         if not self.shared_state:
             return None
@@ -4195,6 +4298,71 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"node={self.node_id} call_id={call_id} state={dialog.state.name} restore_count={self.ha_dialog_restores}",
         )
         return dialog
+
+    def restore_b2bua_call_state(self, inbound_call_id: str) -> Optional[B2BUACall]:
+        if not self.shared_state:
+            return None
+        row = self.shared_state.load_b2bua_call(inbound_call_id)
+        if not row:
+            return None
+        try:
+            outbound_target = parse_sip_uri(str(row["outbound_target_uri"]))
+        except ValueError as exc:
+            self.logger.platform(
+                "HA B2BUA CALL RESTORE FAILED",
+                f"node={self.node_id} inbound_call_id={inbound_call_id} reason={exc}",
+            )
+            return None
+        target_user = str(row["target_user"])
+        route = RouteResult(
+            outbound_target,
+            str(row["route_policy"]),
+            str(row["route_source"]),
+            original_user=target_user,
+            routed_user=outbound_target.user,
+        )
+        flow_log = B2BUAFlowLog(
+            self.media.log_dir,
+            inbound_call_id,
+            target_user,
+            route,
+            enabled=self.b2bua_ladder_logs,
+            logger=self.logger,
+        )
+        b2bua_call = B2BUACall(
+            inbound_call_id=inbound_call_id,
+            outbound_call_id=str(row["outbound_call_id"]),
+            outbound_target=outbound_target,
+            outbound_from_header=str(row["outbound_from_header"]),
+            target_user=target_user,
+            route_policy=str(row["route_policy"]),
+            route_source=str(row["route_source"]),
+            flow_log=flow_log,
+            route_result=route,
+            media_backend=str(row["media_backend"]),
+            rtpengine_call_id=str(row["rtpengine_call_id"]),
+            rtpengine_from_tag=str(row["rtpengine_from_tag"]),
+            rtpengine_to_tag=str(row["rtpengine_to_tag"]),
+            outbound_to_header=str(row["outbound_to_header"]),
+            outbound_contact_uri=str(row["outbound_contact_uri"]),
+            outbound_invite_via_header=str(row["outbound_invite_via_header"]),
+            outbound_cseq=int(row["outbound_cseq"]),
+        )
+        self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
+        self.b2bua_calls_by_outbound[b2bua_call.outbound_call_id] = b2bua_call
+        self.ha_b2bua_restores += 1
+        self.logger.platform(
+            "HA B2BUA CALL RESTORED",
+            (
+                f"node={self.node_id} inbound_call_id={inbound_call_id} "
+                f"outbound_call_id={b2bua_call.outbound_call_id} restore_count={self.ha_b2bua_restores}"
+            ),
+        )
+        b2bua_call.flow_log.write(
+            "HA B2BUA CALL RESTORED",
+            f"node={self.node_id} outbound_call_id={b2bua_call.outbound_call_id}",
+        )
+        return b2bua_call
 
     def acknowledge_dialog(self, call_id: str, cseq_header: str) -> SipDialog:
         try:
@@ -5237,7 +5405,11 @@ def ha_nodes(ha: Dict[str, Any]) -> List[Dict[str, Any]]:
 def ha_local_node(ha: Dict[str, Any]) -> Dict[str, Any]:
     node_id = ha_node_id(ha)
     for node in ha_nodes(ha):
-        if str(node.get("node_id") or node.get("id") or "") == node_id:
+        candidate = str(node.get("node_id") or node.get("id") or "")
+        aliases = node.get("aliases") or node.get("node_aliases") or []
+        if not isinstance(aliases, list):
+            aliases = [aliases]
+        if candidate == node_id or node_id in {str(alias) for alias in aliases}:
             return node
     return {}
 
@@ -5437,9 +5609,20 @@ async def handle_health_request(
 ) -> None:
     try:
         request_line = (await asyncio.wait_for(reader.readline(), timeout=2.0)).decode("ascii", errors="replace")
-        path = request_line.split(" ", 2)[1] if len(request_line.split(" ", 2)) >= 2 else "/healthz"
+        parts = request_line.split(" ", 2)
+        path = parts[1] if len(parts) >= 2 else "/healthz"
         if path == "/metrics":
             body = render_prometheus_metrics(protocol.prometheus_samples())
+        elif path == "/control/drain":
+            protocol.ha_node_draining = True
+            protocol.ha_config["draining"] = True
+            protocol.logger.platform("HA NODE RUNTIME DRAIN", f"node={protocol.node_id} action=drain")
+            body = "draining\n"
+        elif path == "/control/undrain":
+            protocol.ha_node_draining = False
+            protocol.ha_config["draining"] = False
+            protocol.logger.platform("HA NODE RUNTIME DRAIN", f"node={protocol.node_id} action=undrain")
+            body = "active\n"
         else:
             body = "ready\n" if path == "/readyz" else "ok\n"
         response = (
