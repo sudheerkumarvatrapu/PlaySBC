@@ -2310,6 +2310,18 @@ Content-Length: 0
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-options-health-recovery", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-node-draining", run_regression_suite.ALL_B2BUA_PROFILES)
+        for profile in (
+            "ha-playsbc-precall-failover",
+            "ha-playsbc-midcall-failover",
+            "ha-playsbc-postcall-failover",
+            "ha-rtpengine-precall-failover",
+            "ha-rtpengine-midcall-recovery",
+            "ha-node-drain-active-calls",
+            "ha-active-active-load-distribution",
+            "ha-shared-registrar-dialog-restore",
+        ):
+            self.assertIn(profile, run_regression_suite.ALL_B2BUA_PROFILES)
+            self.assertIn(profile, run_regression_suite.RTPENGINE_B2BUA_PROFILES)
         self.assertIn("tls-transport-policy", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtpengine-port-exhaustion", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("rtcp-receiver-quality", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2949,6 +2961,30 @@ class RealTopologyTests(unittest.TestCase):
             "udp://playsbc-playsbc-rtpengine-1.playsbc-playsbc-rtpengine-headless:2223",
         )
         self.assertEqual(ha["failover"]["mid_call_failover"], "dialog-restore-only")
+
+    def test_kubernetes_active_active_ha_profiles_normalize_legacy_node_aliases(self):
+        args = run_k8s_regression.parse_args(["--profile", "ha-node-draining"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("ha-node-draining", "unit-k8s")
+        ha = runner.profile_config(profile)["ha"]
+
+        self.assertEqual(ha["node_id"], "$POD_NAME")
+        self.assertEqual(ha["shared_state_path"], "/var/lib/playsbc/ha-state.sqlite3")
+        self.assertTrue(ha["draining"])
+        self.assertEqual(ha["nodes"][0]["node_id"], "playsbc-playsbc-0")
+        self.assertIn("playsbc-a", ha["nodes"][0]["aliases"])
+
+    def test_kubernetes_rtpengine_interface_failure_survives_active_active_defaults(self):
+        args = run_k8s_regression.parse_args(["--profile", "rtpengine-interface-failure"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("rtpengine-interface-failure", "unit-k8s")
+        config = runner.profile_config(profile)
+        configmap = (ROOT / "charts" / "playsbc" / "templates" / "configmap.yaml").read_text(encoding="utf-8")
+
+        self.assertEqual(config["rtpengine_directions"], ["missing-core", "missing-peer"])
+        self.assertEqual(config["rtpengine_interfaces"], ["core", "peer"])
+        self.assertIn('if not (get $config "rtpengine_directions")', configmap)
+        self.assertIn('if not (get $config "rtpengine_interfaces")', configmap)
 
     def test_kubernetes_profiles_can_disable_active_active_topology(self):
         args = run_k8s_regression.parse_args(["--all-profiles", "--no-active-active-topology"])

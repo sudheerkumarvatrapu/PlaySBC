@@ -905,6 +905,18 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(server.ha_node_draining(ha))
         self.assertEqual(server.ha_rtpengine_session_migration(ha), "planned")
 
+    def test_ha_node_draining_helper_accepts_node_aliases(self):
+        ha = {
+            "enabled": True,
+            "node_id": "playsbc-playsbc-0",
+            "nodes": [
+                {"node_id": "playsbc-a", "aliases": ["playsbc-playsbc-0"], "state": "draining"},
+                {"node_id": "playsbc-b", "aliases": ["playsbc-playsbc-1"], "state": "active"},
+            ],
+        }
+
+        self.assertTrue(server.ha_node_draining(ha))
+
     def test_rtpengine_codec_policy_masks_source_and_transcodes_target(self):
         policy = server.rtpengine_codec_policy((server.PCMU,), server.PCMA)
 
@@ -955,6 +967,67 @@ class ConfigTests(unittest.TestCase):
         assert restored_dialog is not None
         self.assertEqual(restored_dialog.state, server.CallState.ANSWERED)
         self.assertEqual(restored_dialog.remote_cseq, 1)
+
+    def test_shared_state_store_replays_b2bua_call_for_failover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = str(Path(tmp) / "ha.sqlite3")
+            route = server.RouteResult(
+                target=server.SipUri("1002", "192.0.2.20", 5060, "udp"),
+                policy_name="registration",
+                source="registrar",
+                original_user="1002",
+                routed_user="1002",
+            )
+            flow = server.B2BUAFlowLog(Path(tmp), "in-call", "1002", route, enabled=False, logger=server.SbcLogger(Path(tmp)))
+            call = server.B2BUACall(
+                inbound_call_id="in-call",
+                outbound_call_id="out-call",
+                outbound_target=route.target,
+                outbound_from_header="PlaySBC <sip:b2bua@10.0.0.10:5062>;tag=from",
+                target_user="1002",
+                route_policy="registration",
+                route_source="registrar",
+                flow_log=flow,
+                route_result=route,
+                media_backend="rtpengine",
+                rtpengine_call_id="in-call",
+                rtpengine_from_tag="from",
+                rtpengine_to_tag="to",
+                outbound_to_header="<sip:1002@192.0.2.20>;tag=peer",
+                outbound_contact_uri="sip:1002@192.0.2.20:5060",
+                outbound_invite_via_header="SIP/2.0/UDP 10.0.0.10:5062;branch=z9hG4bK-ha",
+                outbound_cseq=1,
+            )
+            first = server.SharedStateStore(state_path, "playsbc-a", server.SbcLogger(None))
+            first.save_b2bua_call(call)
+            first.close()
+
+            class FakeMedia:
+                log_dir = Path(tmp)
+
+            protocol = server.SipServerProtocol(
+                "127.0.0.1",
+                25062,
+                media=FakeMedia(),
+                logger=server.SbcLogger(Path(tmp)),
+                default_payload=server.PCMU,
+                auth_realm="playsbc",
+                users={},
+                bridge_rooms=(),
+                b2bua_routes={},
+                route_policies=(),
+                b2bua_ladder_logs=False,
+                media_backend="rtpengine",
+                ha={"enabled": True, "node_id": "playsbc-b", "shared_state_path": state_path},
+            )
+            restored = protocol.restore_b2bua_call_state("in-call")
+            assert restored is not None
+            protocol.shared_state.close()
+
+        self.assertEqual(restored.outbound_call_id, "out-call")
+        self.assertEqual(restored.outbound_target.address, ("192.0.2.20", 5060))
+        self.assertEqual(restored.media_backend, "rtpengine")
+        self.assertEqual(protocol.ha_b2bua_restores, 1)
 
 
 class RoutingEngineTests(unittest.TestCase):

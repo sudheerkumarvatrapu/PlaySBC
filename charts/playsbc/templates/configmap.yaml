@@ -81,8 +81,12 @@
 {{- if eq (get $config "b2bua_advertised_ip" | default "") "" -}}
 {{- $_ := set $config "b2bua_advertised_ip" "$POD_IP" -}}
 {{- end -}}
+{{- if not (get $config "rtpengine_directions") -}}
 {{- $_ := set $config "rtpengine_directions" (list "core" "peer") -}}
+{{- end -}}
+{{- if not (get $config "rtpengine_interfaces") -}}
 {{- $_ := set $config "rtpengine_interfaces" (list "core" "peer") -}}
+{{- end -}}
 {{- end -}}
 {{- $rasa := .Values.rasa | default dict -}}
 {{- $rasaEnabled := get $rasa "enabled" | default false -}}
