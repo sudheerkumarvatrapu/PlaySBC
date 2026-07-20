@@ -1565,6 +1565,7 @@ Content-Length: 0
         values = (chart / "values.yaml").read_text(encoding="utf-8")
         deployment = (chart / "templates" / "deployment.yaml").read_text(encoding="utf-8")
         configmap = (chart / "templates" / "configmap.yaml").read_text(encoding="utf-8")
+        service = (chart / "templates" / "service.yaml").read_text(encoding="utf-8")
         rtpengine = (chart / "templates" / "rtpengine.yaml").read_text(encoding="utf-8")
         shared_state = (chart / "templates" / "shared-state.yaml").read_text(encoding="utf-8")
         multus = (chart / "templates" / "multus.yaml").read_text(encoding="utf-8")
@@ -1577,6 +1578,9 @@ Content-Length: 0
         self.assertIn('kind: {{ if $useStatefulSet }}StatefulSet{{ else }}Deployment{{ end }}', deployment)
         self.assertIn("fieldPath: metadata.name", deployment)
         self.assertIn("ha-shared-state", deployment)
+        self.assertIn('serviceName: {{ include "playsbc.fullname" . }}-headless', deployment)
+        self.assertIn('name: {{ include "playsbc.fullname" . }}-headless', service)
+        self.assertIn("publishNotReadyAddresses: true", service)
         self.assertIn('node_id" "$POD_NAME"', configmap)
         self.assertIn("rtpengine_pairs", configmap)
         self.assertIn("mergeOverwrite $node $existing", configmap)
@@ -1605,7 +1609,12 @@ Content-Length: 0
         self.assertIn("playsbc_sip_requests_total", dashboard)
         self.assertIn("playsbc_sip_responses_total", dashboard)
         self.assertIn("playsbc_media_negotiations_total", dashboard)
-        self.assertIn("playsbc_transcoding_sessions_total", dashboard)
+        self.assertIn("scrape_target: statefulset-pod", stack)
+        self.assertIn("playsbc_pod", stack)
+        self.assertIn("-headless.{{ $.Release.Namespace }}.svc.cluster.local", stack)
+        self.assertIn("Transcoding Sessions In Range", dashboard)
+        self.assertIn('transcoding=\\"true\\"', dashboard)
+        self.assertIn("Transcoding By PlaySBC Node", dashboard)
         self.assertIn("sum(increase(playsbc_b2bua_calls_completed_total", dashboard)
         self.assertIn("sum(increase(playsbc_sip_requests_total", dashboard)
         self.assertIn("sum(increase(playsbc_sip_responses_total", dashboard)
@@ -2973,6 +2982,29 @@ class RealTopologyTests(unittest.TestCase):
         self.assertTrue(ha["draining"])
         self.assertEqual(ha["nodes"][0]["node_id"], "playsbc-playsbc-0")
         self.assertIn("playsbc-a", ha["nodes"][0]["aliases"])
+
+    def test_kubernetes_ha_ladder_names_play_sbc_and_rtpengine_replicas(self):
+        args = run_k8s_regression.parse_args(["--profile", "ha-playsbc-midcall-failover"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("ha-playsbc-midcall-failover", "unit-k8s")
+
+        ladder = runner.dual_realm_ladder(profile)
+
+        self.assertIn("PlaySBC-1", ladder)
+        self.assertIn("PlaySBC-2", ladder)
+        self.assertIn("RTPengine-1", ladder)
+        self.assertIn("RTPengine-2", ladder)
+        self.assertIn("dialog restore", ladder)
+
+    def test_kubernetes_ha_profiles_emit_transcoding_evidence(self):
+        shared = run_k8s_regression.profile_values("ha-shared-state-rtpengine", "unit-k8s")
+        load = run_k8s_regression.profile_values("ha-active-active-load-distribution", "unit-k8s")
+
+        self.assertEqual(shared.media_codec, "PCMU")
+        self.assertEqual(shared.server_codec, "PCMA")
+        self.assertEqual(load.media_codec, "PCMU")
+        self.assertEqual(load.server_codec, "PCMA")
+        self.assertEqual(load.k8s_service_session_affinity, "None")
 
     def test_kubernetes_rtpengine_interface_failure_survives_active_active_defaults(self):
         args = run_k8s_regression.parse_args(["--profile", "rtpengine-interface-failure"])

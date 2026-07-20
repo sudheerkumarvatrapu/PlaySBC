@@ -1,3 +1,7 @@
+{{- $topology := .Values.topology | default dict -}}
+{{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
+{{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
+{{- $useStatefulSet := and $activeActive (get $activeActiveCfg "useStatefulSet" | default true) -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -42,3 +46,35 @@ spec:
       port: {{ .Values.service.healthPort }}
       targetPort: health
       protocol: TCP
+{{- if $useStatefulSet }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}-headless
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: sip-udp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-udp
+      protocol: UDP
+    - name: sip-tcp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-tcp
+      protocol: TCP
+    - name: sip-tls
+      port: {{ .Values.service.tlsPort }}
+      targetPort: sip-tls
+      protocol: TCP
+    - name: health
+      port: {{ .Values.service.healthPort }}
+      targetPort: health
+      protocol: TCP
+{{- end }}

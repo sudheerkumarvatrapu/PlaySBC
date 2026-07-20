@@ -12,6 +12,14 @@
 {{- $grafanaService := get $grafana "service" | default dict }}
 {{- $grafanaPersistence := get $grafana "persistence" | default dict }}
 {{- $grafanaResources := get $grafana "resources" | default dict }}
+{{- $topology := .Values.topology | default dict }}
+{{- $activeActiveCfg := get $topology "activeActive" | default dict }}
+{{- $activeActive := get $activeActiveCfg "enabled" | default false }}
+{{- $useStatefulSet := and $activeActive (get $activeActiveCfg "useStatefulSet" | default true) }}
+{{- $playsbcReplicas := int .Values.replicaCount }}
+{{- if $activeActive }}
+{{- $playsbcReplicas = int (get $activeActiveCfg "playsbcReplicas" | default 2) }}
+{{- end }}
 {{- $promPersistenceEnabled := true }}
 {{- if hasKey $promPersistence "enabled" }}
 {{- $promPersistenceEnabled = get $promPersistence "enabled" }}
@@ -38,12 +46,26 @@ data:
       - job_name: playsbc
         metrics_path: /metrics
         static_configs:
+{{- if $useStatefulSet }}
+{{- range $index := until $playsbcReplicas }}
+          - targets:
+              - {{ include "playsbc.fullname" $ }}-{{ $index }}.{{ include "playsbc.fullname" $ }}-headless.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.service.healthPort }}
+            labels:
+              app: playsbc
+              namespace: {{ $.Release.Namespace }}
+              realm_model: core-peer
+              scrape_target: statefulset-pod
+              playsbc_pod: {{ include "playsbc.fullname" $ }}-{{ $index }}
+{{- end }}
+{{- else }}
           - targets:
               - {{ include "playsbc.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.healthPort }}
             labels:
               app: playsbc
               namespace: {{ .Release.Namespace }}
               realm_model: core-peer
+              scrape_target: service
+{{- end }}
       - job_name: prometheus
         static_configs:
           - targets:

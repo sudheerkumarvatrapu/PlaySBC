@@ -959,6 +959,9 @@ B2BUA_PROFILES = {
         "caller": "ha-core-a",
         "callee": "ha-peer-b",
         "media_backend": "rtpengine",
+        "media_codec": "PCMU",
+        "server_codec": "PCMA",
+        "media_driver": "sipp-pcap",
         "ha": {
             "enabled": True,
             "cluster_id": "playsbc-aa-lab",
@@ -980,6 +983,7 @@ B2BUA_PROFILES = {
         "expected_log_markers": {
             "log.platform": ["HA RTPENGINE PAIR SELECTED", "HA NODE STARTED", "HA REGISTRATION SYNC", "HA DIALOG SYNC"],
             "log.media": ["RTPENGINE OFFER", "RTPENGINE ANSWER"],
+            "log.transcoding": ["TRANSCODING OBSERVATION", "src=PCMU dst=PCMA"],
         },
     },
     "ha-options-health-recovery": {
@@ -1209,12 +1213,14 @@ B2BUA_PROFILES = {
         "callee": "ha-load-b",
         "media_backend": "rtpengine",
         "media_codec": "PCMU",
+        "server_codec": "PCMA",
         "media_driver": "sipp-pcap",
         "calls": 8,
         "rate": 2,
         "hold_ms": 5000,
         "ladder": False,
         "rtcp_enabled": False,
+        "k8s_service_session_affinity": "None",
         "ha": {
             "enabled": True,
             "cluster_id": "playsbc-aa-lab",
@@ -1224,6 +1230,7 @@ B2BUA_PROFILES = {
         "expected_log_markers": {
             "log.platform": ["HA LOAD BALANCING MODEL", "HA RTPENGINE PAIR SELECTED"],
             "log.media": ["RTPENGINE OFFER", "RTPENGINE ANSWER"],
+            "log.transcoding": ["TRANSCODING OBSERVATION", "src=PCMU dst=PCMA"],
         },
     },
     "ha-shared-registrar-dialog-restore": {

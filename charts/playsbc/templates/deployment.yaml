@@ -26,7 +26,7 @@ metadata:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
 {{- if $useStatefulSet }}
-  serviceName: {{ include "playsbc.fullname" . }}
+  serviceName: {{ include "playsbc.fullname" . }}-headless
 {{- end }}
   replicas: {{ $replicas }}
   selector:

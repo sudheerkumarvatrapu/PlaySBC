@@ -1723,7 +1723,7 @@ class K8sRegressionRunner:
             "debug": True,
         }
 
-    def apply_active_active_values(self, values: dict[str, Any]) -> None:
+    def apply_active_active_values(self, values: dict[str, Any], profile: SimpleNamespace | None = None) -> None:
         if not self.active_active_enabled():
             return
         topology = values.setdefault("topology", {})
@@ -1762,7 +1762,8 @@ class K8sRegressionRunner:
         rtpengine_values = values.setdefault("rtpengine", {})
         rtpengine_values["replicas"] = max(1, int(getattr(self.args, "rtpengine_replicas", 2)))
         rtpengine_values["hostNetwork"] = False
-        values.setdefault("service", {})["sessionAffinity"] = "ClientIP"
+        service_affinity = str(getattr(profile, "k8s_service_session_affinity", "") or "ClientIP")
+        values.setdefault("service", {})["sessionAffinity"] = service_affinity
 
     def apply_profile_config(self, profile: SimpleNamespace, bundle: Path, phases: PhaseLog) -> None:
         started = time.monotonic()
@@ -1771,7 +1772,7 @@ class K8sRegressionRunner:
         advertised_ip = "$POD_IP"
         values.setdefault("playsbc", {})["config"] = self.profile_config(profile)
         values.setdefault("rtpengine", {})["enabled"] = profile_enables_rtpengine_deployment(profile, self.args)
-        self.apply_active_active_values(values)
+        self.apply_active_active_values(values, profile)
         if profile_uses_tls(profile):
             self.ensure_tls_secret(bundle)
             values.setdefault("tls", {})["enabled"] = True
@@ -2344,6 +2345,8 @@ class K8sRegressionRunner:
 
     def ladder_participants(self, profile: SimpleNamespace) -> tuple[str, ...]:
         profile_name = str(getattr(profile, "profile", ""))
+        playsbc_nodes = self.ha_ladder_playsbc_nodes(profile)
+        rtpengine_nodes = self.ha_ladder_rtpengine_nodes(profile)
         if "ai-rasa" in profile_name:
             if profile_name in {
                 "ai-rasa-rtpengine-speech",
@@ -2353,18 +2356,44 @@ class K8sRegressionRunner:
                 "ai-rasa-contact-center-sales-coqui",
             }:
                 stt_node, rasa_node, tts_node = ai_ladder_nodes(profile)
-                return ("Core SIPp A", "RTPengine", "PlaySBC", stt_node, rasa_node, tts_node)
-            participants = ["Core SIPp A", "PlaySBC"]
+                return ("Core SIPp A", rtpengine_nodes[0], playsbc_nodes[0], stt_node, rasa_node, tts_node)
+            participants = ["Core SIPp A", playsbc_nodes[0]]
             if profile_uses_rtpengine(profile):
-                participants.append("RTPengine")
+                participants.extend(rtpengine_nodes)
             participants.extend(ai_ladder_nodes(profile))
             return tuple(participants)
-        participants = ["Core SIPp A", "PlaySBC", "Peer SIPp B"]
+        participants = ["Core SIPp A"]
         if profile_name.startswith("ha-"):
-            participants.insert(1, "K8s HA")
+            participants.append("K8s HA")
+        participants.extend(playsbc_nodes)
         if profile_uses_rtpengine(profile):
-            participants.append("RTPengine")
+            participants.extend(rtpengine_nodes)
+        participants.append("Peer SIPp B")
         return tuple(participants)
+
+    def ha_ladder_playsbc_nodes(self, profile: SimpleNamespace) -> tuple[str, ...]:
+        if str(getattr(profile, "profile", "")).startswith("ha-"):
+            return ("PlaySBC-1", "PlaySBC-2")
+        return ("PlaySBC",)
+
+    def ha_ladder_rtpengine_nodes(self, profile: SimpleNamespace) -> tuple[str, ...]:
+        if str(getattr(profile, "profile", "")).startswith("ha-"):
+            return ("RTPengine-1", "RTPengine-2")
+        return ("RTPengine",)
+
+    def playsbc_node_for_ladder(self, profile: SimpleNamespace, index: int = 0) -> str:
+        nodes = self.ha_ladder_playsbc_nodes(profile)
+        return nodes[min(index, len(nodes) - 1)]
+
+    def rtpengine_node_for_ladder(self, profile: SimpleNamespace, index: int = 0) -> str:
+        nodes = self.ha_ladder_rtpengine_nodes(profile)
+        return nodes[min(index, len(nodes) - 1)]
+
+    def backup_playsbc_node_for_ladder(self, profile: SimpleNamespace) -> str:
+        return self.playsbc_node_for_ladder(profile, 1)
+
+    def backup_rtpengine_node_for_ladder(self, profile: SimpleNamespace) -> str:
+        return self.rtpengine_node_for_ladder(profile, 1)
 
     def render_unified_ladder(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> str:
         profile_name = str(getattr(profile, "profile", "k8s"))
@@ -2386,23 +2415,24 @@ class K8sRegressionRunner:
     def add_registration_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         if getattr(profile, "register_callee", True):
             auth_outcome = str(getattr(profile, "registration_auth_expected", "") or "")
-            self.add_registration_flow(flow, "Peer SIPp B", auth_outcome)
+            self.add_registration_flow(flow, profile, "Peer SIPp B", auth_outcome)
         if getattr(profile, "register_caller", False):
-            self.add_registration_flow(flow, "Core SIPp A", "")
+            self.add_registration_flow(flow, profile, "Core SIPp A", "")
 
-    def add_registration_flow(self, flow: B2BUAFlowLog, endpoint: str, auth_outcome: str) -> None:
+    def add_registration_flow(self, flow: B2BUAFlowLog, profile: SimpleNamespace, endpoint: str, auth_outcome: str) -> None:
+        sbc = self.playsbc_node_for_ladder(profile)
         if auth_outcome:
-            flow.sip(endpoint, "PlaySBC", "REGISTER")
-            flow.sip("PlaySBC", endpoint, "401 Unauthorized")
+            flow.sip(endpoint, sbc, "REGISTER")
+            flow.sip(sbc, endpoint, "401 Unauthorized")
             if auth_outcome == "success":
-                flow.sip(endpoint, "PlaySBC", "REGISTER + digest")
-                flow.sip("PlaySBC", endpoint, "200 OK")
+                flow.sip(endpoint, sbc, "REGISTER + digest")
+                flow.sip(sbc, endpoint, "200 OK")
             else:
-                flow.sip(endpoint, "PlaySBC", "REGISTER + bad digest")
-                flow.sip("PlaySBC", endpoint, "401 Unauthorized")
+                flow.sip(endpoint, sbc, "REGISTER + bad digest")
+                flow.sip(sbc, endpoint, "401 Unauthorized")
             return
-        flow.sip(endpoint, "PlaySBC", "REGISTER")
-        flow.sip("PlaySBC", endpoint, "200 OK")
+        flow.sip(endpoint, sbc, "REGISTER")
+        flow.sip(sbc, endpoint, "200 OK")
 
     def route_for_ladder(self, profile: SimpleNamespace) -> RouteResult:
         callee = str(getattr(profile, "callee", self.args.callee))
@@ -2415,26 +2445,29 @@ class K8sRegressionRunner:
         )
 
     def add_setup_only_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
+        sbc = self.playsbc_node_for_ladder(profile)
         if "options" in profile.profile:
-            flow.sip("Core SIPp A", "PlaySBC", "OPTIONS")
-            flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+            flow.sip("Core SIPp A", sbc, "OPTIONS")
+            flow.sip(sbc, "Core SIPp A", "200 OK")
         elif not flow.events:
-            flow.sip("Core SIPp A", "PlaySBC", "profile check")
-            flow.sip("PlaySBC", "Core SIPp A", "expected response")
+            flow.sip("Core SIPp A", sbc, "profile check")
+            flow.sip(sbc, "Core SIPp A", "expected response")
 
     def add_ai_gateway_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         stt_node, rasa_node, tts_node = ai_ladder_nodes(profile)
         profile_name = str(getattr(profile, "profile", ""))
-        flow.sip("Core SIPp A", "PlaySBC", "INVITE")
-        flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
-        flow.sip("PlaySBC", "Core SIPp A", "180 Ringing")
+        sbc = self.playsbc_node_for_ladder(profile)
+        rtpe = self.rtpengine_node_for_ladder(profile)
+        flow.sip("Core SIPp A", sbc, "INVITE")
+        flow.sip(sbc, "Core SIPp A", "100 Trying")
+        flow.sip(sbc, "Core SIPp A", "180 Ringing")
         if profile_uses_rtpengine(profile):
-            flow.sip("PlaySBC", "RTPengine", "OFFER")
-            flow.sip("RTPengine", "PlaySBC", "ok OFFER")
-            flow.sip("PlaySBC", "RTPengine", "ANSWER")
-            flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
-        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
-        flow.sip("Core SIPp A", "PlaySBC", "ACK")
+            flow.sip(sbc, rtpe, "OFFER")
+            flow.sip(rtpe, sbc, "ok OFFER")
+            flow.sip(sbc, rtpe, "ANSWER")
+            flow.sip(rtpe, sbc, "ok ANSWER")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
+        flow.sip("Core SIPp A", sbc, "ACK")
         speech_profiles = {
             "ai-rasa-rtpengine-speech",
             "ai-rasa-rtpengine-speech-whisper",
@@ -2444,47 +2477,47 @@ class K8sRegressionRunner:
         }
         sales_profiles = {"ai-rasa-contact-center-sales", "ai-rasa-contact-center-sales-coqui"}
         if profile_name in speech_profiles:
-            flow.sip("Core SIPp A", "RTPengine", "G.711 speech RTP")
-            flow.sip("RTPengine", "PlaySBC", "anchored RTP")
-            flow.sip("PlaySBC", stt_node, "decode WAV")
+            flow.sip("Core SIPp A", rtpe, "G.711 speech RTP")
+            flow.sip(rtpe, sbc, "anchored RTP")
+            flow.sip(sbc, stt_node, "decode WAV")
             if profile_name in sales_profiles:
                 transcript = "text: connect me to sales"
             elif profile_name == "ai-rasa-long-response-streaming":
                 transcript = "text: detailed support update"
             else:
                 transcript = "text: i need support"
-            flow.sip(stt_node, "PlaySBC", transcript)
+            flow.sip(stt_node, sbc, transcript)
         else:
-            flow.sip("PlaySBC", stt_node, "scripted STT")
-            flow.sip(stt_node, "PlaySBC", "intent text")
+            flow.sip(sbc, stt_node, "scripted STT")
+            flow.sip(stt_node, sbc, "intent text")
         if profile_uses_real_rasa(profile):
-            flow.sip("PlaySBC", rasa_node, "REST POST /webhook")
+            flow.sip(sbc, rasa_node, "REST POST /webhook")
             if profile_name in sales_profiles:
                 response_label = "REST 200 sales workflow"
             elif profile_name == "ai-rasa-long-response-streaming":
                 response_label = "REST 200 long response"
             else:
                 response_label = "REST 200 support"
-            flow.sip(rasa_node, "PlaySBC", response_label)
+            flow.sip(rasa_node, sbc, response_label)
         elif profile_name == "ai-rasa-rtpengine":
-            flow.sip("PlaySBC", rasa_node, "REST POST /mock")
-            flow.sip(rasa_node, "PlaySBC", "2 replies + transfer")
+            flow.sip(sbc, rasa_node, "REST POST /mock")
+            flow.sip(rasa_node, sbc, "2 replies + transfer")
         else:
-            flow.sip("PlaySBC", rasa_node, "REST POST /mock")
-            flow.sip(rasa_node, "PlaySBC", "single reply")
+            flow.sip(sbc, rasa_node, "REST POST /mock")
+            flow.sip(rasa_node, sbc, "single reply")
         if profile_name in speech_profiles:
             if profile_name == "ai-rasa-long-response-streaming":
-                flow.sip("PlaySBC", tts_node, "bot text chunks")
-                flow.sip(tts_node, "PlaySBC", "Piper WAV chunks")
+                flow.sip(sbc, tts_node, "bot text chunks")
+                flow.sip(tts_node, sbc, "Piper WAV chunks")
             else:
-                flow.sip("PlaySBC", tts_node, "bot text")
-                flow.sip(tts_node, "PlaySBC", f"{tts_node.replace(' TTS', '')} WAV")
-            flow.sip("PlaySBC", "RTPengine", "G.711 prompt RTP")
+                flow.sip(sbc, tts_node, "bot text")
+                flow.sip(tts_node, sbc, f"{tts_node.replace(' TTS', '')} WAV")
+            flow.sip(sbc, rtpe, "G.711 prompt RTP")
         else:
-            flow.sip("PlaySBC", tts_node, "text-only TTS")
-            flow.sip(tts_node, "PlaySBC", "no RTP prompt")
-        flow.sip("Core SIPp A", "PlaySBC", "BYE")
-        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
+            flow.sip(sbc, tts_node, "text-only TTS")
+            flow.sip(tts_node, sbc, "no RTP prompt")
+        flow.sip("Core SIPp A", sbc, "BYE")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
 
     def add_call_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         expect_failure = str(getattr(profile, "uac_scenario", "")).endswith("expect_488.xml") or profile.profile in {
@@ -2497,62 +2530,76 @@ class K8sRegressionRunner:
         cancel_flow = "cancel" in profile.profile
         outbound_failure = "failed-outbound" in profile.profile or "trunk-failure" in profile.profile
         action = getattr(profile, "k8s_ha_action", {}) or {}
+        sbc = self.playsbc_node_for_ladder(profile)
+        backup_sbc = self.backup_playsbc_node_for_ladder(profile)
+        rtpe = self.rtpengine_node_for_ladder(profile)
+        backup_rtpe = self.backup_rtpengine_node_for_ladder(profile)
         if isinstance(action, dict) and action.get("phase") == "precall" and "K8s HA" in flow.participants:
-            target = "RTPengine" if action.get("target") == "rtpengine" and "RTPengine" in flow.participants else "PlaySBC"
+            target = rtpe if action.get("target") == "rtpengine" and rtpe in flow.participants else sbc
             flow.sip("K8s HA", target, "pre-call pod delete")
-        flow.sip("Core SIPp A", "PlaySBC", "INVITE")
-        flow.sip("PlaySBC", "Core SIPp A", "100 Trying")
+            if target == sbc and backup_sbc in flow.participants:
+                sbc = backup_sbc
+            if target == rtpe and backup_rtpe in flow.participants:
+                rtpe = backup_rtpe
+        flow.sip("Core SIPp A", sbc, "INVITE")
+        flow.sip(sbc, "Core SIPp A", "100 Trying")
         if expect_failure:
             if profile_uses_rtpengine(profile):
-                flow.sip("PlaySBC", "RTPengine", "OFFER")
-                flow.sip("RTPengine", "PlaySBC", "failed OFFER")
-            flow.sip("PlaySBC", "Core SIPp A", "final rejection")
-            flow.sip("Core SIPp A", "PlaySBC", "ACK")
+                flow.sip(sbc, rtpe, "OFFER")
+                flow.sip(rtpe, sbc, "failed OFFER")
+            flow.sip(sbc, "Core SIPp A", "final rejection")
+            flow.sip("Core SIPp A", sbc, "ACK")
             return
         if profile_uses_rtpengine(profile):
-            flow.sip("PlaySBC", "RTPengine", "OFFER")
-            flow.sip("RTPengine", "PlaySBC", "ok OFFER")
-        flow.sip("PlaySBC", "Peer SIPp B", "INVITE")
-        flow.sip("Peer SIPp B", "PlaySBC", "100 Trying")
-        flow.sip("Peer SIPp B", "PlaySBC", "180 Ringing")
-        flow.sip("PlaySBC", "Core SIPp A", "180 Ringing")
+            flow.sip(sbc, rtpe, "OFFER")
+            flow.sip(rtpe, sbc, "ok OFFER")
+        flow.sip(sbc, "Peer SIPp B", "INVITE")
+        flow.sip("Peer SIPp B", sbc, "100 Trying")
+        flow.sip("Peer SIPp B", sbc, "180 Ringing")
+        flow.sip(sbc, "Core SIPp A", "180 Ringing")
         if cancel_flow:
-            flow.sip("Core SIPp A", "PlaySBC", "CANCEL")
-            flow.sip("PlaySBC", "Core SIPp A", "200 OK")
-            flow.sip("PlaySBC", "Peer SIPp B", "CANCEL")
-            flow.sip("Peer SIPp B", "PlaySBC", "200 OK")
-            flow.sip("Peer SIPp B", "PlaySBC", "487 Request Terminated")
-            flow.sip("PlaySBC", "Core SIPp A", "487 Request Terminated")
-            flow.sip("Core SIPp A", "PlaySBC", "ACK")
+            flow.sip("Core SIPp A", sbc, "CANCEL")
+            flow.sip(sbc, "Core SIPp A", "200 OK")
+            flow.sip(sbc, "Peer SIPp B", "CANCEL")
+            flow.sip("Peer SIPp B", sbc, "200 OK")
+            flow.sip("Peer SIPp B", sbc, "487 Request Terminated")
+            flow.sip(sbc, "Core SIPp A", "487 Request Terminated")
+            flow.sip("Core SIPp A", sbc, "ACK")
             return
         final_label = "503 Service Unavailable" if outbound_failure else "200 OK"
-        flow.sip("Peer SIPp B", "PlaySBC", final_label)
+        flow.sip("Peer SIPp B", sbc, final_label)
         if outbound_failure:
-            flow.sip("PlaySBC", "Core SIPp A", final_label)
-            flow.sip("Core SIPp A", "PlaySBC", "ACK")
+            flow.sip(sbc, "Core SIPp A", final_label)
+            flow.sip("Core SIPp A", sbc, "ACK")
             return
         if profile_uses_rtpengine(profile):
-            flow.sip("PlaySBC", "RTPengine", "ANSWER")
-            flow.sip("RTPengine", "PlaySBC", "ok ANSWER")
-        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
-        flow.sip("Core SIPp A", "PlaySBC", "ACK")
-        flow.sip("PlaySBC", "Peer SIPp B", "ACK")
+            flow.sip(sbc, rtpe, "ANSWER")
+            flow.sip(rtpe, sbc, "ok ANSWER")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
+        flow.sip("Core SIPp A", sbc, "ACK")
+        flow.sip(sbc, "Peer SIPp B", "ACK")
         if isinstance(action, dict) and action.get("phase") == "midcall" and "K8s HA" in flow.participants:
             if action.get("operation") == "drain-all":
-                flow.sip("K8s HA", "PlaySBC", "runtime drain all")
+                flow.sip("K8s HA", sbc, "runtime drain all")
             else:
-                target = "RTPengine" if action.get("target") == "rtpengine" and "RTPengine" in flow.participants else "PlaySBC"
+                target = rtpe if action.get("target") == "rtpengine" and rtpe in flow.participants else sbc
                 flow.sip("K8s HA", target, "mid-call pod delete")
-        flow.sip("Core SIPp A", "PlaySBC", "BYE")
-        flow.sip("PlaySBC", "Core SIPp A", "200 OK")
-        flow.sip("PlaySBC", "Peer SIPp B", "BYE")
-        flow.sip("Peer SIPp B", "PlaySBC", "200 OK")
+                if target == sbc and backup_sbc in flow.participants:
+                    flow.sip(backup_sbc, "Core SIPp A", "dialog restore")
+                    sbc = backup_sbc
+                if target == rtpe and backup_rtpe in flow.participants:
+                    flow.sip(sbc, backup_rtpe, "media recovery")
+                    rtpe = backup_rtpe
+        flow.sip("Core SIPp A", sbc, "BYE")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
+        flow.sip(sbc, "Peer SIPp B", "BYE")
+        flow.sip("Peer SIPp B", sbc, "200 OK")
         if isinstance(action, dict) and action.get("phase") == "postcall" and "K8s HA" in flow.participants:
-            target = "RTPengine" if action.get("target") == "rtpengine" and "RTPengine" in flow.participants else "PlaySBC"
+            target = rtpe if action.get("target") == "rtpengine" and rtpe in flow.participants else sbc
             flow.sip("K8s HA", target, "post-call pod delete")
         if getattr(profile, "k8s_verify_drain_reject", False) and "K8s HA" in flow.participants:
-            flow.sip("Core SIPp A", "PlaySBC", "new INVITE while draining")
-            flow.sip("PlaySBC", "Core SIPp A", "503 Node Draining")
+            flow.sip("Core SIPp A", sbc, "new INVITE while draining")
+            flow.sip(sbc, "Core SIPp A", "503 Node Draining")
 
     def profile_options(self, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
         setup_started = time.monotonic()
