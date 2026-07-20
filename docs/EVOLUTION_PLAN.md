@@ -1,6 +1,10 @@
 # PlaySBC Evolution Plan
 
-PlaySBC is an enterprise-style SIP/RTP experimentation lab, not a production-certified SBC.
+PlaySBC is an enterprise-style SIP/RTP experimentation lab today, not a production-certified SBC yet.
+
+The long-term mission is serious: evolve PlaySBC from the current `v1.4.0` lab-grade active-active SBC into a public-cloud production SBC line over future major releases, with Azure as the first priority cloud and AWS next. The target future state is a PlaySBC `v10.x.x` generation that can be validated for large-scale SIP gateway deployments such as hundreds of thousands of registered devices and thousands of concurrent calls.
+
+That production path must be earned with benchmarks, security hardening, carrier-grade HA behavior, long soak runs, and cloud networking proof. Until those gates are met, PlaySBC should be described as a lab and regression platform, not a replacement for certified commercial SBCs.
 
 ## Implemented
 
@@ -57,6 +61,29 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Optional Multus chart wiring: core `172.28.0.0/24` and peer `192.168.28.0/24` NetworkAttachmentDefinition templates and pod annotations are available, while kind remains logical dual-realm until Multus CRDs are installed
 
 ## Next
+
+### Production Cloud SBC Track
+
+Target direction:
+
+- Azure-first deployment model for AKS, Azure Load Balancer, static public IPs, SIP UDP/TCP/TLS, RTP/SRTP media port ranges, private networking, firewall rules, and observability.
+- AWS deployment model after Azure, covering EKS, NLB, static addresses, security groups, and media-port exposure.
+- Scale target roadmap: 10k, 50k, 100k, then 300k registered devices; 250, 500, 1000, then 2500 concurrent calls.
+- Replace SQLite lab HA state with production-grade shared state such as PostgreSQL, Redis, or another replicated store.
+- Harden registrar, dialog, transaction, CDR, audit, and billing-grade event persistence.
+- Add production SIP load-balancer and affinity model for UDP/TCP/TLS with health-based steering and controlled node draining.
+- Add SIP flood, malformed-message, registration storm, OPTIONS storm, INVITE burst, and overload-control protection.
+- Add TLS certificate lifecycle, secret rotation, SRTP/DTLS-SRTP hardening, and security policy controls.
+- Add multi-AZ failure testing, pod/node/AZ failure simulation, and long-running soak jobs measured in days.
+- Add capacity dashboards, alerting, release gates, and performance baselines for CPU, memory, packets per second, RTP sessions, registrations, dialogs, and call attempts per second.
+
+Production-readiness gates:
+
+- No critical SIP/RTP/HA caveats open for the target release line.
+- Full Kubernetes regression passes on the cloud reference architecture.
+- Load and soak profiles pass with packet, SIP, media, RTCP, CDR, and observability evidence.
+- Security scans, dependency review, container scan, config scan, fuzz tests, and negative SIP tests pass.
+- Documented operating model exists for deploy, upgrade, rollback, scale-out, drain, failover, backup, restore, and incident triage.
 
 ### Observability Lab
 
