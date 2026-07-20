@@ -72,16 +72,16 @@ kubectl config use-context kind-playsbc
 kubectl config set-context --current --namespace=playsbc
 
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.3.2/playsbc-1.3.2.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.3.3/playsbc-1.3.3.tgz \
   --namespace playsbc \
   --create-namespace \
   -f configs/kubernetes/active-active-values.yaml \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.3.2 \
+  --set-string image.tag=1.3.3 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.3.2 \
+  --set-string rtpengine.image.tag=1.3.3 \
   --set rtpengine.image.pullPolicy=Always \
   --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
@@ -98,9 +98,9 @@ kubectl -n playsbc rollout status deployment/playsbc-playsbc-grafana --timeout=1
 
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.3.2 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.3.2 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.3.2 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.3.3 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.3.3 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.3.3 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image \
@@ -124,16 +124,16 @@ kubectl -n playsbc port-forward svc/playsbc-playsbc-grafana 3000:3000
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.3.2/playsbc-1.3.2.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.3.3/playsbc-1.3.3.tgz \
   --namespace playsbc \
   --create-namespace \
   -f configs/kubernetes/active-active-values.yaml \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.3.2 \
+  --set-string image.tag=1.3.3 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.3.2 \
+  --set-string rtpengine.image.tag=1.3.3 \
   --set rtpengine.image.pullPolicy=Always \
   --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
@@ -223,9 +223,9 @@ Use published release images:
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.3.2 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.3.2 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.3.2 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.3.3 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.3.3 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.3.3 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image \
