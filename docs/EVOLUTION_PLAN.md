@@ -51,6 +51,8 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Signalling, media, auth, routing, negative, soak, and 5 cps / 60-second CHT profiles
 - Kubernetes Helm lab with health probes, Secret-backed SIP users, RTPengine pairing, kind/minikube values, and a dialog-affinity experiment
 - HA regression profiles: `ha-shared-state-rtpengine`, `ha-options-health-recovery`, and `ha-node-draining`
+- Kubernetes active-active lab mode: PlaySBC runs as a two-replica StatefulSet, RTPengine runs as a paired two-replica StatefulSet, `$POD_NAME` becomes the HA node identity, shared registrar/dialog state is mounted from a PVC, and all Kubernetes regression profiles default through this topology
+- Optional Multus chart wiring: core `172.28.0.0/24` and peer `192.168.28.0/24` NetworkAttachmentDefinition templates and pod annotations are available, while kind remains logical dual-realm until Multus CRDs are installed
 
 ## Next
 
@@ -66,9 +68,8 @@ SIP caller -> PlaySBC AI route -> RTP/RTPengine media input -> STT/intent adapte
 - Full B2BUA mid-call failover: checkpoint outbound leg state, restore ACK/BYE/CANCEL/re-INVITE handling on a sibling node, and prove it by killing `playsbc-a` during an active dialog.
 - RTPengine media-session migration or continuity design: either shared RTPengine pair ownership, session re-homing, or deterministic media teardown/re-establish after a PlaySBC/RTPengine pair loss.
 - Multi-node chaos/failover regression that kills one PlaySBC/RTPengine pair during active SIP/RTP traffic.
-- Kubernetes real dual-realm networking: replace the current logical core/peer pod model with Multus or another multi-network CNI so SIPp, PlaySBC, and RTPengine can use separate Kubernetes media/signalling interfaces such as core `172.x` and peer `192.x`.
-- Full active-active Kubernetes HA topology for all regression profiles: run every profile through multiple PlaySBC pods and paired RTPengine nodes behind the lab load-balancing/drain model, not only the dedicated HA profiles.
-- Optional StatefulSet lab mode for scaled pods: provide stable identities such as `playsbc-0`/`playsbc-1` and `rtpengine-0`/`rtpengine-1` for deterministic PlaySBC-to-RTPengine pairing, ordered rollout tests, and fixed-node HA experiments.
+- Kubernetes real dual-realm networking: install Multus or another multi-network CNI so SIPp, PlaySBC, and RTPengine can use real secondary interfaces, not only logical core/peer evidence over normal pod networking.
+- External load balancer model for active-active SIP affinity, health-based draining, and per-node traffic steering.
 - External shared state backend option such as Redis/PostgreSQL after the SQLite lab store proves the behavior
 
 ### AI Voice Gateway

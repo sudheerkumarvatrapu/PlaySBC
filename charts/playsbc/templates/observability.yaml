@@ -268,6 +268,48 @@ data:
             {"expr": "sum by (from_realm,to_realm) (playsbc_rtpengine_media_sessions_active{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }} active"},
             {"expr": "sum by (from_realm,to_realm) (increase(playsbc_rtpengine_control_failures_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }} failures"}
           ]
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "PlaySBC Active Calls By Node",
+          "description": "Active calls per PlaySBC replica. In active-active mode the node label maps to the StatefulSet pod identity.",
+          "gridPos": {"x": 0, "y": 30, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [
+            {"expr": "sum by (node,from_realm,to_realm) (playsbc_active_calls{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} {{ "{{" }}from_realm{{ "}}" }} -> {{ "{{" }}to_realm{{ "}}" }}"}
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "HA Shared Registrar/Dialog State",
+          "description": "Shared state evidence used by the active-active lab: registrar rows, dialog rows, answered dialog rows, and restore attempts.",
+          "gridPos": {"x": 12, "y": 30, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+          "targets": [
+            {"expr": "sum by (cluster,node) (playsbc_ha_shared_registrations{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} shared registrations"},
+            {"expr": "sum by (cluster,node) (playsbc_ha_shared_dialogs{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} shared dialogs"},
+            {"expr": "sum by (cluster,node) (playsbc_ha_shared_answered_dialogs{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} answered dialogs"},
+            {"expr": "sum by (cluster,node) (increase(playsbc_ha_dialog_restores_total{job=~\"${job:regex}\"}[$__range]))", "legendFormat": "{{ "{{" }}node{{ "}}" }} restores"}
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "HA Node State",
+          "description": "Configured node count and drain state. Red is reserved for draining nodes.",
+          "gridPos": {"x": 0, "y": 37, "w": 24, "h": 6},
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}},
+            "overrides": [
+              {"matcher": {"id": "byRegexp", "options": ".*draining.*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+            ]
+          },
+          "targets": [
+            {"expr": "sum by (cluster,node) (playsbc_ha_configured_nodes{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} configured nodes"},
+            {"expr": "sum by (cluster,node) (playsbc_ha_node_draining{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} draining"}
+          ]
         }
       ]
     }

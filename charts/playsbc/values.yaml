@@ -1,5 +1,62 @@
 replicaCount: 1
 
+topology:
+  model: core-peer-active-active
+  activeActive:
+    enabled: false
+    useStatefulSet: true
+    playsbcReplicas: 2
+    rtpengineReplicas: 2
+    clusterId: playsbc-aa-lab
+    nodePrefix: playsbc
+    loadBalancingPolicy: external-lb
+    sharedState:
+      enabled: true
+      mountPath: /var/lib/playsbc
+      fileName: ha-state.sqlite3
+      accessModes:
+        - ReadWriteOnce
+      size: 1Gi
+      storageClassName: ""
+    rtpenginePairing:
+      enabled: true
+      serviceName: ""
+      headlessServiceName: ""
+  realms:
+    core:
+      name: core
+      cidr: 172.28.0.0/24
+      logicalGateway: 172.28.0.1
+      interface: net-core
+    peer:
+      name: peer
+      cidr: 192.168.28.0/24
+      logicalGateway: 192.168.28.1
+      interface: net-peer
+  multus:
+    enabled: false
+    enforce: false
+    createNetworkAttachmentDefinitions: false
+    namespace: ""
+    coreNetwork:
+      name: playsbc-core-realm
+      type: bridge
+      bridge: playsbc-core0
+      subnet: 172.28.0.0/24
+      rangeStart: 172.28.0.20
+      rangeEnd: 172.28.0.220
+      gateway: 172.28.0.1
+      interface: net-core
+    peerNetwork:
+      name: playsbc-peer-realm
+      type: bridge
+      bridge: playsbc-peer0
+      subnet: 192.168.28.0/24
+      rangeStart: 192.168.28.20
+      rangeEnd: 192.168.28.220
+      gateway: 192.168.28.1
+      interface: net-peer
+
 image:
   # For direct deployments after image publishing, use:
   # repository: ghcr.io/sudheerkumarvatrapu/playsbc
@@ -88,6 +145,7 @@ rtpengine:
   controlPort: 2223
   rtpMin: 30000
   rtpMax: 32000
+  replicas: 1
   hostNetwork: true
   sessionAffinity: ClientIP
   resources: {}

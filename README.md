@@ -19,6 +19,8 @@
 
 Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, HA state experiments, AI voice gateway, observability, and SIPp regression across core and peer realms.
 
+Kubernetes regression now defaults to an active-active PlaySBC/RTPengine lab topology with logical core and peer realms; Multus wiring is available when a cluster has multi-network CNI installed.
+
 [Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md) | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) | [Observability](docs/OBSERVABILITY.md) | [Kubernetes lab](docs/KUBERNETES_LOCAL.md) | [Kubernetes Helm runbook](docs/KUBERNETES_HELM_RUNBOOK.md)
 
 ## Status

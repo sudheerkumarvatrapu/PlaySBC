@@ -1,14 +1,38 @@
 {{- if .Values.rtpengine.enabled }}
+{{- $topology := .Values.topology | default dict -}}
+{{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
+{{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
+{{- $useStatefulSet := and $activeActive (get $activeActiveCfg "useStatefulSet" | default true) -}}
+{{- $replicas := int (get .Values.rtpengine "replicas" | default 1) -}}
+{{- if $activeActive -}}
+{{- $replicas = int (get $activeActiveCfg "rtpengineReplicas" | default 2) -}}
+{{- end -}}
+{{- if lt $replicas 1 -}}
+{{- $replicas = 1 -}}
+{{- end -}}
+{{- $multus := get $topology "multus" | default dict -}}
+{{- $multusEnabled := get $multus "enabled" | default false -}}
+{{- $coreNetwork := get $multus "coreNetwork" | default dict -}}
+{{- $peerNetwork := get $multus "peerNetwork" | default dict -}}
+{{- $multusNamespace := get $multus "namespace" | default .Release.Namespace -}}
+{{- $coreNetworkName := get $coreNetwork "name" | default "playsbc-core-realm" -}}
+{{- $peerNetworkName := get $peerNetwork "name" | default "playsbc-peer-realm" -}}
+{{- $coreInterface := get $coreNetwork "interface" | default "net-core" -}}
+{{- $peerInterface := get $peerNetwork "interface" | default "net-peer" -}}
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ if $useStatefulSet }}StatefulSet{{ else }}Deployment{{ end }}
 metadata:
   name: {{ include "playsbc.fullname" . }}-rtpengine
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
-  replicas: 1
+{{- if $useStatefulSet }}
+  serviceName: {{ include "playsbc.fullname" . }}-rtpengine-headless
+{{- else }}
   strategy:
     type: Recreate
+{{- end }}
+  replicas: {{ $replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "playsbc.name" . }}-rtpengine
@@ -18,6 +42,16 @@ spec:
       labels:
         app.kubernetes.io/name: {{ include "playsbc.name" . }}-rtpengine
         app.kubernetes.io/instance: {{ .Release.Name }}
+        playsbc.io/topology: {{ get $topology "model" | default "single-realm" | quote }}
+{{- if or $multusEnabled $activeActive }}
+      annotations:
+{{- if $activeActive }}
+        playsbc.io/active-active: "true"
+{{- end }}
+{{- if $multusEnabled }}
+        k8s.v1.cni.cncf.io/networks: '[{"name":"{{ $coreNetworkName }}","namespace":"{{ $multusNamespace }}","interface":"{{ $coreInterface }}"},{"name":"{{ $peerNetworkName }}","namespace":"{{ $multusNamespace }}","interface":"{{ $peerInterface }}"}]'
+{{- end }}
+{{- end }}
     spec:
       hostNetwork: {{ .Values.rtpengine.hostNetwork }}
       containers:
@@ -28,7 +62,11 @@ spec:
           args:
             - >-
               exec rtpengine --foreground --log-stderr
+{{- if .Values.rtpengine.hostNetwork }}
               --interface=default/${NODE_IP}
+{{- else }}
+              --interface=default/${POD_IP}
+{{- end }}
               --listen-ng=0.0.0.0:{{ .Values.rtpengine.controlPort }}
               --port-min={{ .Values.rtpengine.rtpMin }}
               --port-max={{ .Values.rtpengine.rtpMax }}
@@ -38,6 +76,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - name: ng-control
               containerPort: {{ .Values.rtpengine.controlPort }}
@@ -61,4 +107,24 @@ spec:
       port: {{ .Values.rtpengine.controlPort }}
       targetPort: ng-control
       protocol: UDP
+{{- if $useStatefulSet }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}-rtpengine-headless
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}-rtpengine
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: ng-control
+      port: {{ .Values.rtpengine.controlPort }}
+      targetPort: ng-control
+      protocol: UDP
+{{- end }}
 {{- end }}

@@ -5155,15 +5155,36 @@ def coerce_config_value(key: str, value: Any) -> Any:
     return value
 
 
-def resolve_runtime_advertised_ip(value: str) -> str:
-    if value in {"$POD_IP", "${POD_IP}", "pod-ip"}:
+def resolve_runtime_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: resolve_runtime_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_runtime_value(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    if value == "pod-ip":
         return os.environ.get("POD_IP", "")
+    replacements = {
+        "$POD_IP": os.environ.get("POD_IP", ""),
+        "${POD_IP}": os.environ.get("POD_IP", ""),
+        "$POD_NAME": os.environ.get("POD_NAME", ""),
+        "${POD_NAME}": os.environ.get("POD_NAME", ""),
+        "$POD_NAMESPACE": os.environ.get("POD_NAMESPACE", ""),
+        "${POD_NAMESPACE}": os.environ.get("POD_NAMESPACE", ""),
+        "$NODE_NAME": os.environ.get("NODE_NAME", ""),
+        "${NODE_NAME}": os.environ.get("NODE_NAME", ""),
+    }
+    for token, replacement in replacements.items():
+        value = value.replace(token, replacement)
     return value
 
 
 def resolve_runtime_config(config: ServerConfig) -> ServerConfig:
-    config.sip_advertised_ip = resolve_runtime_advertised_ip(config.sip_advertised_ip)
-    config.b2bua_advertised_ip = resolve_runtime_advertised_ip(config.b2bua_advertised_ip)
+    config.sip_advertised_ip = str(resolve_runtime_value(config.sip_advertised_ip))
+    config.b2bua_advertised_ip = str(resolve_runtime_value(config.b2bua_advertised_ip))
+    config.rtpengine_url = str(resolve_runtime_value(config.rtpengine_url))
+    config.ha = resolve_runtime_value(config.ha)
+    config.ai_voice_gateway = resolve_runtime_value(config.ai_voice_gateway)
     return config
 
 

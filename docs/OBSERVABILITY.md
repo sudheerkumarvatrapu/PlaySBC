@@ -12,6 +12,7 @@ PlaySBC /metrics -> Prometheus -> Grafana
 - Prometheus pod scraping PlaySBC every `2s` by default for short SIPp lab calls.
 - Grafana pod with a PlaySBC dashboard.
 - Core/peer labels for trunk and RTPengine media views.
+- Active-active node panels for PlaySBC replicas, shared registrar/dialog state, and drain status.
 - SIP request and response counters by realm, direction, method, status, and status class.
 - Negotiated media codec and transcoding counters, for example `PCMU -> PCMA`.
 - AI Voice Gateway counters for STT, Rasa, TTS, bot actions, and RTP prompts.
@@ -94,6 +95,9 @@ sum by (backend,inbound_codec,outbound_codec,transcoding) (increase(playsbc_medi
 sum by (backend,inbound_codec,outbound_codec) (increase(playsbc_transcoding_sessions_total[15m]))
 sum by (from_realm,to_realm) (playsbc_rtpengine_media_sessions_active)
 sum(increase(playsbc_rtpengine_control_failures_total[15m]))
+sum by (cluster,node) (playsbc_ha_shared_registrations)
+sum by (cluster,node) (playsbc_ha_shared_dialogs)
+sum by (cluster,node) (playsbc_ha_node_draining)
 sum by (bot,stt,tts) (increase(playsbc_ai_voice_turns_total[15m]))
 sum(increase(playsbc_ai_rasa_failures_total[15m]))
 ```

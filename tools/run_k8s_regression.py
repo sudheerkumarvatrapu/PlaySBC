@@ -307,6 +307,16 @@ def format_config_value(value: object, profile: SimpleNamespace) -> object:
     return rendered
 
 
+def deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 def route_policies_for(profile: SimpleNamespace) -> list[dict[str, object]]:
     policies = getattr(profile, "route_policies", None) or [
         {"name": "registered-endpoints", "match": "*", "target": "registration", "priority": 10}
@@ -666,6 +676,49 @@ class K8sRegressionRunner:
         self.original_values: Optional[dict[str, Any]] = None
         self.tls_secret_prepared = False
 
+    def active_active_enabled(self) -> bool:
+        return bool(getattr(self.args, "active_active_topology", True))
+
+    def playsbc_workload_ref(self) -> str:
+        kind = "statefulset" if self.active_active_enabled() else "deployment"
+        return f"{kind}/{self.args.deployment}"
+
+    def rtpengine_workload_ref(self) -> str:
+        kind = "statefulset" if self.active_active_enabled() else "deployment"
+        return f"{kind}/{self.args.rtpengine_deployment}"
+
+    def rollout_status(self, workload_ref: str, *, check: bool = True) -> CommandResult:
+        result = self.kubectl(
+            "rollout",
+            "status",
+            workload_ref,
+            f"--timeout={self.args.rollout_timeout}s",
+            check=False,
+            timeout=self.args.rollout_timeout + 30,
+        )
+        if result.returncode == 0 or not workload_ref.startswith("statefulset/"):
+            if check and result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+            return result
+        detail = (result.stderr + result.stdout).lower()
+        if "not found" not in detail:
+            if check:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+            return result
+        fallback = f"deployment/{workload_ref.split('/', 1)[1]}"
+        fallback_result = self.kubectl(
+            "rollout",
+            "status",
+            fallback,
+            f"--timeout={self.args.rollout_timeout}s",
+            check=check,
+            timeout=self.args.rollout_timeout + 30,
+        )
+        return fallback_result
+
+    def rollout_restart(self, workload_ref: str) -> CommandResult:
+        return self.kubectl("rollout", "restart", workload_ref, check=True)
+
     def kubectl(self, *parts: str, timeout: Optional[int] = None, input_text: Optional[str] = None, check: bool = False) -> CommandResult:
         command = [self.args.kubectl_bin]
         if self.args.namespace:
@@ -722,13 +775,7 @@ class K8sRegressionRunner:
         (report_dir / f"{self.run_id}-helm-restore.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         if result.returncode != 0:
             return f"Helm restore failed: {result.stderr.strip() or result.stdout.strip()}"
-        rollout = self.kubectl(
-            "rollout",
-            "status",
-            f"deployment/{self.args.deployment}",
-            f"--timeout={self.args.rollout_timeout}s",
-            check=False,
-        )
+        rollout = self.rollout_status(self.playsbc_workload_ref(), check=False)
         (report_dir / f"{self.run_id}-helm-restore-rollout.log").write_text(
             rollout.stdout + rollout.stderr,
             encoding="utf-8",
@@ -969,11 +1016,26 @@ class K8sRegressionRunner:
         commands = {
             "kubectl-pods.log": ["get", "pods", "-o", "wide"],
             "kubectl-services.log": ["get", "svc", "-o", "wide"],
+            "kubectl-statefulsets.log": ["get", "statefulsets", "-o", "wide"],
             "kubectl-events.log": ["get", "events", "--sort-by=.lastTimestamp"],
-            "playsbc.log": ["logs", f"deployment/{self.args.deployment}", f"--tail={self.args.deployment_log_tail}"],
+            "playsbc.log": [
+                "logs",
+                "-l",
+                f"app.kubernetes.io/name=playsbc,app.kubernetes.io/instance={self.args.helm_release}",
+                "--all-containers=true",
+                "--prefix=true",
+                f"--tail={self.args.deployment_log_tail}",
+            ],
         }
         if include_rtpengine:
-            commands["rtpengine.log"] = ["logs", f"deployment/{self.args.rtpengine_deployment}", f"--tail={self.args.deployment_log_tail}"]
+            commands["rtpengine.log"] = [
+                "logs",
+                "-l",
+                f"app.kubernetes.io/name=playsbc-rtpengine,app.kubernetes.io/instance={self.args.helm_release}",
+                "--all-containers=true",
+                "--prefix=true",
+                f"--tail={self.args.deployment_log_tail}",
+            ]
         else:
             (bundle / "rtpengine.log").write_text(
                 f"RTPengine evidence not applicable for profile={profile_name}; deployment not expected for this profile.\n",
@@ -1392,6 +1454,45 @@ class K8sRegressionRunner:
         self.write_text_to_pod(uac_pod, register_path, rendered_scenario(profile, "register"))
         return uac_path, uas_path, register_path
 
+    def active_active_ha_config(self, profile: SimpleNamespace) -> dict[str, Any]:
+        profile_ha = format_config_value(getattr(profile, "ha", {}) or {}, profile)
+        profile_ha = profile_ha if isinstance(profile_ha, dict) else {}
+        if not self.active_active_enabled():
+            return profile_ha
+        playsbc_replicas = max(1, int(getattr(self.args, "playsbc_replicas", 2)))
+        rtpengine_replicas = max(1, int(getattr(self.args, "rtpengine_replicas", 2)))
+        rtpengine_headless = f"{self.args.rtpengine_deployment}-headless"
+        nodes = [
+            {"node_id": f"{self.args.deployment}-{index}", "state": "active", "weight": 100}
+            for index in range(playsbc_replicas)
+        ]
+        rtpengine_pairs = [
+            {
+                "name": f"rtpengine-pair-{index % rtpengine_replicas}",
+                "node_id": f"{self.args.deployment}-{index}",
+                "rtpengine_url": (
+                    f"udp://{self.args.rtpengine_deployment}-{index % rtpengine_replicas}."
+                    f"{rtpengine_headless}:2223"
+                ),
+            }
+            for index in range(playsbc_replicas)
+        ]
+        default_ha = {
+            "enabled": True,
+            "cluster_id": getattr(self.args, "ha_cluster_id", "playsbc-aa-lab"),
+            "node_id": "$POD_NAME",
+            "shared_state_path": getattr(self.args, "ha_shared_state_path", "/var/lib/playsbc/ha-state.sqlite3"),
+            "nodes": nodes,
+            "load_balancing": {"enabled": True, "policy": "external-lb", "drain_new_calls": True},
+            "failover": {
+                "dialog_restore": True,
+                "mid_call_failover": "dialog-restore-only",
+                "rtpengine_session_migration": "planned",
+            },
+            "rtpengine_pairs": rtpengine_pairs,
+        }
+        return deep_merge_dict(default_ha, profile_ha)
+
     def profile_config(self, profile: SimpleNamespace) -> dict[str, object]:
         advertised_ip = "$POD_IP"
         return {
@@ -1429,10 +1530,51 @@ class K8sRegressionRunner:
             "rtpengine_dtls": getattr(profile, "rtpengine_dtls", ""),
             "media_quality": getattr(profile, "media_quality", {}),
             "ai_voice_gateway": getattr(profile, "ai_voice_gateway", {}),
-            "ha": format_config_value(getattr(profile, "ha", {}), profile),
+            "ha": self.active_active_ha_config(profile),
             "reject_unknown_routes": getattr(profile, "reject_unknown_routes", False),
             "debug": True,
         }
+
+    def apply_active_active_values(self, values: dict[str, Any]) -> None:
+        if not self.active_active_enabled():
+            return
+        topology = values.setdefault("topology", {})
+        topology["model"] = "core-peer-active-active"
+        active_active = topology.setdefault("activeActive", {})
+        active_active["enabled"] = True
+        active_active["useStatefulSet"] = True
+        active_active["playsbcReplicas"] = max(1, int(getattr(self.args, "playsbc_replicas", 2)))
+        active_active["rtpengineReplicas"] = max(1, int(getattr(self.args, "rtpengine_replicas", 2)))
+        active_active["clusterId"] = getattr(self.args, "ha_cluster_id", "playsbc-aa-lab")
+        active_active.setdefault("loadBalancingPolicy", "external-lb")
+        active_active.setdefault(
+            "sharedState",
+            {
+                "enabled": True,
+                "mountPath": "/var/lib/playsbc",
+                "fileName": "ha-state.sqlite3",
+                "accessModes": ["ReadWriteOnce"],
+                "size": "1Gi",
+                "storageClassName": "",
+            },
+        )
+        active_active.setdefault("rtpenginePairing", {"enabled": True})
+        topology.setdefault(
+            "realms",
+            {
+                "core": {"name": "core", "cidr": "172.28.0.0/24", "interface": "net-core"},
+                "peer": {"name": "peer", "cidr": "192.168.28.0/24", "interface": "net-peer"},
+            },
+        )
+        multus = topology.setdefault("multus", {})
+        multus["enabled"] = bool(getattr(self.args, "multus_enabled", False))
+        multus["enforce"] = bool(getattr(self.args, "require_multus", False))
+        if getattr(self.args, "multus_enabled", False):
+            multus.setdefault("createNetworkAttachmentDefinitions", False)
+        rtpengine_values = values.setdefault("rtpengine", {})
+        rtpengine_values["replicas"] = max(1, int(getattr(self.args, "rtpengine_replicas", 2)))
+        rtpengine_values["hostNetwork"] = False
+        values.setdefault("service", {})["sessionAffinity"] = "ClientIP"
 
     def apply_profile_config(self, profile: SimpleNamespace, bundle: Path, phases: PhaseLog) -> None:
         started = time.monotonic()
@@ -1441,6 +1583,7 @@ class K8sRegressionRunner:
         advertised_ip = "$POD_IP"
         values.setdefault("playsbc", {})["config"] = self.profile_config(profile)
         values.setdefault("rtpengine", {})["enabled"] = profile_enables_rtpengine_deployment(profile, self.args)
+        self.apply_active_active_values(values)
         if profile_uses_tls(profile):
             self.ensure_tls_secret(bundle)
             values.setdefault("tls", {})["enabled"] = True
@@ -1473,12 +1616,18 @@ class K8sRegressionRunner:
         )
         helm_seconds = time.monotonic() - helm_started
         self.write_log(bundle, "log.platform", "HELM PROFILE UPGRADE", result.stdout + result.stderr)
-        restart = self.kubectl("rollout", "restart", f"deployment/{self.args.deployment}", check=True)
+        restart = self.rollout_restart(self.playsbc_workload_ref())
         self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT RESTART", restart.stdout + restart.stderr)
         rollout_started = time.monotonic()
-        rollout = self.kubectl("rollout", "status", f"deployment/{self.args.deployment}", f"--timeout={self.args.rollout_timeout}s", check=True)
+        rollout = self.rollout_status(self.playsbc_workload_ref(), check=True)
         rollout_seconds = time.monotonic() - rollout_started
         self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT READY", rollout.stdout + rollout.stderr)
+        rtpengine_detail = "not-required"
+        if profile_enables_rtpengine_deployment(profile, self.args):
+            rtp_started = time.monotonic()
+            rtp_rollout = self.rollout_status(self.rtpengine_workload_ref(), check=True)
+            rtpengine_detail = f"{self.rtpengine_workload_ref()} ready in {time.monotonic() - rtp_started:.3f}s"
+            self.write_log(bundle, "log.platform", "RTPENGINE ROLLOUT READY", rtp_rollout.stdout + rtp_rollout.stderr)
         rasa_detail = "not-required"
         if profile_uses_real_rasa(profile):
             rasa_deployment = f"{self.args.service}-rasa"
@@ -1501,7 +1650,9 @@ class K8sRegressionRunner:
                 f"media_backend={getattr(profile, 'media_backend', 'internal')}; "
                 f"advertised_ip={advertised_ip}; tls_secret={self.args.tls_secret_name if profile_uses_tls(profile) else 'not-required'}; "
                 f"helm_upgrade_seconds={helm_seconds:.3f}; rollout_seconds={rollout_seconds:.3f}; "
-                f"rasa={rasa_detail}; core_realm=pod-label:core peer_realm=pod-label:peer."
+                f"rtpengine={rtpengine_detail}; rasa={rasa_detail}; "
+                f"topology={'active-active' if self.active_active_enabled() else 'single-workload'}; "
+                f"core_realm=172.28.0.0/24 peer_realm=192.168.28.0/24 multus={'enabled' if getattr(self.args, 'multus_enabled', False) else 'logical'}."
             ),
         )
 
@@ -1813,8 +1964,10 @@ class K8sRegressionRunner:
             setup_started,
             (
                 f"Started Kubernetes dual-realm SIPp pods: core={core_pod} ip={core_ip}, "
-                f"peer={peer_pod} ip={peer_ip}. The realms are logical Kubernetes pods/labels, "
-                "not Multus-backed secondary subnets."
+                f"peer={peer_pod} ip={peer_ip}. PlaySBC topology="
+                f"{'active-active StatefulSet' if self.active_active_enabled() else 'single workload'}; "
+                f"RTPengine pairing={'enabled' if profile_enables_rtpengine_deployment(profile, self.args) else 'not-required'}; "
+                f"Multus={'enabled' if getattr(self.args, 'multus_enabled', False) else 'logical-dual-realm'}."
             ),
         )
 
@@ -2366,6 +2519,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa voice and chat/NLU profiles")
     parser.add_argument("--list-profiles", action="store_true")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--active-active-topology", action=argparse.BooleanOptionalAction, default=True, help="Run Kubernetes profiles with active-active PlaySBC/RTPengine topology")
+    parser.add_argument("--playsbc-replicas", type=int, default=2)
+    parser.add_argument("--rtpengine-replicas", type=int, default=2)
+    parser.add_argument("--ha-cluster-id", default="playsbc-aa-lab")
+    parser.add_argument("--ha-shared-state-path", default="/var/lib/playsbc/ha-state.sqlite3")
+    parser.add_argument("--multus-enabled", action=argparse.BooleanOptionalAction, default=False, help="Annotate PlaySBC/RTPengine pods for Multus core/peer realm networks")
+    parser.add_argument("--require-multus", action="store_true", help="Record Multus as mandatory in rendered Helm values; use only after installing Multus CRDs")
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--report-dir", default=DEFAULT_REPORT_DIR)
     parser.add_argument("--kubectl-bin", default="kubectl")
@@ -2397,6 +2557,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             args.report_dir = RASA_REPORT_DIR
         if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
             args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
+    if args.playsbc_replicas < 1:
+        raise SystemExit("--playsbc-replicas must be at least 1")
+    if args.rtpengine_replicas < 1:
+        raise SystemExit("--rtpengine-replicas must be at least 1")
+    if args.require_multus and not args.multus_enabled:
+        raise SystemExit("--require-multus also requires --multus-enabled")
     return args
 
 

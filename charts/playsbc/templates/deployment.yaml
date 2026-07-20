@@ -1,11 +1,34 @@
+{{- $topology := .Values.topology | default dict -}}
+{{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
+{{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
+{{- $useStatefulSet := and $activeActive (get $activeActiveCfg "useStatefulSet" | default true) -}}
+{{- $replicas := int .Values.replicaCount -}}
+{{- if $activeActive -}}
+{{- $replicas = int (get $activeActiveCfg "playsbcReplicas" | default 2) -}}
+{{- end -}}
+{{- $shared := get $activeActiveCfg "sharedState" | default dict -}}
+{{- $sharedEnabled := and $activeActive (get $shared "enabled" | default true) -}}
+{{- $sharedMountPath := get $shared "mountPath" | default "/var/lib/playsbc" -}}
+{{- $multus := get $topology "multus" | default dict -}}
+{{- $multusEnabled := get $multus "enabled" | default false -}}
+{{- $coreNetwork := get $multus "coreNetwork" | default dict -}}
+{{- $peerNetwork := get $multus "peerNetwork" | default dict -}}
+{{- $multusNamespace := get $multus "namespace" | default .Release.Namespace -}}
+{{- $coreNetworkName := get $coreNetwork "name" | default "playsbc-core-realm" -}}
+{{- $peerNetworkName := get $peerNetwork "name" | default "playsbc-peer-realm" -}}
+{{- $coreInterface := get $coreNetwork "interface" | default "net-core" -}}
+{{- $peerInterface := get $peerNetwork "interface" | default "net-peer" -}}
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ if $useStatefulSet }}StatefulSet{{ else }}Deployment{{ end }}
 metadata:
   name: {{ include "playsbc.fullname" . }}
   labels:
 {{ include "playsbc.labels" . | indent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+{{- if $useStatefulSet }}
+  serviceName: {{ include "playsbc.fullname" . }}
+{{- end }}
+  replicas: {{ $replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "playsbc.name" . }}
@@ -15,6 +38,16 @@ spec:
       labels:
         app.kubernetes.io/name: {{ include "playsbc.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
+        playsbc.io/topology: {{ get $topology "model" | default "single-realm" | quote }}
+{{- if or $multusEnabled $activeActive }}
+      annotations:
+{{- if $activeActive }}
+        playsbc.io/active-active: "true"
+{{- end }}
+{{- if $multusEnabled }}
+        k8s.v1.cni.cncf.io/networks: '[{"name":"{{ $coreNetworkName }}","namespace":"{{ $multusNamespace }}","interface":"{{ $coreInterface }}"},{"name":"{{ $peerNetworkName }}","namespace":"{{ $multusNamespace }}","interface":"{{ $peerInterface }}"}]'
+{{- end }}
+{{- end }}
     spec:
       hostNetwork: {{ .Values.hostNetwork }}
       containers:
@@ -31,6 +64,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           ports:
             - name: sip-udp
               containerPort: {{ .Values.service.sipPort }}
@@ -70,6 +115,10 @@ spec:
               mountPath: /etc/playsbc-tls
               readOnly: true
 {{- end }}
+{{- if $sharedEnabled }}
+            - name: ha-shared-state
+              mountPath: {{ $sharedMountPath }}
+{{- end }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
       volumes:
@@ -85,4 +134,9 @@ spec:
         - name: tls-secret
           secret:
             secretName: {{ required "tls.existingSecret is required when TLS is enabled" .Values.tls.existingSecret }}
+{{- end }}
+{{- if $sharedEnabled }}
+        - name: ha-shared-state
+          persistentVolumeClaim:
+            claimName: {{ include "playsbc.fullname" . }}-ha-state
 {{- end }}

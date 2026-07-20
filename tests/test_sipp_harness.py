@@ -1560,6 +1560,32 @@ Content-Length: 0
         self.assertIn("toYaml $config", configmap)
         self.assertIn("/etc/playsbc/server.yaml", deployment)
 
+    def test_helm_chart_exposes_active_active_dual_realm_topology(self):
+        chart = ROOT / "charts" / "playsbc"
+        values = (chart / "values.yaml").read_text(encoding="utf-8")
+        deployment = (chart / "templates" / "deployment.yaml").read_text(encoding="utf-8")
+        configmap = (chart / "templates" / "configmap.yaml").read_text(encoding="utf-8")
+        rtpengine = (chart / "templates" / "rtpengine.yaml").read_text(encoding="utf-8")
+        shared_state = (chart / "templates" / "shared-state.yaml").read_text(encoding="utf-8")
+        multus = (chart / "templates" / "multus.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("model: core-peer-active-active", values)
+        self.assertIn("playsbcReplicas: 2", values)
+        self.assertIn("rtpengineReplicas: 2", values)
+        self.assertIn("cidr: 172.28.0.0/24", values)
+        self.assertIn("cidr: 192.168.28.0/24", values)
+        self.assertIn('kind: {{ if $useStatefulSet }}StatefulSet{{ else }}Deployment{{ end }}', deployment)
+        self.assertIn("fieldPath: metadata.name", deployment)
+        self.assertIn("ha-shared-state", deployment)
+        self.assertIn('node_id" "$POD_NAME"', configmap)
+        self.assertIn("rtpengine_pairs", configmap)
+        self.assertIn("mergeOverwrite $node $existing", configmap)
+        self.assertIn("mergeOverwrite $pair $existing", configmap)
+        self.assertIn("rtpengine-headless", rtpengine)
+        self.assertIn("--interface=default/${POD_IP}", rtpengine)
+        self.assertIn("kind: PersistentVolumeClaim", shared_state)
+        self.assertIn("NetworkAttachmentDefinition", multus)
+
     def test_helm_chart_includes_observability_stack(self):
         chart = ROOT / "charts" / "playsbc"
         values = (chart / "values.yaml").read_text(encoding="utf-8")
@@ -2913,6 +2939,23 @@ class RealTopologyTests(unittest.TestCase):
         self.assertEqual(runner.profile_config(rtpengine)["sip_advertised_ip"], "$POD_IP")
         self.assertEqual(runner.profile_config(internal)["log_dir"], "/tmp/playsbc-logs")
         self.assertEqual(runner.profile_config(rtpengine)["log_dir"], "/tmp/playsbc-logs")
+        ha = runner.profile_config(rtpengine)["ha"]
+        self.assertTrue(ha["enabled"])
+        self.assertEqual(ha["node_id"], "$POD_NAME")
+        self.assertEqual(ha["cluster_id"], "playsbc-aa-lab")
+        self.assertEqual(ha["nodes"][0]["node_id"], "playsbc-playsbc-0")
+        self.assertEqual(
+            ha["rtpengine_pairs"][1]["rtpengine_url"],
+            "udp://playsbc-playsbc-rtpengine-1.playsbc-playsbc-rtpengine-headless:2223",
+        )
+        self.assertEqual(ha["failover"]["mid_call_failover"], "dialog-restore-only")
+
+    def test_kubernetes_profiles_can_disable_active_active_topology(self):
+        args = run_k8s_regression.parse_args(["--all-profiles", "--no-active-active-topology"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("basic-media", "unit-k8s")
+
+        self.assertEqual(runner.profile_config(profile)["ha"], {})
 
     def test_kubernetes_pcap_capture_roles_follow_expected_traffic(self):
         cases = {
@@ -3154,6 +3197,11 @@ class RealTopologyTests(unittest.TestCase):
         self.assertTrue(args.run_id.startswith("k8s-regression-"))
         self.assertIn("--all-profiles", command)
         self.assertNotIn("--rasa-profiles", command)
+        self.assertIn("--active-active-topology", command)
+        self.assertIn("--playsbc-replicas", command)
+        self.assertIn("2", command)
+        self.assertIn("--rtpengine-replicas", command)
+        self.assertIn("--no-multus-enabled", command)
         self.assertIn("/workspace/logs/k8s-Regression", command)
         self.assertIn("/workspace/logs/k8s-reports", command)
         self.assertTrue(run_k8s_regression_job.should_cleanup_local_logs(args))

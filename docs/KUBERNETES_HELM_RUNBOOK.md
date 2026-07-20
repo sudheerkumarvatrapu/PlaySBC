@@ -7,8 +7,9 @@ This is the short operator runbook for deploying PlaySBC, RTPengine, Rasa, SIPp 
 ```text
 kubectl / helm
   -> namespace playsbc
-     -> PlaySBC deployment and service
-     -> RTPengine deployment and service
+     -> PlaySBC active-active StatefulSet and service
+     -> paired RTPengine StatefulSet, service, and headless service
+     -> shared HA state PVC for registrar/dialog lab state
      -> optional Rasa deployment and service
      -> optional Prometheus and Grafana
      -> regression Job plus temporary SIPp core/peer pods
@@ -22,6 +23,17 @@ Default service ports:
 | RTPengine | `2223/UDP` |
 | Grafana | `3000/TCP` |
 | Prometheus | `9090/TCP` |
+
+The default Kubernetes regression model is active-active:
+
+```text
+Core realm 172.28.0.0/24 (logical in kind unless Multus is enabled)
+  -> PlaySBC-0 / PlaySBC-1
+     -> paired RTPengine-0 / RTPengine-1
+        -> Peer realm 192.168.28.0/24 (logical in kind unless Multus is enabled)
+```
+
+In a normal kind lab the pod IPs still come from the CNI, such as `10.244.x.x`. The `172.x` and `192.x` realm model is rendered in PlaySBC config, logs, reports, metrics, and regression evidence. Real secondary interfaces require Multus or another multi-network CNI.
 
 ## Tool Check
 
@@ -51,7 +63,7 @@ kubectl get pods -A
 
 ## Standard Full Regression Flow
 
-Use this as the normal repeatable process: upgrade PlaySBC/RTPengine to the release, enable observability, wait for all deployments, then run every Kubernetes regression profile with the release images.
+Use this as the normal repeatable process: upgrade PlaySBC/RTPengine to the release, enable observability, wait for all workloads, then run every Kubernetes regression profile with the release images.
 
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
@@ -63,6 +75,7 @@ helm upgrade --install playsbc \
   https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.3.2/playsbc-1.3.2.tgz \
   --namespace playsbc \
   --create-namespace \
+  -f configs/kubernetes/active-active-values.yaml \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
   --set-string image.tag=1.3.2 \
   --set image.pullPolicy=Always \
@@ -70,6 +83,7 @@ helm upgrade --install playsbc \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
   --set-string rtpengine.image.tag=1.3.2 \
   --set rtpengine.image.pullPolicy=Always \
+  --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223 \
   --set observability.enabled=true \
@@ -77,8 +91,8 @@ helm upgrade --install playsbc \
   --set observability.prometheus.persistence.size=5Gi \
   --set observability.grafana.persistence.size=2Gi
 
-kubectl -n playsbc rollout status deployment/playsbc-playsbc --timeout=180s
-kubectl -n playsbc rollout status deployment/playsbc-playsbc-rtpengine --timeout=180s
+kubectl -n playsbc rollout status statefulset/playsbc-playsbc --timeout=180s
+kubectl -n playsbc rollout status statefulset/playsbc-playsbc-rtpengine --timeout=180s
 kubectl -n playsbc rollout status deployment/playsbc-playsbc-prometheus --timeout=180s
 kubectl -n playsbc rollout status deployment/playsbc-playsbc-grafana --timeout=180s
 
@@ -113,6 +127,7 @@ helm upgrade --install playsbc \
   https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.3.2/playsbc-1.3.2.tgz \
   --namespace playsbc \
   --create-namespace \
+  -f configs/kubernetes/active-active-values.yaml \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
   --set-string image.tag=1.3.2 \
   --set image.pullPolicy=Always \
@@ -120,6 +135,7 @@ helm upgrade --install playsbc \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
   --set-string rtpengine.image.tag=1.3.2 \
   --set rtpengine.image.pullPolicy=Always \
+  --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
 ```
@@ -128,10 +144,11 @@ Verify:
 
 ```bash
 kubectl -n playsbc get pods,svc
-kubectl -n playsbc rollout status deployment/playsbc-playsbc
-kubectl -n playsbc rollout status deployment/playsbc-playsbc-rtpengine
-kubectl -n playsbc logs deployment/playsbc-playsbc --tail=80
-kubectl -n playsbc logs deployment/playsbc-playsbc-rtpengine --tail=80
+kubectl -n playsbc get statefulsets
+kubectl -n playsbc rollout status statefulset/playsbc-playsbc
+kubectl -n playsbc rollout status statefulset/playsbc-playsbc-rtpengine
+kubectl -n playsbc logs statefulset/playsbc-playsbc --tail=80
+kubectl -n playsbc logs statefulset/playsbc-playsbc-rtpengine --tail=80
 ```
 
 Health and metrics:
@@ -162,6 +179,30 @@ kubectl -n playsbc port-forward svc/playsbc-playsbc-grafana 3000:3000
 Open `http://127.0.0.1:3000` and select `PlaySBC Core/Peer SBC Lab`.
 
 The dashboard shows current active calls separately from range totals, SIP requests and responses, RTPengine sessions, codec negotiation, transcoding, AI events, and load evidence.
+
+## Active-Active And Multus
+
+All Kubernetes regression profiles now default to active-active topology:
+
+- PlaySBC runs as `statefulset/playsbc-playsbc` with stable pods `playsbc-playsbc-0` and `playsbc-playsbc-1`.
+- RTPengine runs as `statefulset/playsbc-playsbc-rtpengine` with stable pods `playsbc-playsbc-rtpengine-0` and `playsbc-playsbc-rtpengine-1`.
+- PlaySBC uses `$POD_NAME` as the HA node ID and pairs each node to the matching RTPengine headless-service endpoint.
+- Shared registrar/dialog state is mounted at `/var/lib/playsbc/ha-state.sqlite3`.
+- Grafana shows active calls by node, shared state, drain status, RTPengine failures, requests, responses, codecs, and transcoding.
+
+The default shared-state PVC uses `ReadWriteOnce`, which is fine for a single-node kind lab. For true multi-node Kubernetes, use RWX storage or move HA state to Redis/PostgreSQL in a later hardening phase.
+
+Optional Multus annotations:
+
+```bash
+helm upgrade --install playsbc charts/playsbc \
+  --namespace playsbc \
+  --reuse-values \
+  -f configs/kubernetes/active-active-values.yaml \
+  --set topology.multus.enabled=true
+```
+
+Use `--set topology.multus.createNetworkAttachmentDefinitions=true` only after installing the Multus CRDs. Without Multus, kind uses logical core/peer realms over normal pod networking.
 
 ## Run Full Kubernetes Regression
 

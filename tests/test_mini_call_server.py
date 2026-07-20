@@ -754,6 +754,31 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.sip_advertised_ip, "10.244.0.25")
         self.assertEqual(config.b2bua_advertised_ip, "10.244.0.25")
 
+    def test_runtime_config_resolves_nested_ha_and_rtpengine_values(self):
+        previous = {name: os.environ.get(name) for name in ("POD_IP", "POD_NAME", "NODE_NAME")}
+        os.environ["POD_IP"] = "10.244.0.55"
+        os.environ["POD_NAME"] = "playsbc-playsbc-1"
+        os.environ["NODE_NAME"] = "kind-worker-a"
+        try:
+            config = server.ServerConfig(
+                sip_advertised_ip="$POD_IP",
+                b2bua_advertised_ip="${POD_IP}",
+                rtpengine_url="udp://${POD_NAME}.rtpengine-headless:2223",
+                ha={"enabled": True, "node_id": "$POD_NAME", "node_name": "${NODE_NAME}"},
+            )
+            server.resolve_runtime_config(config)
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        self.assertEqual(config.sip_advertised_ip, "10.244.0.55")
+        self.assertEqual(config.rtpengine_url, "udp://playsbc-playsbc-1.rtpengine-headless:2223")
+        self.assertEqual(config.ha["node_id"], "playsbc-playsbc-1")
+        self.assertEqual(config.ha["node_name"], "kind-worker-a")
+
     def test_load_yaml_config_file(self):
         config = server.load_config_file(str(Path(__file__).resolve().parents[1] / "configs" / "config.b2bua.example.yaml"))
 

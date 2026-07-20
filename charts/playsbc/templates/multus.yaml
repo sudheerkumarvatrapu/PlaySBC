@@ -1,0 +1,51 @@
+{{- $topology := .Values.topology | default dict -}}
+{{- $multus := get $topology "multus" | default dict -}}
+{{- $create := and (get $multus "enabled" | default false) (get $multus "createNetworkAttachmentDefinitions" | default false) -}}
+{{- if $create }}
+{{- $core := get $multus "coreNetwork" | default dict -}}
+{{- $peer := get $multus "peerNetwork" | default dict -}}
+{{- $namespace := get $multus "namespace" | default .Release.Namespace -}}
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: {{ get $core "name" | default "playsbc-core-realm" }}
+  namespace: {{ $namespace }}
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  config: |-
+    {
+      "cniVersion": "0.3.1",
+      "type": "{{ get $core "type" | default "bridge" }}",
+      "bridge": "{{ get $core "bridge" | default "playsbc-core0" }}",
+      "ipam": {
+        "type": "host-local",
+        "subnet": "{{ get $core "subnet" | default "172.28.0.0/24" }}",
+        "rangeStart": "{{ get $core "rangeStart" | default "172.28.0.20" }}",
+        "rangeEnd": "{{ get $core "rangeEnd" | default "172.28.0.220" }}",
+        "gateway": "{{ get $core "gateway" | default "172.28.0.1" }}"
+      }
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: {{ get $peer "name" | default "playsbc-peer-realm" }}
+  namespace: {{ $namespace }}
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  config: |-
+    {
+      "cniVersion": "0.3.1",
+      "type": "{{ get $peer "type" | default "bridge" }}",
+      "bridge": "{{ get $peer "bridge" | default "playsbc-peer0" }}",
+      "ipam": {
+        "type": "host-local",
+        "subnet": "{{ get $peer "subnet" | default "192.168.28.0/24" }}",
+        "rangeStart": "{{ get $peer "rangeStart" | default "192.168.28.20" }}",
+        "rangeEnd": "{{ get $peer "rangeEnd" | default "192.168.28.220" }}",
+        "gateway": "{{ get $peer "gateway" | default "192.168.28.1" }}"
+      }
+    }
+{{- end }}

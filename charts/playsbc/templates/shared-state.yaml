@@ -1,0 +1,22 @@
+{{- $topology := .Values.topology | default dict -}}
+{{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
+{{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
+{{- $shared := get $activeActiveCfg "sharedState" | default dict -}}
+{{- $sharedEnabled := and $activeActive (get $shared "enabled" | default true) -}}
+{{- if $sharedEnabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "playsbc.fullname" . }}-ha-state
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+spec:
+  accessModes:
+{{ toYaml (get $shared "accessModes" | default (list "ReadWriteOnce")) | indent 4 }}
+{{- with (get $shared "storageClassName") }}
+  storageClassName: {{ . | quote }}
+{{- end }}
+  resources:
+    requests:
+      storage: {{ get $shared "size" | default "1Gi" }}
+{{- end }}

@@ -140,7 +140,7 @@ def role_manifest(args: argparse.Namespace) -> dict[str, object]:
             },
             {
                 "apiGroups": ["apps"],
-                "resources": ["deployments", "replicasets"],
+                "resources": ["deployments", "replicasets", "statefulsets"],
                 "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
             },
             {
@@ -203,6 +203,16 @@ def runner_command_args(args: argparse.Namespace) -> list[str]:
         args.helm_release,
         "--chart",
         "/workspace/charts/playsbc",
+        "--active-active-topology" if args.active_active_topology else "--no-active-active-topology",
+        "--playsbc-replicas",
+        str(args.playsbc_replicas),
+        "--rtpengine-replicas",
+        str(args.rtpengine_replicas),
+        "--ha-cluster-id",
+        args.ha_cluster_id,
+        "--ha-shared-state-path",
+        args.ha_shared_state_path,
+        "--multus-enabled" if args.multus_enabled else "--no-multus-enabled",
         "--timeout",
         str(args.profile_timeout),
         "--helm-timeout",
@@ -233,6 +243,8 @@ def runner_command_args(args: argparse.Namespace) -> list[str]:
             command.extend(["--profile", profile])
     if not args.rtpengine_enabled:
         command.append("--no-rtpengine-enabled")
+    if args.require_multus:
+        command.append("--require-multus")
     if args.keep_sipp_pods:
         command.append("--keep-pods")
     if args.no_restore_helm_values:
@@ -360,25 +372,44 @@ def prepare_playsbc_image_values(args: argparse.Namespace) -> None:
     if not args.set_playsbc_image:
         return
     repository, tag = split_image_name(args.playsbc_image)
-    run_command(
-        [
-            args.helm_bin,
-            "upgrade",
-            args.helm_release,
-            str(ROOT / "charts" / "playsbc"),
-            "--namespace",
-            args.namespace,
-            "--reuse-values",
-            "--set",
-            f"image.repository={repository}",
-            "--set-string",
-            f"image.tag={tag}",
-            "--set",
-            "image.pullPolicy=IfNotPresent",
-        ],
-        timeout=args.kubectl_timeout,
-        check=True,
-    )
+    command = [
+        args.helm_bin,
+        "upgrade",
+        args.helm_release,
+        str(ROOT / "charts" / "playsbc"),
+        "--namespace",
+        args.namespace,
+        "--reuse-values",
+        "--set",
+        f"image.repository={repository}",
+        "--set-string",
+        f"image.tag={tag}",
+        "--set",
+        "image.pullPolicy=IfNotPresent",
+    ]
+    if args.active_active_topology:
+        command.extend(
+            [
+                "--set",
+                "topology.activeActive.enabled=true",
+                "--set",
+                "topology.activeActive.useStatefulSet=true",
+                "--set",
+                f"topology.activeActive.playsbcReplicas={args.playsbc_replicas}",
+                "--set",
+                f"topology.activeActive.rtpengineReplicas={args.rtpengine_replicas}",
+                "--set",
+                f"topology.activeActive.clusterId={args.ha_cluster_id}",
+                "--set",
+                f"rtpengine.replicas={args.rtpengine_replicas}",
+                "--set",
+                "rtpengine.hostNetwork=false",
+                "--set",
+                f"topology.multus.enabled={'true' if args.multus_enabled else 'false'}",
+            ]
+        )
+    run_command(command, timeout=args.kubectl_timeout, check=True)
+    workload_ref = f"statefulset/{args.deployment}" if args.active_active_topology else f"deployment/{args.deployment}"
     run_command(
         [
             args.kubectl_bin,
@@ -386,7 +417,7 @@ def prepare_playsbc_image_values(args: argparse.Namespace) -> None:
             args.namespace,
             "rollout",
             "status",
-            f"deployment/{args.deployment}",
+            workload_ref,
             f"--timeout={args.rollout_timeout}s",
         ],
         timeout=args.kubectl_timeout,
@@ -574,6 +605,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--all-profiles", action="store_true", help="Run all canonical Kubernetes regression profiles; default when --profile is omitted")
     parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--active-active-topology", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--playsbc-replicas", type=int, default=2)
+    parser.add_argument("--rtpengine-replicas", type=int, default=2)
+    parser.add_argument("--ha-cluster-id", default="playsbc-aa-lab")
+    parser.add_argument("--ha-shared-state-path", default="/var/lib/playsbc/ha-state.sqlite3")
+    parser.add_argument("--multus-enabled", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--require-multus", action="store_true")
     parser.add_argument("--service", default="playsbc-playsbc")
     parser.add_argument("--sip-port", type=int, default=5062)
     parser.add_argument("--tls-port", type=int, default=5061)
@@ -620,6 +658,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             args.remote_report_dir_name = RASA_REMOTE_REPORT_DIR
         if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
             args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
+    if args.playsbc_replicas < 1:
+        raise SystemExit("--playsbc-replicas must be at least 1")
+    if args.rtpengine_replicas < 1:
+        raise SystemExit("--rtpengine-replicas must be at least 1")
+    if args.require_multus and not args.multus_enabled:
+        raise SystemExit("--require-multus also requires --multus-enabled")
     args.run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_run_id())
     args.job_name = args.job_name or args.run_id
     if len(args.job_name) > 63:

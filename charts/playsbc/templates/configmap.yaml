@@ -11,6 +11,79 @@
 {{- $_ := set $config "media_backend" "rtpengine" -}}
 {{- $_ := set $config "rtpengine_url" (printf "udp://%s-rtpengine:%v" (include "playsbc.fullname" .) .Values.rtpengine.controlPort) -}}
 {{- end -}}
+{{- $topology := .Values.topology | default dict -}}
+{{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
+{{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
+{{- if $activeActive -}}
+{{- $fullName := include "playsbc.fullname" . -}}
+{{- $playsbcReplicas := int (get $activeActiveCfg "playsbcReplicas" | default 2) -}}
+{{- if lt $playsbcReplicas 1 -}}
+{{- $playsbcReplicas = 1 -}}
+{{- end -}}
+{{- $rtpReplicas := int (get $activeActiveCfg "rtpengineReplicas" | default 2) -}}
+{{- if lt $rtpReplicas 1 -}}
+{{- $rtpReplicas = 1 -}}
+{{- end -}}
+{{- $clusterId := get $activeActiveCfg "clusterId" | default "playsbc-aa-lab" -}}
+{{- $policy := get $activeActiveCfg "loadBalancingPolicy" | default "external-lb" -}}
+{{- $shared := get $activeActiveCfg "sharedState" | default dict -}}
+{{- $sharedMountPath := get $shared "mountPath" | default "/var/lib/playsbc" -}}
+{{- $sharedFileName := get $shared "fileName" | default "ha-state.sqlite3" -}}
+{{- $pairing := get $activeActiveCfg "rtpenginePairing" | default dict -}}
+{{- $headlessService := get $pairing "headlessServiceName" | default "" -}}
+{{- if eq $headlessService "" -}}
+{{- $headlessService = printf "%s-rtpengine-headless" $fullName -}}
+{{- end -}}
+{{- $ha := deepCopy (get $config "ha" | default dict) -}}
+{{- $existingNodes := get $ha "nodes" | default list -}}
+{{- $nodes := list -}}
+{{- range $i, $_ := until $playsbcReplicas -}}
+{{- $nodeId := printf "%s-%d" $fullName $i -}}
+{{- $node := dict "node_id" $nodeId "state" "active" "weight" 100 -}}
+{{- range $existing := $existingNodes -}}
+{{- if eq (get $existing "node_id" | default "") $nodeId -}}
+{{- $node = mergeOverwrite $node $existing -}}
+{{- end -}}
+{{- end -}}
+{{- $nodes = append $nodes $node -}}
+{{- end -}}
+{{- $existingPairs := get $ha "rtpengine_pairs" | default list -}}
+{{- $pairs := list -}}
+{{- range $i, $_ := until $playsbcReplicas -}}
+{{- $nodeId := printf "%s-%d" $fullName $i -}}
+{{- $rtpIndex := mod $i $rtpReplicas -}}
+{{- $pair := dict "name" (printf "rtpengine-pair-%d" $rtpIndex) "node_id" $nodeId "rtpengine_url" (printf "udp://%s-rtpengine-%d.%s:%v" $fullName $rtpIndex $headlessService $.Values.rtpengine.controlPort) -}}
+{{- range $existing := $existingPairs -}}
+{{- if eq (get $existing "node_id" | default "") $nodeId -}}
+{{- $pair = mergeOverwrite $pair $existing -}}
+{{- end -}}
+{{- end -}}
+{{- $pairs = append $pairs $pair -}}
+{{- end -}}
+{{- $loadBalancing := deepCopy (get $ha "load_balancing" | default dict) -}}
+{{- $_ := set $loadBalancing "policy" $policy -}}
+{{- $failover := deepCopy (get $ha "failover" | default dict) -}}
+{{- $_ := set $failover "dialog_restore" true -}}
+{{- $_ := set $failover "mid_call_failover" "dialog-restore-only" -}}
+{{- $_ := set $failover "rtpengine_session_migration" "planned" -}}
+{{- $_ := set $ha "enabled" true -}}
+{{- $_ := set $ha "cluster_id" $clusterId -}}
+{{- $_ := set $ha "node_id" "$POD_NAME" -}}
+{{- $_ := set $ha "shared_state_path" (printf "%s/%s" $sharedMountPath $sharedFileName) -}}
+{{- $_ := set $ha "nodes" $nodes -}}
+{{- $_ := set $ha "load_balancing" $loadBalancing -}}
+{{- $_ := set $ha "failover" $failover -}}
+{{- $_ := set $ha "rtpengine_pairs" $pairs -}}
+{{- $_ := set $config "ha" $ha -}}
+{{- if eq (get $config "sip_advertised_ip" | default "") "" -}}
+{{- $_ := set $config "sip_advertised_ip" "$POD_IP" -}}
+{{- end -}}
+{{- if eq (get $config "b2bua_advertised_ip" | default "") "" -}}
+{{- $_ := set $config "b2bua_advertised_ip" "$POD_IP" -}}
+{{- end -}}
+{{- $_ := set $config "rtpengine_directions" (list "core" "peer") -}}
+{{- $_ := set $config "rtpengine_interfaces" (list "core" "peer") -}}
+{{- end -}}
 {{- $rasa := .Values.rasa | default dict -}}
 {{- $rasaEnabled := get $rasa "enabled" | default false -}}
 {{- $rasaServicePort := get $rasa "servicePort" | default 5005 -}}
