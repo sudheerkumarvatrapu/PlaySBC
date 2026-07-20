@@ -65,7 +65,7 @@ kubectl get pods -A
 
 Use this as the normal repeatable process: upgrade PlaySBC/RTPengine to the release, enable active-active topology, enable observability, wait for all workloads, then run every Kubernetes regression profile with the release images.
 
-This is the standard PlaySBC Kubernetes architecture from `v1.4.1` onward:
+This is the standard PlaySBC Kubernetes architecture from `v1.4.2` onward:
 
 ```text
 playsbc-playsbc-0
@@ -85,16 +85,16 @@ kubectl config use-context kind-playsbc
 kubectl config set-context --current --namespace=playsbc
 
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.1/playsbc-1.4.1.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.2/playsbc-1.4.2.tgz \
   --namespace playsbc \
   --create-namespace \
   -f configs/kubernetes/active-active-values.yaml \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.4.1 \
+  --set-string image.tag=1.4.2 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.4.1 \
+  --set-string rtpengine.image.tag=1.4.2 \
   --set rtpengine.image.pullPolicy=Always \
   --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
@@ -113,9 +113,9 @@ kubectl -n playsbc get statefulsets
 
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.1 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.1 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.4.1 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.2 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.2 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.4.2 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image \
@@ -141,16 +141,16 @@ Use active-active values for every normal Kubernetes deployment:
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.1/playsbc-1.4.1.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.2/playsbc-1.4.2.tgz \
   --namespace playsbc \
   --create-namespace \
   -f configs/kubernetes/active-active-values.yaml \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.4.1 \
+  --set-string image.tag=1.4.2 \
   --set image.pullPolicy=Always \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.4.1 \
+  --set-string rtpengine.image.tag=1.4.2 \
   --set rtpengine.image.pullPolicy=Always \
   --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
@@ -242,9 +242,9 @@ Use published release images:
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.1 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.1 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.4.1 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.2 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.2 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.4.2 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image \

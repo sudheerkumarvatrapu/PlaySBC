@@ -2,7 +2,7 @@
 
 PlaySBC is an enterprise-style SIP/RTP experimentation lab today, not a production-certified SBC yet.
 
-The long-term mission is serious: evolve PlaySBC from the current `v1.4.1` lab-grade active-active SBC into a public-cloud production SBC line over future major releases, with Azure as the first priority cloud and AWS next. The target future state is a PlaySBC `v10.x.x` generation that can be validated for large-scale SIP gateway deployments such as hundreds of thousands of registered devices and thousands of concurrent calls.
+The long-term mission is serious: evolve PlaySBC from the current `v1.4.2` lab-grade active-active SBC into a public-cloud production SBC line over future major releases, with Azure as the first priority cloud and AWS next. The target future state is a PlaySBC `v10.x.x` generation that can be validated for large-scale SIP gateway deployments such as hundreds of thousands of registered devices and thousands of concurrent calls.
 
 That production path must be earned with benchmarks, security hardening, carrier-grade HA behavior, long soak runs, and cloud networking proof. Until those gates are met, PlaySBC should be described as a lab and regression platform, not a replacement for certified commercial SBCs.
 

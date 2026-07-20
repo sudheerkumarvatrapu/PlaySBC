@@ -3309,6 +3309,16 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("401 Unauthorized", ladder)
         self.assertNotIn("403 Forbidden", ladder)
 
+    def test_kubernetes_detects_statefulset_immutable_helm_migration_error(self):
+        detail = (
+            'Error: UPGRADE FAILED: cannot patch "playsbc-playsbc" with kind StatefulSet: '
+            'StatefulSet.apps "playsbc-playsbc" is invalid: spec: Forbidden: updates to '
+            "statefulset spec for fields other than 'replicas' are forbidden"
+        )
+
+        self.assertTrue(run_k8s_regression.is_statefulset_immutable_upgrade_error(detail))
+        self.assertFalse(run_k8s_regression.is_statefulset_immutable_upgrade_error("Error: service unavailable"))
+
     def test_kubernetes_extracts_rtcp_target_from_received_sdp(self):
         trace = """
 ----------------------------------------------- 2026-07-14T10:45:49Z

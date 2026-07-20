@@ -253,6 +253,19 @@ def run_command(
     return result
 
 
+def command_failure_detail(result: CommandResult) -> str:
+    return result.stderr.strip() or result.stdout.strip()
+
+
+def is_statefulset_immutable_upgrade_error(text: str) -> bool:
+    lower = text.lower()
+    return (
+        "statefulset" in lower
+        and "spec: forbidden" in lower
+        and "updates to statefulset spec" in lower
+    )
+
+
 def ensure_binary(name: str) -> None:
     if not shutil.which(name):
         raise SystemExit(f"{name} executable not found in PATH")
@@ -687,6 +700,56 @@ class K8sRegressionRunner:
         kind = "statefulset" if self.active_active_enabled() else "deployment"
         return f"{kind}/{self.args.rtpengine_deployment}"
 
+    def helm_upgrade_values(self, values_path: Path, log_path: Path, *, check: bool = True) -> CommandResult:
+        command = [
+            self.args.helm_bin,
+            "upgrade",
+            self.args.helm_release,
+            self.args.chart,
+            "--namespace",
+            self.args.namespace,
+            "-f",
+            str(values_path),
+        ]
+        result = run_command(command, timeout=self.args.helm_timeout, check=False)
+        log_text = result.stdout + result.stderr
+        detail = command_failure_detail(result)
+        if result.returncode != 0 and is_statefulset_immutable_upgrade_error(detail):
+            retry_note = (
+                "\n[playsbc] Helm hit an immutable StatefulSet spec migration. "
+                "Deleting the StatefulSet with --cascade=orphan keeps existing pods alive, "
+                "then Helm can recreate ownership with the new spec.\n"
+            )
+            delete_result = self.kubectl(
+                "delete",
+                "statefulset",
+                self.args.deployment,
+                "--cascade=orphan",
+                "--ignore-not-found=true",
+                check=False,
+                timeout=60,
+            )
+            retry_result = run_command(command, timeout=self.args.helm_timeout, check=False)
+            log_text = (
+                log_text
+                + retry_note
+                + "\n[playsbc] immutable-upgrade orphan delete:\n"
+                + delete_result.stdout
+                + delete_result.stderr
+                + "\n[playsbc] immutable-upgrade retry:\n"
+                + retry_result.stdout
+                + retry_result.stderr
+            )
+            result = retry_result
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(log_text, encoding="utf-8")
+        if check and result.returncode != 0:
+            raise RuntimeError(
+                f"Command failed ({result.returncode}): {command_text(command)}\n"
+                f"{command_failure_detail(result)}"
+            )
+        return result
+
     def rollout_status(self, workload_ref: str, *, check: bool = True) -> CommandResult:
         result = self.kubectl(
             "rollout",
@@ -901,23 +964,13 @@ class K8sRegressionRunner:
         restore_path = report_dir / f"{self.run_id}-helm-restore-values.json"
         restore_path.parent.mkdir(parents=True, exist_ok=True)
         restore_path.write_text(json.dumps(self.original_values, indent=2, sort_keys=True), encoding="utf-8")
-        result = run_command(
-            [
-                self.args.helm_bin,
-                "upgrade",
-                self.args.helm_release,
-                self.args.chart,
-                "--namespace",
-                self.args.namespace,
-                "-f",
-                str(restore_path),
-            ],
-            timeout=self.args.helm_timeout,
+        result = self.helm_upgrade_values(
+            restore_path,
+            report_dir / f"{self.run_id}-helm-restore.log",
             check=False,
         )
-        (report_dir / f"{self.run_id}-helm-restore.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         if result.returncode != 0:
-            return f"Helm restore failed: {result.stderr.strip() or result.stdout.strip()}"
+            return f"Helm restore failed: {command_failure_detail(result)}"
         rollout = self.rollout_status(self.playsbc_workload_ref(), check=False)
         (report_dir / f"{self.run_id}-helm-restore-rollout.log").write_text(
             rollout.stdout + rollout.stderr,
@@ -1789,18 +1842,9 @@ class K8sRegressionRunner:
         values_path = bundle / "helm-profile-values.yaml"
         values_path.write_text(dump_simple_yaml(values), encoding="utf-8")
         helm_started = time.monotonic()
-        result = run_command(
-            [
-                self.args.helm_bin,
-                "upgrade",
-                self.args.helm_release,
-                self.args.chart,
-                "--namespace",
-                self.args.namespace,
-                "-f",
-                str(values_path),
-            ],
-            timeout=self.args.helm_timeout,
+        result = self.helm_upgrade_values(
+            values_path,
+            bundle / "helm-profile-upgrade.log",
             check=True,
         )
         helm_seconds = time.monotonic() - helm_started
