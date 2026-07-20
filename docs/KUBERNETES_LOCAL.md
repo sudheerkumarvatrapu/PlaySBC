@@ -1,6 +1,17 @@
 # Kubernetes Lab
 
-The Helm chart deploys PlaySBC with HTTP liveness/readiness probes, optional Secret-backed SIP users, ClientIP dialog affinity, active-active StatefulSet lab mode, shared HA state, and paired RTPengine pods. The default Kubernetes regression path uses logical core/peer realms; real secondary interfaces need Multus.
+The Helm chart deploys PlaySBC with HTTP liveness/readiness probes, optional Secret-backed SIP users, ClientIP dialog affinity, active-active StatefulSet lab mode, shared HA state, and paired RTPengine pods. The standard Kubernetes regression path now uses active-active PlaySBC plus active-active RTPengine by default, with logical core/peer realms; real secondary interfaces need Multus.
+
+Expected standard lab shape:
+
+```text
+playsbc-playsbc-0
+playsbc-playsbc-1
+playsbc-playsbc-rtpengine-0
+playsbc-playsbc-rtpengine-1
+```
+
+Always include `configs/kubernetes/active-active-values.yaml` for normal lab and regression runs. In single-node kind, this file keeps RTPengine on pod networking with `rtpengine.hostNetwork=false`, avoiding host-port collisions between RTPengine replicas.
 
 ## kind
 
@@ -13,6 +24,7 @@ helm upgrade --install playsbc charts/playsbc \
   -f configs/kubernetes/kind-values.yaml \
   -f configs/kubernetes/active-active-values.yaml
 kubectl rollout status statefulset/playsbc-playsbc
+kubectl rollout status statefulset/playsbc-playsbc-rtpengine
 kubectl get pods,services
 kubectl port-forward service/playsbc-playsbc 8080:8080 5060:5062
 ```
@@ -30,6 +42,7 @@ helm upgrade --install playsbc charts/playsbc \
   -f configs/kubernetes/minikube-values.yaml \
   -f configs/kubernetes/active-active-values.yaml
 kubectl rollout status statefulset/playsbc-playsbc
+kubectl rollout status statefulset/playsbc-playsbc-rtpengine
 minikube service playsbc-playsbc --url
 ```
 

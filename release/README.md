@@ -43,6 +43,17 @@ helm upgrade --install playsbc helm/playsbc-1.4.0.tgz \
   --set rtpengine.hostNetwork=false
 ```
 
+This is the normal Kubernetes shape for `v1.4.0` and later:
+
+```text
+PlaySBC StatefulSet replicas: 2
+RTPengine StatefulSet replicas: 2
+Prometheus Deployment replicas: 1
+Grafana Deployment replicas: 1
+```
+
+If a deployment shows only one PlaySBC pod and one RTPengine pod, active-active values were not applied. Re-run Helm with `configs/kubernetes/active-active-values.yaml` or equivalent `--set topology.activeActive.enabled=true` values before running regression.
+
 Kubernetes regression from published images:
 
 ```bash

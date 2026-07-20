@@ -33,6 +33,19 @@ Kubernetes regression now defaults to an active-active PlaySBC/RTPengine lab top
 
 The Helm package contains Kubernetes manifests and configuration. Kubernetes pulls the PlaySBC, RTPengine, SIPp, and regression-runner images at deploy/test time.
 
+## Standard Kubernetes Architecture
+
+Going forward, the normal Kubernetes lab and regression path is always:
+
+```text
+PlaySBC active-active StatefulSet: 2 pods
+RTPengine active-active StatefulSet: 2 pods
+Prometheus: 1 pod
+Grafana: 1 pod
+```
+
+Always deploy with `configs/kubernetes/active-active-values.yaml` or equivalent `--set topology.activeActive.enabled=true` overrides. If `kubectl get pods` shows only one PlaySBC pod and one RTPengine pod, the chart is running in single-replica mode and should be upgraded again with active-active enabled.
+
 ## Deployment Models
 
 | Model | Best For | Needs Docker Desktop? | Needs Kubernetes? |

@@ -63,7 +63,20 @@ kubectl get pods -A
 
 ## Standard Full Regression Flow
 
-Use this as the normal repeatable process: upgrade PlaySBC/RTPengine to the release, enable observability, wait for all workloads, then run every Kubernetes regression profile with the release images.
+Use this as the normal repeatable process: upgrade PlaySBC/RTPengine to the release, enable active-active topology, enable observability, wait for all workloads, then run every Kubernetes regression profile with the release images.
+
+This is the standard PlaySBC Kubernetes architecture from `v1.4.0` onward:
+
+```text
+playsbc-playsbc-0
+playsbc-playsbc-1
+playsbc-playsbc-rtpengine-0
+playsbc-playsbc-rtpengine-1
+playsbc-playsbc-prometheus-...
+playsbc-playsbc-grafana-...
+```
+
+If you see only one PlaySBC pod and one RTPengine pod, active-active was not enabled for that Helm upgrade. Re-run the upgrade with `configs/kubernetes/active-active-values.yaml` or the equivalent `--set topology.activeActive.enabled=true` flags.
 
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
@@ -95,6 +108,8 @@ kubectl -n playsbc rollout status statefulset/playsbc-playsbc --timeout=180s
 kubectl -n playsbc rollout status statefulset/playsbc-playsbc-rtpengine --timeout=180s
 kubectl -n playsbc rollout status deployment/playsbc-playsbc-prometheus --timeout=180s
 kubectl -n playsbc rollout status deployment/playsbc-playsbc-grafana --timeout=180s
+kubectl -n playsbc get pods -o wide
+kubectl -n playsbc get statefulsets
 
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --all-profiles \
@@ -122,6 +137,8 @@ kubectl -n playsbc port-forward svc/playsbc-playsbc-grafana 3000:3000
 
 ## Deploy The Release
 
+Use active-active values for every normal Kubernetes deployment:
+
 ```bash
 helm upgrade --install playsbc \
   https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.0/playsbc-1.4.0.tgz \
@@ -139,6 +156,8 @@ helm upgrade --install playsbc \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223
 ```
+
+For a single-node kind cluster, keep `rtpengine.hostNetwork=false`. Two RTPengine replicas cannot safely bind the same host UDP port range on one node with host networking enabled.
 
 Verify:
 
