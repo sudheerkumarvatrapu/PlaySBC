@@ -1,0 +1,162 @@
+{{- $cloud := .Values.cloud | default dict -}}
+{{- $azure := get $cloud "azure" | default dict -}}
+{{- if get $azure "enabled" }}
+{{- $lb := get $azure "loadBalancer" | default dict -}}
+{{- $allowedRanges := get $lb "allowedSourceRanges" | default list -}}
+{{- $sip := get $azure "sip" | default dict -}}
+{{- $sipPublic := get $sip "public" | default dict -}}
+{{- $sipPrivate := get $sip "private" | default dict -}}
+{{- $media := get $azure "media" | default dict -}}
+{{- $mediaPublic := get $media "public" | default dict -}}
+{{- $nodeRg := get $azure "nodeResourceGroup" | default "" -}}
+{{- $externalTrafficPolicy := get $lb "externalTrafficPolicy" | default "Local" -}}
+{{- if get $sipPublic "enabled" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}-azure-sip-public
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+    playsbc.io/cloud: azure
+    playsbc.io/exposure: sip-public
+  annotations:
+    playsbc.io/azure-exposure: "sip-public"
+{{- if or (get $sipPublic "publicIPResourceGroup") $nodeRg }}
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: {{ get $sipPublic "publicIPResourceGroup" | default $nodeRg | quote }}
+{{- end }}
+{{- if get $sipPublic "publicIPName" }}
+    service.beta.kubernetes.io/azure-pip-name: {{ get $sipPublic "publicIPName" | quote }}
+{{- end }}
+{{- if get $sipPublic "publicIPv4" }}
+    service.beta.kubernetes.io/azure-load-balancer-ipv4: {{ get $sipPublic "publicIPv4" | quote }}
+{{- end }}
+{{- if get $sipPublic "dnsLabelName" }}
+    service.beta.kubernetes.io/azure-dns-label-name: {{ get $sipPublic "dnsLabelName" | quote }}
+{{- end }}
+{{- with (get $sipPublic "annotations" | default dict) }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: {{ $externalTrafficPolicy }}
+{{- if $allowedRanges }}
+  loadBalancerSourceRanges:
+{{ toYaml $allowedRanges | indent 4 }}
+{{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: sip-udp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-udp
+      protocol: UDP
+    - name: sip-tcp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-tcp
+      protocol: TCP
+    - name: sip-tls
+      port: {{ .Values.service.tlsPort }}
+      targetPort: sip-tls
+      protocol: TCP
+    - name: health
+      port: {{ .Values.service.healthPort }}
+      targetPort: health
+      protocol: TCP
+{{- end }}
+{{- if get $sipPrivate "enabled" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}-azure-sip-private
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+    playsbc.io/cloud: azure
+    playsbc.io/exposure: sip-private
+  annotations:
+    playsbc.io/azure-exposure: "sip-private"
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+{{- if get $sipPrivate "subnetName" }}
+    service.beta.kubernetes.io/azure-load-balancer-internal-subnet: {{ get $sipPrivate "subnetName" | quote }}
+{{- end }}
+{{- if get $sipPrivate "privateIPv4" }}
+    service.beta.kubernetes.io/azure-load-balancer-ipv4: {{ get $sipPrivate "privateIPv4" | quote }}
+{{- end }}
+{{- with (get $sipPrivate "annotations" | default dict) }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: {{ $externalTrafficPolicy }}
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: sip-udp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-udp
+      protocol: UDP
+    - name: sip-tcp
+      port: {{ .Values.service.sipPort }}
+      targetPort: sip-tcp
+      protocol: TCP
+    - name: sip-tls
+      port: {{ .Values.service.tlsPort }}
+      targetPort: sip-tls
+      protocol: TCP
+    - name: health
+      port: {{ .Values.service.healthPort }}
+      targetPort: health
+      protocol: TCP
+{{- end }}
+{{- if get $mediaPublic "enabled" }}
+{{- $mediaPorts := get $mediaPublic "ports" | default list -}}
+{{- if $mediaPorts }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "playsbc.fullname" . }}-azure-rtp-public
+  labels:
+{{ include "playsbc.labels" . | indent 4 }}
+    playsbc.io/cloud: azure
+    playsbc.io/exposure: rtp-public
+  annotations:
+    playsbc.io/azure-exposure: "rtp-public"
+{{- if or (get $mediaPublic "publicIPResourceGroup") $nodeRg }}
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: {{ get $mediaPublic "publicIPResourceGroup" | default $nodeRg | quote }}
+{{- end }}
+{{- if get $mediaPublic "publicIPName" }}
+    service.beta.kubernetes.io/azure-pip-name: {{ get $mediaPublic "publicIPName" | quote }}
+{{- end }}
+{{- if get $mediaPublic "publicIPv4" }}
+    service.beta.kubernetes.io/azure-load-balancer-ipv4: {{ get $mediaPublic "publicIPv4" | quote }}
+{{- end }}
+{{- if get $mediaPublic "dnsLabelName" }}
+    service.beta.kubernetes.io/azure-dns-label-name: {{ get $mediaPublic "dnsLabelName" | quote }}
+{{- end }}
+{{- with (get $mediaPublic "annotations" | default dict) }}
+{{ toYaml . | indent 4 }}
+{{- end }}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: {{ $externalTrafficPolicy }}
+{{- if $allowedRanges }}
+  loadBalancerSourceRanges:
+{{ toYaml $allowedRanges | indent 4 }}
+{{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "playsbc.name" . }}-rtpengine
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+{{- range $port := $mediaPorts }}
+    - name: rtp-{{ $port }}
+      port: {{ $port }}
+      targetPort: {{ $port }}
+      protocol: UDP
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

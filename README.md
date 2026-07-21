@@ -13,7 +13,7 @@
   <img alt="G711 Transcoding" src="https://img.shields.io/badge/-G711u%20%7C%20G711a-9333EA?style=flat-square">
   <img alt="RTPengine" src="https://img.shields.io/badge/-RTPengine-0F766E?style=flat-square">
   <img alt="AI Rasa" src="https://img.shields.io/badge/-AI%20Rasa%20Gateway-BE185D?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/-v1.4.2-111827?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/-v1.4.3-111827?style=flat-square">
   <img alt="License MIT" src="https://img.shields.io/badge/-MIT%20License-F59E0B?style=flat-square">
 </p>
 
@@ -21,14 +21,14 @@ Python SIP/RTP lab for B2BUA routing, G.711 media, transcoding, RTPengine, HA st
 
 Kubernetes regression now defaults to an active-active PlaySBC/RTPengine lab topology with logical core and peer realms; Multus wiring is available when a cluster has multi-network CNI installed.
 
-[Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md) | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) | [Observability](docs/OBSERVABILITY.md) | [Kubernetes lab](docs/KUBERNETES_LOCAL.md) | [Kubernetes Helm runbook](docs/KUBERNETES_HELM_RUNBOOK.md)
+[Evolution plan](docs/EVOLUTION_PLAN.md) | [RTPengine runbook](docs/RTPENGINE_LOCAL.md) | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) | [Observability](docs/OBSERVABILITY.md) | [Kubernetes lab](docs/KUBERNETES_LOCAL.md) | [Kubernetes Helm runbook](docs/KUBERNETES_HELM_RUNBOOK.md) | [Azure AKS](docs/AZURE_AKS.md)
 
 ## Status
 
-- Version: `1.4.2`
+- Version: `1.4.3`
 - License: MIT
-- Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v1.4.2>
-- Images: `ghcr.io/sudheerkumarvatrapu/playsbc:1.4.2`, `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.4.2`, `ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.2`, `ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.2`
+- Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v1.4.3>
+- Images: `ghcr.io/sudheerkumarvatrapu/playsbc:1.4.3`, `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.4.3`, `ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.3`, `ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.3`
 - Security: CodeQL, Dependency Review, Trivy, and Checkov run in GitHub Actions.
 
 The Helm package contains Kubernetes manifests and configuration. Kubernetes pulls the PlaySBC, RTPengine, SIPp, and regression-runner images at deploy/test time.
@@ -189,21 +189,21 @@ Use this for the normal release path. Docker Desktop is not required if the clus
 The current release chart:
 
 ```text
-https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.2/playsbc-1.4.2.tgz
+https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.3/playsbc-1.4.3.tgz
 ```
 
 Published images:
 
 ```text
-ghcr.io/sudheerkumarvatrapu/playsbc:1.4.2
-ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.4.2
-ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.2
-ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.2
+ghcr.io/sudheerkumarvatrapu/playsbc:1.4.3
+ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.4.3
+ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.3
+ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.3
 ```
 
 The standard process is:
 
-1. Upgrade PlaySBC and RTPengine to `v1.4.2`.
+1. Upgrade PlaySBC and RTPengine to `v1.4.3`.
 2. Enable observability.
 3. Wait for PlaySBC, RTPengine, Prometheus, and Grafana rollouts.
 4. Run the full Kubernetes regression catalog with release images.
@@ -253,10 +253,10 @@ Full observability notes are in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 GitHub Actions publishes images automatically when `main` or a `v*` tag is pushed.
 
-The `v1.4.2` tag publishes:
+The `v1.4.3` tag publishes:
 
 ```text
-1.4.2
+1.4.3
 1.3
 latest
 ```

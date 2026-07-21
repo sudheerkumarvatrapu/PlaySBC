@@ -1622,6 +1622,25 @@ Content-Length: 0
         self.assertIn("sum by (realm,trunk) (max_over_time(playsbc_trunk_healthy", dashboard)
         self.assertIn("sum by (from_realm,to_realm)", dashboard)
 
+    def test_helm_chart_includes_azure_aks_exposure_track(self):
+        chart = ROOT / "charts" / "playsbc"
+        values = (chart / "values.yaml").read_text(encoding="utf-8")
+        azure = (chart / "templates" / "azure-services.yaml").read_text(encoding="utf-8")
+        aks_values = (ROOT / "configs" / "kubernetes" / "aks-values.yaml").read_text(encoding="utf-8")
+        aks_doc = (ROOT / "docs" / "AZURE_AKS.md").read_text(encoding="utf-8")
+
+        self.assertIn("cloud:", values)
+        self.assertIn("azure:", values)
+        self.assertIn("playsbc-aks-aa", aks_values)
+        self.assertIn("service.beta.kubernetes.io/azure-pip-name", azure)
+        self.assertIn("service.beta.kubernetes.io/azure-load-balancer-resource-group", azure)
+        self.assertIn("service.beta.kubernetes.io/azure-load-balancer-internal", azure)
+        self.assertIn("playsbc.io/exposure: sip-public", azure)
+        self.assertIn("playsbc.io/exposure: rtp-public", azure)
+        self.assertIn("Kubernetes Services do not support", aks_values)
+        self.assertIn("Azure-first deployment track", aks_doc)
+        self.assertIn("v1.5.0", aks_doc)
+
     def test_b2bua_profiles_are_listed(self):
         completed = subprocess.run(
             [

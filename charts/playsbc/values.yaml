@@ -61,7 +61,7 @@ image:
   # For direct deployments after image publishing, use:
   # repository: ghcr.io/sudheerkumarvatrapu/playsbc
   repository: playsbc
-  tag: "1.4.2"
+  tag: "1.4.3"
   pullPolicy: IfNotPresent
 
 service:
@@ -71,6 +71,40 @@ service:
   healthPort: 8080
   sessionAffinity: ClientIP
   annotations: {}
+
+cloud:
+  provider: ""
+  azure:
+    enabled: false
+    nodeResourceGroup: ""
+    loadBalancer:
+      externalTrafficPolicy: Local
+      allowedSourceRanges: []
+    sip:
+      public:
+        enabled: false
+        publicIPName: ""
+        publicIPv4: ""
+        publicIPResourceGroup: ""
+        dnsLabelName: ""
+        annotations: {}
+      private:
+        enabled: false
+        privateIPv4: ""
+        subnetName: ""
+        annotations: {}
+    media:
+      public:
+        enabled: false
+        publicIPName: ""
+        publicIPv4: ""
+        publicIPResourceGroup: ""
+        dnsLabelName: ""
+        annotations: {}
+        ports: []
+      documentedPortRange:
+        min: 30000
+        max: 32000
 
 hostNetwork: false
 
