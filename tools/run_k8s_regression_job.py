@@ -364,6 +364,21 @@ def build_images(args: argparse.Namespace) -> None:
             timeout=args.image_build_timeout,
             check=True,
         )
+    if args.build_rtpengine_image:
+        ensure_binary("docker")
+        run_command(
+            [
+                "docker",
+                "build",
+                "-f",
+                str(ROOT / "docker" / "rtpengine.Dockerfile"),
+                "-t",
+                args.rtpengine_image,
+                ".",
+            ],
+            timeout=args.image_build_timeout,
+            check=True,
+        )
     if args.kind_load_images:
         ensure_binary("kind")
         images = [args.runner_image]
@@ -371,6 +386,8 @@ def build_images(args: argparse.Namespace) -> None:
             images.append(args.playsbc_image)
         if args.load_sipp_image:
             images.append(args.sipp_image)
+        if args.load_rtpengine_image:
+            images.append(args.rtpengine_image)
         run_command(
             ["kind", "load", "docker-image", *images, "--name", args.kind_cluster],
             timeout=args.kubectl_timeout,
@@ -386,9 +403,8 @@ def split_image_name(image: str) -> tuple[str, str]:
 
 
 def prepare_playsbc_image_values(args: argparse.Namespace) -> None:
-    if not args.set_playsbc_image:
+    if not args.set_playsbc_image and not args.set_rtpengine_image:
         return
-    repository, tag = split_image_name(args.playsbc_image)
     command = [
         args.helm_bin,
         "upgrade",
@@ -397,13 +413,31 @@ def prepare_playsbc_image_values(args: argparse.Namespace) -> None:
         "--namespace",
         args.namespace,
         "--reuse-values",
-        "--set",
-        f"image.repository={repository}",
-        "--set-string",
-        f"image.tag={tag}",
-        "--set",
-        "image.pullPolicy=IfNotPresent",
     ]
+    if args.set_playsbc_image:
+        repository, tag = split_image_name(args.playsbc_image)
+        command.extend(
+            [
+                "--set",
+                f"image.repository={repository}",
+                "--set-string",
+                f"image.tag={tag}",
+                "--set",
+                "image.pullPolicy=IfNotPresent",
+            ]
+        )
+    if args.set_rtpengine_image:
+        repository, tag = split_image_name(args.rtpengine_image)
+        command.extend(
+            [
+                "--set",
+                f"rtpengine.image.repository={repository}",
+                "--set-string",
+                f"rtpengine.image.tag={tag}",
+                "--set",
+                "rtpengine.image.pullPolicy=IfNotPresent",
+            ]
+        )
     if args.active_active_topology:
         command.extend(
             [
@@ -543,7 +577,13 @@ def run_job(args: argparse.Namespace) -> int:
     ensure_binary(args.kubectl_bin)
     if should_cleanup_local_logs(args):
         shutil.rmtree(Path(args.output_dir), ignore_errors=True)
-    if args.build_playsbc_image or args.build_runner_image or args.build_sipp_image or args.kind_load_images:
+    if (
+        args.build_playsbc_image
+        or args.build_runner_image
+        or args.build_sipp_image
+        or args.build_rtpengine_image
+        or args.kind_load_images
+    ):
         build_images(args)
     prepare_playsbc_image_values(args)
 
@@ -607,16 +647,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--rbac-name", default="playsbc-regression-runner")
     parser.add_argument("--runner-image", default="playsbc-k8s-regression:local")
     parser.add_argument("--playsbc-image", default="playsbc:k8s-regression")
+    parser.add_argument("--rtpengine-image", default="playsbc/rtpengine:local")
     parser.add_argument("--runner-image-pull-policy", default="IfNotPresent")
     parser.add_argument("--sipp-image", default="playsbc-sipp:local")
     parser.add_argument("--sipp-image-pull-policy", default="IfNotPresent")
     parser.add_argument("--build-playsbc-image", action="store_true")
     parser.add_argument("--build-runner-image", action="store_true")
     parser.add_argument("--build-sipp-image", action="store_true")
+    parser.add_argument("--build-rtpengine-image", action="store_true")
     parser.add_argument("--kind-load-images", action="store_true")
     parser.add_argument("--load-sipp-image", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--load-playsbc-image", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--load-rtpengine-image", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--set-playsbc-image", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--set-rtpengine-image", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--kind-cluster", default="playsbc")
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
     parser.add_argument("--all-profiles", action="store_true", help="Run all canonical Kubernetes regression profiles; default when --profile is omitted")
@@ -699,6 +743,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         raise SystemExit("--rtpengine-replicas must be at least 1")
     if args.require_multus and not args.multus_enabled:
         raise SystemExit("--require-multus also requires --multus-enabled")
+    if args.build_playsbc_image:
+        args.set_playsbc_image = True
+    if args.build_rtpengine_image:
+        args.set_rtpengine_image = True
+        args.load_rtpengine_image = True
     args.run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_aks_run_id() if args.aks_profiles else make_run_id())
     args.job_name = args.job_name or args.run_id
     if len(args.job_name) > 63:

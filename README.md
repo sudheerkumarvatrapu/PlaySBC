@@ -13,7 +13,7 @@
   <img alt="G711 Transcoding" src="https://img.shields.io/badge/-G711u%20%7C%20G711a-9333EA?style=flat-square">
   <img alt="RTPengine" src="https://img.shields.io/badge/-RTPengine-0F766E?style=flat-square">
   <img alt="AI Rasa" src="https://img.shields.io/badge/-AI%20Rasa%20Gateway-BE185D?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/-v1.4.4-111827?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/-v1.5.0%20dev-111827?style=flat-square">
   <img alt="License MIT" src="https://img.shields.io/badge/-MIT%20License-F59E0B?style=flat-square">
 </p>
 
@@ -25,8 +25,9 @@ Kubernetes regression now defaults to an active-active PlaySBC/RTPengine lab top
 
 ## Status
 
-- Version: `1.4.4`
-- Local baseline: `v1.4.2` remains the frozen kind/minikube/local regression reference.
+- Active development: `1.5.0`
+- Latest published release: `v1.4.4`
+- Local baseline: `v1.4.2` remains the frozen kind/minikube/local regression reference, and the v1.5.0 chart must continue to run the same kind regression path with locally built images.
 - License: MIT
 - Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v1.4.4>
 - Images: `ghcr.io/sudheerkumarvatrapu/playsbc:1.4.4`, `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.4.4`, `ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.4`, `ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.4`
@@ -174,9 +175,14 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regressio
   --build-playsbc-image \
   --build-runner-image \
   --build-sipp-image \
+  --build-rtpengine-image \
   --kind-load-images \
+  --set-playsbc-image \
+  --set-rtpengine-image \
   --kind-cluster playsbc
 ```
+
+This remains the required v1.5.0 kind safety gate. It builds PlaySBC, RTPengine, SIPp, and the regression runner from the current source tree and loads those images into kind, so it does not depend on published `v1.5.0` GHCR images.
 
 Full cluster creation, Helm install, rollout, and debug steps are in [docs/KUBERNETES_HELM_RUNBOOK.md](docs/KUBERNETES_HELM_RUNBOOK.md).
 

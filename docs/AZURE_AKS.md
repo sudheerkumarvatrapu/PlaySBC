@@ -8,7 +8,7 @@ This is the Azure-first deployment track for PlaySBC. The goal is to move from a
 | --- | --- |
 | `v1.4.3` | AKS Helm values, Azure Load Balancer service templates, static public IP wiring, private SIP service option, and observability-ready install commands. |
 | `v1.4.4` | AKS validation profiles, Azure-specific regression evidence, TLS certificate runbook, split public/private SIP exposure hardening, and single-call media dataplane checks. |
-| `v1.5.0` | Production-style AKS reference architecture with full RTP/SRTP media range model, dedicated node pools, NSG/Azure Firewall rules, external shared state, backup/restore, and multi-zone failure tests. |
+| `v1.5.0` | Production-style AKS reference architecture with full RTP/SRTP media range model, dedicated node pools, NSG/Azure Firewall rules, external shared state, backup/restore, multi-zone failure tests, and a three-hardphone lab. |
 
 ## Target AKS Shape
 
@@ -263,6 +263,7 @@ Prometheus keeps 31 days of data by default in the AKS values file.
 
 ## v1.5.0 Work Remaining
 
+- Preserve kind/minikube compatibility: upgrading the local chart to v1.5.0 and running the full Kubernetes regression with locally built images must stay green.
 - Full RTP/SRTP media range design using Azure networking rather than giant Service port lists.
 - Public/private realm separation with Multus or Azure CNI overlay-friendly alternatives.
 - Redis/PostgreSQL shared registrar/dialog state.

@@ -2,13 +2,15 @@
 
 This folder keeps local release notes and Helm chart packages for PlaySBC.
 
-Current release:
+Latest published release:
 
 - Version: `1.4.4`
 - Helm chart package: `helm/playsbc-1.4.4.tgz`
 - Project license: MIT
 - Chart version: `1.4.4`
 - Application version: `1.4.4`
+
+Active development has started on `1.5.0`. Until `v1.5.0` is published, use locally built images for kind/minikube regression.
 
 Rebuild the Helm package with:
 

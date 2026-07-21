@@ -1647,6 +1647,68 @@ Content-Length: 0
         self.assertIn("--aks-profiles", aks_doc)
         self.assertIn("v1.5.0", aks_doc)
 
+    def test_v150_start_keeps_kind_regression_path(self):
+        chart = ROOT / "charts" / "playsbc"
+        version = (ROOT / "VERSION").read_text(encoding="utf-8")
+        chart_yaml = (chart / "Chart.yaml").read_text(encoding="utf-8")
+        values = (chart / "values.yaml").read_text(encoding="utf-8")
+        aks_values = (ROOT / "configs" / "kubernetes" / "aks-values.yaml").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs" / "KUBERNETES_HELM_RUNBOOK.md").read_text(encoding="utf-8")
+        release_notes = (ROOT / "release" / "RELEASE_NOTES_1.5.0.md").read_text(encoding="utf-8")
+
+        self.assertEqual(version.strip(), "1.5.0")
+        self.assertIn("version: 1.5.0", chart_yaml)
+        self.assertIn('appVersion: "1.5.0"', chart_yaml)
+        self.assertIn('tag: "1.5.0"', values)
+        self.assertIn('tag: "1.5.0"', aks_values)
+        self.assertIn("v1.5.0 chart must continue to run", readme)
+        self.assertIn("v1.5.0 development safety gate", runbook)
+        self.assertIn("builds PlaySBC, RTPengine, SIPp, and regression-runner images", release_notes)
+
+        args = run_k8s_regression_job.parse_args(
+            [
+                "--all-profiles",
+                "--build-playsbc-image",
+                "--build-runner-image",
+                "--build-sipp-image",
+                "--build-rtpengine-image",
+                "--kind-load-images",
+                "--set-playsbc-image",
+                "--set-rtpengine-image",
+                "--kind-cluster",
+                "playsbc",
+            ]
+        )
+        self.assertTrue(args.build_playsbc_image)
+        self.assertTrue(args.build_runner_image)
+        self.assertTrue(args.build_sipp_image)
+        self.assertTrue(args.build_rtpengine_image)
+        self.assertTrue(args.kind_load_images)
+        self.assertTrue(args.load_rtpengine_image)
+        self.assertTrue(args.set_playsbc_image)
+        self.assertTrue(args.set_rtpengine_image)
+        self.assertEqual(args.playsbc_image, "playsbc:k8s-regression")
+        self.assertEqual(args.rtpengine_image, "playsbc/rtpengine:local")
+        self.assertEqual(args.runner_image, "playsbc-k8s-regression:local")
+        self.assertEqual(args.sipp_image, "playsbc-sipp:local")
+
+        auto_args = run_k8s_regression_job.parse_args(
+            [
+                "--all-profiles",
+                "--build-playsbc-image",
+                "--build-runner-image",
+                "--build-sipp-image",
+                "--build-rtpengine-image",
+                "--kind-load-images",
+                "--kind-cluster",
+                "playsbc",
+            ]
+        )
+        self.assertTrue(auto_args.set_playsbc_image)
+        self.assertTrue(auto_args.set_rtpengine_image)
+        self.assertTrue(auto_args.load_rtpengine_image)
+
     def test_b2bua_profiles_are_listed(self):
         completed = subprocess.run(
             [
