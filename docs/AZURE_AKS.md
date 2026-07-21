@@ -28,7 +28,7 @@ Observability
   -> Grafana PlaySBC Core/Peer SBC Lab dashboard
 ```
 
-## What v1.4.4 Provides
+## What v1.5.0 Provides
 
 - `configs/kubernetes/aks-values.yaml`
 - Azure public SIP LoadBalancer service:
@@ -46,12 +46,13 @@ Observability
   - `aks-services-describe.log`
   - `aks-validation.json`
 - 31-day Prometheus retention and Grafana dashboard enabled by values.
+- Published `v1.5.0` image/chart coordinates for Azure portal validation.
 
 ## Important Media Note
 
 Kubernetes Service objects do not express a compact UDP port range like `30000-32000`. Listing thousands of RTP ports in one Service is ugly and not the production answer.
 
-For `v1.4.4`, PlaySBC keeps RTPengine media range configuration in Helm values and supports a small explicit media-port list for lab exposure. Full RTP/SRTP range exposure on AKS is tracked for `v1.5.0` using dedicated Azure networking: node pools, NSGs, Azure Firewall or equivalent, static IP/NAT behavior, and RTPengine advertised-address handling.
+For `v1.5.0`, PlaySBC keeps RTPengine media range configuration in Helm values and supports a small explicit media-port list for lab exposure. Full production RTP/SRTP range exposure on AKS remains a cloud-validation hardening item using dedicated Azure networking: node pools, NSGs, Azure Firewall or equivalent, static IP/NAT behavior, and RTPengine advertised-address handling.
 
 ## Azure Prerequisites
 
@@ -141,7 +142,7 @@ export NODE_RG=$(az aks show \
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.4/playsbc-1.4.4.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.0/playsbc-1.5.0.tgz \
   --namespace playsbc \
   --create-namespace \
   -f configs/kubernetes/aks-values.yaml \
@@ -150,9 +151,9 @@ helm upgrade --install playsbc \
   --set cloud.azure.sip.public.publicIPName="$SIP_PIP_NAME" \
   --set cloud.azure.sip.public.dnsLabelName="$DNS_LABEL" \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.4.4 \
+  --set-string image.tag=1.5.0 \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.4.4
+  --set-string rtpengine.image.tag=1.5.0
 ```
 
 Wait for workloads:
@@ -181,7 +182,7 @@ kubectl -n playsbc create secret tls playsbc-sip-tls \
   --key=/path/to/tls.key
 
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.4.4/playsbc-1.4.4.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.0/playsbc-1.5.0.tgz \
   --namespace playsbc \
   -f configs/kubernetes/aks-values.yaml \
   --set tls.enabled=true \
@@ -195,9 +196,9 @@ Run this after the Helm rollout is ready. It validates the Azure LoadBalancer se
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --aks-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.4 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.4 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.4.4 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.0 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.0 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.0 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image
@@ -209,15 +210,15 @@ Use the stricter form only when Azure has already assigned the external SIP IP:
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --aks-profiles \
   --aks-require-public-sip-ingress \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.4 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.4 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.4.4 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.0 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.0 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.0 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image
 ```
 
-The v1.4.4 AKS profile set covers:
+The v1.5.0 AKS profile set covers:
 
 | Profile | Purpose |
 | --- | --- |
@@ -261,9 +262,8 @@ http://127.0.0.1:3000/d/playsbc-sbc-lab/playsbc-core-peer-sbc-lab
 
 Prometheus keeps 31 days of data by default in the AKS values file.
 
-## v1.5.0 Work Remaining
+## AKS Hardening Work Remaining
 
-- Preserve kind/minikube compatibility: upgrading the local chart to v1.5.0 and running the full Kubernetes regression with locally built images must stay green.
 - Full RTP/SRTP media range design using Azure networking rather than giant Service port lists.
 - Public/private realm separation with Multus or Azure CNI overlay-friendly alternatives.
 - Redis/PostgreSQL shared registrar/dialog state.

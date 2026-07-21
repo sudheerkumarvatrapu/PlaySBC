@@ -2,21 +2,19 @@
 
 This folder keeps local release notes and Helm chart packages for PlaySBC.
 
-Latest published release:
+Current release:
 
-- Version: `1.4.4`
-- Helm chart package: `helm/playsbc-1.4.4.tgz`
+- Version: `1.5.0`
+- Helm chart package: `helm/playsbc-1.5.0.tgz`
 - Project license: MIT
-- Chart version: `1.4.4`
-- Application version: `1.4.4`
-
-Active development has started on `1.5.0`. Until `v1.5.0` is published, use locally built images for kind/minikube regression.
+- Chart version: `1.5.0`
+- Application version: `1.5.0`
 
 Rebuild the Helm package with:
 
 ```bash
 helm package charts/playsbc --destination release/helm
-shasum -a 256 release/helm/playsbc-1.4.4.tgz > release/helm/playsbc-1.4.4.tgz.sha256
+shasum -a 256 release/helm/playsbc-1.5.0.tgz > release/helm/playsbc-1.5.0.tgz.sha256
 ```
 
 ## Container Image Deployment
@@ -25,27 +23,27 @@ The `.tgz` chart package contains Kubernetes manifests and config, not image lay
 
 Published GHCR images for this release:
 
-- `ghcr.io/sudheerkumarvatrapu/playsbc:1.4.4`
-- `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.4.4`
-- `ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.4`
-- `ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.4`
+- `ghcr.io/sudheerkumarvatrapu/playsbc:1.5.0`
+- `ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:1.5.0`
+- `ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.0`
+- `ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.0`
 
 Deploy the release chart:
 
 ```bash
-helm upgrade --install playsbc helm/playsbc-1.4.4.tgz \
+helm upgrade --install playsbc helm/playsbc-1.5.0.tgz \
   --namespace playsbc \
   --create-namespace \
   -f configs/kubernetes/active-active-values.yaml \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.4.4 \
+  --set-string image.tag=1.5.0 \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.4.4 \
+  --set-string rtpengine.image.tag=1.5.0 \
   --set rtpengine.hostNetwork=false
 ```
 
-This is the normal Kubernetes shape for `v1.4.4` and later:
+This is the normal Kubernetes shape for `v1.5.0` and later:
 
 ```text
 PlaySBC StatefulSet replicas: 2
@@ -61,9 +59,9 @@ Kubernetes regression from published images:
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --all-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.4.4 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.4.4 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.4.4 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.0 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.0 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.0 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image \

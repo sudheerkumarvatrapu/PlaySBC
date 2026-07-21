@@ -82,7 +82,7 @@ Azure release track:
 - `v1.4.2`: frozen local lab baseline for kind, minikube, local Docker regression, RTPengine, Rasa, Prometheus, and Grafana validation.
 - `v1.4.3`: AKS Helm values, Azure public SIP LoadBalancer service, optional private SIP LoadBalancer service, static public IP annotations, lab media-port service wiring, observability defaults, and `docs/AZURE_AKS.md`.
 - `v1.4.4`: AKS-specific regression/report evidence, `--aks-profiles`, Azure LoadBalancer validation for SIP UDP/TCP/TLS, TLS certificate lifecycle notes, per-exposure source CIDR hardening, and single-call media dataplane checks.
-- `v1.5.0`: first Azure AKS public-cloud validation target with production-style reference architecture, dedicated node pools, full RTP/SRTP range model, NSG/Azure Firewall guidance, external shared state, multi-zone failure testing, backup/restore, upgrade/rollback operations, and a three-hardphone registration/calling lab. The same v1.5.0 chart must also stay kind-compatible through the local-image Kubernetes regression command.
+- `v1.5.0`: first Azure AKS public-cloud validation target with production-style reference architecture, dedicated node pools, RTP/SRTP range validation path, NSG/Azure Firewall guidance, external shared state planning, multi-zone failure planning, backup/restore planning, upgrade/rollback planning, and a three-hardphone registration/calling lab target. The same v1.5.0 chart must also stay kind-compatible through the local-image Kubernetes regression command.
 
 Production-readiness gates:
 
