@@ -61,7 +61,7 @@ image:
   # For direct deployments after image publishing, use:
   # repository: ghcr.io/sudheerkumarvatrapu/playsbc
   repository: playsbc
-  tag: "1.4.3"
+  tag: "1.4.4"
   pullPolicy: IfNotPresent
 
 service:
@@ -87,11 +87,13 @@ cloud:
         publicIPv4: ""
         publicIPResourceGroup: ""
         dnsLabelName: ""
+        allowedSourceRanges: []
         annotations: {}
       private:
         enabled: false
         privateIPv4: ""
         subnetName: ""
+        allowedSourceRanges: []
         annotations: {}
     media:
       public:
@@ -100,6 +102,7 @@ cloud:
         publicIPv4: ""
         publicIPResourceGroup: ""
         dnsLabelName: ""
+        allowedSourceRanges: []
         annotations: {}
         ports: []
       documentedPortRange:

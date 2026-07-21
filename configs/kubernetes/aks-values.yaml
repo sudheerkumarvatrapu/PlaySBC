@@ -37,7 +37,7 @@ replicaCount: 2
 
 image:
   repository: ghcr.io/sudheerkumarvatrapu/playsbc
-  tag: "1.4.3"
+  tag: "1.4.4"
   pullPolicy: Always
 
 service:
@@ -62,16 +62,22 @@ cloud:
         publicIPName: playsbc-sip-pip
         publicIPResourceGroup: playsbc-network-rg
         dnsLabelName: playsbc-sip-lab
+        allowedSourceRanges:
+          - 203.0.113.0/24
       private:
         enabled: false
         subnetName: playsbc-private-subnet
         privateIPv4: 10.10.10.50
+        allowedSourceRanges:
+          - 10.0.0.0/8
     media:
       public:
         enabled: false
         publicIPName: playsbc-rtp-pip
         publicIPResourceGroup: playsbc-network-rg
         dnsLabelName: playsbc-rtp-lab
+        allowedSourceRanges:
+          - 203.0.113.0/24
         # Lab-only explicit media ports. Kubernetes Services do not support
         # a compact UDP port range, so full RTP/SRTP range exposure is handled
         # in the Azure networking hardening track.
@@ -88,7 +94,7 @@ rtpengine:
   enabled: true
   image:
     repository: ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine
-    tag: "1.4.3"
+    tag: "1.4.4"
     pullPolicy: Always
   replicas: 2
   hostNetwork: false

@@ -2,7 +2,7 @@
 
 PlaySBC is an enterprise-style SIP/RTP experimentation lab today, not a production-certified SBC yet.
 
-The long-term mission is serious: evolve PlaySBC from the current `v1.4.3` lab-grade active-active SBC into a public-cloud production SBC line over future major releases, with Azure as the first priority cloud and AWS next. The target future state is a PlaySBC `v10.x.x` generation that can be validated for large-scale SIP gateway deployments such as hundreds of thousands of registered devices and thousands of concurrent calls.
+The long-term mission is serious: evolve PlaySBC from the current `v1.4.4` AKS-readiness line into a public-cloud production SBC line over future major releases, with Azure as the first priority cloud and AWS next. The target future state is a PlaySBC `v10.x.x` generation that can be validated for large-scale SIP gateway deployments such as hundreds of thousands of registered devices and thousands of concurrent calls.
 
 That production path must be earned with benchmarks, security hardening, carrier-grade HA behavior, long soak runs, and cloud networking proof. Until those gates are met, PlaySBC should be described as a lab and regression platform, not a replacement for certified commercial SBCs.
 
@@ -79,9 +79,10 @@ Target direction:
 
 Azure release track:
 
+- `v1.4.2`: frozen local lab baseline for kind, minikube, local Docker regression, RTPengine, Rasa, Prometheus, and Grafana validation.
 - `v1.4.3`: AKS Helm values, Azure public SIP LoadBalancer service, optional private SIP LoadBalancer service, static public IP annotations, lab media-port service wiring, observability defaults, and `docs/AZURE_AKS.md`.
-- `v1.4.4`: AKS-specific regression/report evidence, Azure Load Balancer validation for SIP UDP/TCP/TLS, TLS certificate lifecycle notes, private/public realm hardening, and media dataplane checks.
-- `v1.5.0`: production-style AKS reference architecture with dedicated node pools, full RTP/SRTP range model, NSG/Azure Firewall guidance, external shared state, multi-zone failure testing, backup/restore, and upgrade/rollback operations.
+- `v1.4.4`: AKS-specific regression/report evidence, `--aks-profiles`, Azure LoadBalancer validation for SIP UDP/TCP/TLS, TLS certificate lifecycle notes, per-exposure source CIDR hardening, and single-call media dataplane checks.
+- `v1.5.0`: first Azure AKS public-cloud validation target with production-style reference architecture, dedicated node pools, full RTP/SRTP range model, NSG/Azure Firewall guidance, external shared state, multi-zone failure testing, backup/restore, upgrade/rollback operations, and a three-hardphone registration/calling lab.
 
 Production-readiness gates:
 

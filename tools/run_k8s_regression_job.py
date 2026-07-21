@@ -20,8 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.run_k8s_regression import (  # noqa: E402
     ALL_PROFILES,
+    AKS_PROFILES,
     RASA_PROFILES,
     SELECTABLE_PROFILES,
+    make_aks_run_id,
     make_rasa_run_id,
     make_run_id,
 )
@@ -33,6 +35,9 @@ DEFAULT_REMOTE_OUTPUT_ROOT = "k8s-Regression"
 DEFAULT_REMOTE_REPORT_DIR = "k8s-reports"
 RASA_REMOTE_OUTPUT_ROOT = "RASA-Regression"
 RASA_REMOTE_REPORT_DIR = "RASA-reports"
+AKS_OUTPUT_DIR = str(ROOT / "logs" / "AKS-Regression")
+AKS_REMOTE_OUTPUT_ROOT = "AKS-Regression"
+AKS_REMOTE_REPORT_DIR = "AKS-reports"
 DEFAULT_ROLLOUT_TIMEOUT = 120
 RASA_ROLLOUT_TIMEOUT = 600
 
@@ -234,13 +239,25 @@ def runner_command_args(args: argparse.Namespace) -> list[str]:
         "--skip-namespace-check",
     ]
     profiles = args.profile or []
-    if args.rasa_profiles:
+    if args.aks_profiles:
+        command.append("--aks-profiles")
+    elif args.rasa_profiles:
         command.append("--rasa-profiles")
     elif args.all_profiles or not profiles:
         command.append("--all-profiles")
     else:
         for profile in profiles:
             command.extend(["--profile", profile])
+    if args.aks_mode:
+        command.append("--aks-mode")
+    if args.aks_require_azure_services:
+        command.append("--aks-require-azure-services")
+    if args.aks_require_static_sip:
+        command.append("--aks-require-static-sip")
+    if args.aks_require_public_sip_ingress:
+        command.append("--aks-require-public-sip-ingress")
+    if args.aks_services_selector != "playsbc.io/cloud=azure":
+        command.extend(["--aks-services-selector", args.aks_services_selector])
     if not args.rtpengine_enabled:
         command.append("--no-rtpengine-enabled")
     if args.require_multus:
@@ -489,7 +506,7 @@ def collect_job_outputs(args: argparse.Namespace, pod_name: str, logs_text: str)
 def should_cleanup_local_logs(args: argparse.Namespace) -> bool:
     if args.keep_old_logs:
         return False
-    return bool(args.rasa_profiles or args.all_profiles or not args.profile)
+    return bool(args.rasa_profiles or args.aks_profiles or args.all_profiles or not args.profile)
 
 
 def wait_for_runner(args: argparse.Namespace) -> tuple[str, str, str]:
@@ -604,6 +621,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
     parser.add_argument("--all-profiles", action="store_true", help="Run all canonical Kubernetes regression profiles; default when --profile is omitted")
     parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa profiles")
+    parser.add_argument("--aks-profiles", action="store_true", help="Run only the Azure AKS readiness profiles")
+    parser.add_argument("--aks-mode", action=argparse.BooleanOptionalAction, default=False, help="Collect Azure AKS LoadBalancer evidence in each bundle")
+    parser.add_argument("--aks-services-selector", default="playsbc.io/cloud=azure", help="Label selector for Azure-specific LoadBalancer services")
+    parser.add_argument("--aks-require-azure-services", action=argparse.BooleanOptionalAction, default=False, help="Fail when the Azure SIP public LoadBalancer service is missing")
+    parser.add_argument("--aks-require-static-sip", action=argparse.BooleanOptionalAction, default=False, help="Fail when the Azure SIP public service lacks a static IP annotation")
+    parser.add_argument("--aks-require-public-sip-ingress", action=argparse.BooleanOptionalAction, default=False, help="Fail until Azure assigns an external public SIP ingress address")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--active-active-topology", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--playsbc-replicas", type=int, default=2)
@@ -649,6 +672,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         raise SystemExit("Kubernetes regression Job mode is fixed to the playsbc namespace.")
     if args.rasa_profiles and (args.all_profiles or args.profile):
         raise SystemExit("--rasa-profiles cannot be combined with --all-profiles or --profile")
+    if args.aks_profiles and (args.rasa_profiles or args.all_profiles or args.profile):
+        raise SystemExit("--aks-profiles cannot be combined with --rasa-profiles, --all-profiles, or --profile")
     if args.rasa_profiles:
         if args.output_dir == DEFAULT_OUTPUT_DIR:
             args.output_dir = RASA_OUTPUT_DIR
@@ -658,13 +683,23 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             args.remote_report_dir_name = RASA_REMOTE_REPORT_DIR
         if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
             args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
+    if args.aks_profiles:
+        args.aks_mode = True
+        args.aks_require_azure_services = True
+        args.aks_require_static_sip = True
+        if args.output_dir == DEFAULT_OUTPUT_DIR:
+            args.output_dir = AKS_OUTPUT_DIR
+        if args.remote_output_root_name == DEFAULT_REMOTE_OUTPUT_ROOT:
+            args.remote_output_root_name = AKS_REMOTE_OUTPUT_ROOT
+        if args.remote_report_dir_name == DEFAULT_REMOTE_REPORT_DIR:
+            args.remote_report_dir_name = AKS_REMOTE_REPORT_DIR
     if args.playsbc_replicas < 1:
         raise SystemExit("--playsbc-replicas must be at least 1")
     if args.rtpengine_replicas < 1:
         raise SystemExit("--rtpengine-replicas must be at least 1")
     if args.require_multus and not args.multus_enabled:
         raise SystemExit("--require-multus also requires --multus-enabled")
-    args.run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_run_id())
+    args.run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_aks_run_id() if args.aks_profiles else make_run_id())
     args.job_name = args.job_name or args.run_id
     if len(args.job_name) > 63:
         args.job_name = args.job_name[:63].rstrip("-")
@@ -677,6 +712,9 @@ def main() -> int:
     args = parse_args()
     if args.rasa_profiles:
         print(f"Launching Kubernetes RASA Regression Job for {len(RASA_PROFILES)} profiles.")
+        print(f"Local output directory: {args.output_dir}")
+    elif args.aks_profiles:
+        print(f"Launching Azure AKS Regression Job for {len(AKS_PROFILES)} profiles.")
         print(f"Local output directory: {args.output_dir}")
     elif args.all_profiles or not args.profile:
         print(f"Launching Kubernetes Job for {len(ALL_PROFILES)} profiles.")

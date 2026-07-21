@@ -1637,8 +1637,14 @@ Content-Length: 0
         self.assertIn("service.beta.kubernetes.io/azure-load-balancer-internal", azure)
         self.assertIn("playsbc.io/exposure: sip-public", azure)
         self.assertIn("playsbc.io/exposure: rtp-public", azure)
+        self.assertIn("allowedSourceRanges", values)
+        self.assertIn("$sipPublicAllowedRanges", azure)
+        self.assertIn("$sipPrivateAllowedRanges", azure)
+        self.assertIn("$mediaPublicAllowedRanges", azure)
         self.assertIn("Kubernetes Services do not support", aks_values)
         self.assertIn("Azure-first deployment track", aks_doc)
+        self.assertIn("Run AKS Readiness Regression", aks_doc)
+        self.assertIn("--aks-profiles", aks_doc)
         self.assertIn("v1.5.0", aks_doc)
 
     def test_b2bua_profiles_are_listed(self):
@@ -3273,6 +3279,34 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_k8s_regression.RASA_PROFILES)
         self.assertIn("ai-rasa-long-response-streaming", run_k8s_regression.RASA_PROFILES)
         self.assertIn("ai-rasa-contact-center-sales-coqui", run_k8s_regression.RASA_PROFILES)
+
+    def test_kubernetes_aks_profile_shortcut_uses_dedicated_outputs_and_validation(self):
+        args = run_k8s_regression.parse_args(["--aks-profiles"])
+        self.assertEqual(run_k8s_regression.selected_profiles(args), run_k8s_regression.AKS_PROFILES)
+        self.assertEqual(args.output_root, str(ROOT / "logs" / "AKS-Regression"))
+        self.assertEqual(args.report_dir, str(ROOT / "logs" / "AKS-Regression" / "reports"))
+        self.assertTrue(args.aks_mode)
+        self.assertTrue(args.aks_require_azure_services)
+        self.assertTrue(args.aks_require_static_sip)
+        self.assertFalse(args.aks_require_public_sip_ingress)
+        self.assertIn("tls-transport-policy", run_k8s_regression.AKS_PROFILES)
+        self.assertIn("rtpengine-transcoding", run_k8s_regression.AKS_PROFILES)
+
+        job_args = run_k8s_regression_job.parse_args(["--aks-profiles"])
+        command = run_k8s_regression_job.runner_command_args(job_args)
+
+        self.assertEqual(job_args.output_dir, str(ROOT / "logs" / "AKS-Regression"))
+        self.assertEqual(job_args.remote_output_root_name, "AKS-Regression")
+        self.assertEqual(job_args.remote_report_dir_name, "AKS-reports")
+        self.assertTrue(job_args.run_id.startswith("aks-regression-"))
+        self.assertIn("--aks-profiles", command)
+        self.assertIn("--aks-mode", command)
+        self.assertIn("--aks-require-azure-services", command)
+        self.assertIn("--aks-require-static-sip", command)
+        self.assertNotIn("--all-profiles", command)
+        self.assertIn("/workspace/logs/AKS-Regression", command)
+        self.assertIn("/workspace/logs/AKS-reports", command)
+        self.assertTrue(run_k8s_regression_job.should_cleanup_local_logs(job_args))
 
     def test_kubernetes_full_suite_keeps_existing_output_layout(self):
         args = run_k8s_regression_job.parse_args(["--all-profiles"])

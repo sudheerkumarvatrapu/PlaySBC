@@ -2,7 +2,7 @@
 {{- $azure := get $cloud "azure" | default dict -}}
 {{- if get $azure "enabled" }}
 {{- $lb := get $azure "loadBalancer" | default dict -}}
-{{- $allowedRanges := get $lb "allowedSourceRanges" | default list -}}
+{{- $globalAllowedRanges := get $lb "allowedSourceRanges" | default list -}}
 {{- $sip := get $azure "sip" | default dict -}}
 {{- $sipPublic := get $sip "public" | default dict -}}
 {{- $sipPrivate := get $sip "private" | default dict -}}
@@ -11,6 +11,7 @@
 {{- $nodeRg := get $azure "nodeResourceGroup" | default "" -}}
 {{- $externalTrafficPolicy := get $lb "externalTrafficPolicy" | default "Local" -}}
 {{- if get $sipPublic "enabled" }}
+{{- $sipPublicAllowedRanges := get $sipPublic "allowedSourceRanges" | default $globalAllowedRanges -}}
 ---
 apiVersion: v1
 kind: Service
@@ -40,9 +41,9 @@ metadata:
 spec:
   type: LoadBalancer
   externalTrafficPolicy: {{ $externalTrafficPolicy }}
-{{- if $allowedRanges }}
+{{- if $sipPublicAllowedRanges }}
   loadBalancerSourceRanges:
-{{ toYaml $allowedRanges | indent 4 }}
+{{ toYaml $sipPublicAllowedRanges | indent 4 }}
 {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "playsbc.name" . }}
@@ -64,8 +65,9 @@ spec:
       port: {{ .Values.service.healthPort }}
       targetPort: health
       protocol: TCP
-{{- end }}
+{{ end }}
 {{- if get $sipPrivate "enabled" }}
+{{- $sipPrivateAllowedRanges := get $sipPrivate "allowedSourceRanges" | default list -}}
 ---
 apiVersion: v1
 kind: Service
@@ -90,6 +92,10 @@ metadata:
 spec:
   type: LoadBalancer
   externalTrafficPolicy: {{ $externalTrafficPolicy }}
+{{- if $sipPrivateAllowedRanges }}
+  loadBalancerSourceRanges:
+{{ toYaml $sipPrivateAllowedRanges | indent 4 }}
+{{- end }}
   selector:
     app.kubernetes.io/name: {{ include "playsbc.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -110,9 +116,10 @@ spec:
       port: {{ .Values.service.healthPort }}
       targetPort: health
       protocol: TCP
-{{- end }}
+{{ end }}
 {{- if get $mediaPublic "enabled" }}
 {{- $mediaPorts := get $mediaPublic "ports" | default list -}}
+{{- $mediaPublicAllowedRanges := get $mediaPublic "allowedSourceRanges" | default $globalAllowedRanges -}}
 {{- if $mediaPorts }}
 ---
 apiVersion: v1
@@ -143,9 +150,9 @@ metadata:
 spec:
   type: LoadBalancer
   externalTrafficPolicy: {{ $externalTrafficPolicy }}
-{{- if $allowedRanges }}
+{{- if $mediaPublicAllowedRanges }}
   loadBalancerSourceRanges:
-{{ toYaml $allowedRanges | indent 4 }}
+{{ toYaml $mediaPublicAllowedRanges | indent 4 }}
 {{- end }}
   selector:
     app.kubernetes.io/name: {{ include "playsbc.name" . }}-rtpengine

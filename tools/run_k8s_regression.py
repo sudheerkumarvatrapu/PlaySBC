@@ -55,12 +55,26 @@ RASA_NLU_PROFILES = ("ai-rasa-chat-nlu", "ai-rasa-chat-negative")
 ALL_PROFILES = (*ALL_B2BUA_PROFILES, *RASA_NLU_PROFILES)
 CATALOG_PROFILES = ALL_B2BUA_PROFILES
 RASA_PROFILES = (*RASA_B2BUA_PROFILES, *RASA_NLU_PROFILES)
+AKS_PROFILES = (
+    "esbc-options-keepalive",
+    "register-auth-success",
+    "registered-inbound",
+    "rtpengine-media",
+    "rtpengine-transcoding",
+    "tcp-rtpengine-transcoding",
+    "tls-transport-policy",
+    "tls-srtp-to-udp-rtp",
+    "udp-rtp-to-tls-srtp",
+    "rtcp-receiver-quality",
+)
 SELECTABLE_PROFILES = (*SMOKE_PROFILES, *ALL_PROFILES)
 LAB_TLS_SECRET_NAME = "playsbc-regression-tls"
 DEFAULT_OUTPUT_ROOT = str(ROOT / "logs" / "k8s-Regression")
 DEFAULT_REPORT_DIR = str(ROOT / "logs" / "k8s-reports")
 RASA_OUTPUT_ROOT = str(ROOT / "logs" / "RASA-Regression")
 RASA_REPORT_DIR = str(ROOT / "logs" / "RASA-Regression" / "reports")
+AKS_OUTPUT_ROOT = str(ROOT / "logs" / "AKS-Regression")
+AKS_REPORT_DIR = str(ROOT / "logs" / "AKS-Regression" / "reports")
 RASA_NLU_CASE_FILES = {
     "ai-rasa-chat-nlu": ROOT / "tests" / "rasa" / "chat_nlu_cases.yml",
     "ai-rasa-chat-negative": ROOT / "tests" / "rasa" / "chat_negative_cases.yml",
@@ -183,7 +197,13 @@ def make_rasa_run_id() -> str:
     return time.strftime("rasa-regression-%Y%m%d-%H%M%S", time.localtime())
 
 
+def make_aks_run_id() -> str:
+    return time.strftime("aks-regression-%Y%m%d-%H%M%S", time.localtime())
+
+
 def selected_profiles(args: argparse.Namespace) -> tuple[str, ...]:
+    if getattr(args, "aks_profiles", False):
+        return AKS_PROFILES
     if getattr(args, "rasa_profiles", False):
         return RASA_PROFILES
     if getattr(args, "all_profiles", False):
@@ -1051,6 +1071,7 @@ class K8sRegressionRunner:
         manifest = scenario_configmap_manifest(self.args.configmap)
         result = self.kubectl("apply", "-f", "-", input_text=json.dumps(manifest), check=True)
         self.write_log(bundle, "log.platform", "K8S REGRESSION PREPARED", result.stdout or "scenario configmap applied")
+        aks_detail = self.validate_aks_exposure(bundle) if getattr(self.args, "aks_mode", False) else "aks_mode=false"
         phases.append(
             "Setup Preparation",
             "passed",
@@ -1058,9 +1079,117 @@ class K8sRegressionRunner:
             (
                 f"Verified namespace={self.args.namespace}, service={self.args.service}:{self.args.sip_port}, "
                 f"namespace_check={not self.args.skip_namespace_check}, and applied ConfigMap={self.args.configmap} "
-                "with SIPp XML scenarios."
+                f"with SIPp XML scenarios. {aks_detail}"
             ),
         )
+
+    def validate_aks_exposure(self, bundle: Path) -> str:
+        selector = getattr(self.args, "aks_services_selector", "playsbc.io/cloud=azure")
+        result = self.kubectl("get", "svc", "-l", selector, "-o", "json", check=False)
+        (bundle / "aks-services.json").write_text(result.stdout + result.stderr, encoding="utf-8")
+        wide = self.kubectl("get", "svc", "-l", selector, "-o", "wide", check=False)
+        (bundle / "aks-services-wide.log").write_text(wide.stdout + wide.stderr, encoding="utf-8")
+        described = self.kubectl("describe", "svc", "-l", selector, check=False)
+        (bundle / "aks-services-describe.log").write_text(described.stdout + described.stderr, encoding="utf-8")
+
+        issues: list[str] = []
+        items: list[dict[str, Any]] = []
+        try:
+            parsed = json.loads(result.stdout or "{}")
+            raw_items = parsed.get("items", []) if isinstance(parsed, dict) else []
+            items = [item for item in raw_items if isinstance(item, dict)]
+        except json.JSONDecodeError as exc:
+            issues.append(f"invalid_service_json={exc}")
+
+        def exposure(item: dict[str, Any]) -> str:
+            return str(item.get("metadata", {}).get("labels", {}).get("playsbc.io/exposure", ""))
+
+        def service_name(item: dict[str, Any]) -> str:
+            return str(item.get("metadata", {}).get("name", "unknown"))
+
+        def port_tuples(item: dict[str, Any]) -> set[tuple[str, int]]:
+            ports = item.get("spec", {}).get("ports", [])
+            tuples: set[tuple[str, int]] = set()
+            if isinstance(ports, list):
+                for port in ports:
+                    if not isinstance(port, dict):
+                        continue
+                    try:
+                        tuples.add((str(port.get("protocol", "")).upper(), int(port.get("port", 0))))
+                    except (TypeError, ValueError):
+                        continue
+            return tuples
+
+        sip_public = [item for item in items if exposure(item) == "sip-public"]
+        sip_private = [item for item in items if exposure(item) == "sip-private"]
+        rtp_public = [item for item in items if exposure(item) == "rtp-public"]
+        if getattr(self.args, "aks_require_azure_services", False) and not sip_public:
+            issues.append("missing_sip_public_loadbalancer_service")
+
+        for item in sip_public:
+            name = service_name(item)
+            spec = item.get("spec", {})
+            annotations = item.get("metadata", {}).get("annotations", {})
+            ports = port_tuples(item)
+            if spec.get("type") != "LoadBalancer":
+                issues.append(f"{name}:type_not_loadbalancer")
+            if spec.get("externalTrafficPolicy") != "Local":
+                issues.append(f"{name}:externalTrafficPolicy_not_Local")
+            if ("UDP", int(self.args.sip_port)) not in ports:
+                issues.append(f"{name}:missing_sip_udp_{self.args.sip_port}")
+            if ("TCP", int(self.args.sip_port)) not in ports:
+                issues.append(f"{name}:missing_sip_tcp_{self.args.sip_port}")
+            if ("TCP", int(self.args.tls_port)) not in ports:
+                issues.append(f"{name}:missing_sip_tls_{self.args.tls_port}")
+            has_static_ref = bool(
+                annotations.get("service.beta.kubernetes.io/azure-pip-name")
+                or annotations.get("service.beta.kubernetes.io/azure-load-balancer-ipv4")
+            )
+            if getattr(self.args, "aks_require_static_sip", False) and not has_static_ref:
+                issues.append(f"{name}:missing_static_public_ip_annotation")
+            ingress = item.get("status", {}).get("loadBalancer", {}).get("ingress", [])
+            if getattr(self.args, "aks_require_public_sip_ingress", False) and not ingress:
+                issues.append(f"{name}:missing_allocated_public_ingress")
+
+        for item in sip_private:
+            name = service_name(item)
+            annotations = item.get("metadata", {}).get("annotations", {})
+            if annotations.get("service.beta.kubernetes.io/azure-load-balancer-internal") != "true":
+                issues.append(f"{name}:missing_internal_loadbalancer_annotation")
+
+        for item in rtp_public:
+            name = service_name(item)
+            for protocol, port in port_tuples(item):
+                if protocol != "UDP":
+                    issues.append(f"{name}:non_udp_media_port_{port}")
+
+        summary = {
+            "selector": selector,
+            "services": [service_name(item) for item in items],
+            "sip_public": [service_name(item) for item in sip_public],
+            "sip_private": [service_name(item) for item in sip_private],
+            "rtp_public": [service_name(item) for item in rtp_public],
+            "require_azure_services": bool(getattr(self.args, "aks_require_azure_services", False)),
+            "require_static_sip": bool(getattr(self.args, "aks_require_static_sip", False)),
+            "require_public_sip_ingress": bool(getattr(self.args, "aks_require_public_sip_ingress", False)),
+            "issues": issues,
+        }
+        (bundle / "aks-validation.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+        detail = (
+            f"AKS exposure validation services={','.join(summary['services']) or 'none'} "
+            f"sip_public={','.join(summary['sip_public']) or 'none'} "
+            f"sip_private={','.join(summary['sip_private']) or 'none'} "
+            f"rtp_public={','.join(summary['rtp_public']) or 'none'} "
+            f"issues={','.join(issues) or 'none'}"
+        )
+        self.write_log(bundle, "log.platform", "AKS AZURE EXPOSURE VALIDATION", detail)
+        if issues and (
+            getattr(self.args, "aks_require_azure_services", False)
+            or getattr(self.args, "aks_require_static_sip", False)
+            or getattr(self.args, "aks_require_public_sip_ingress", False)
+        ):
+            raise RuntimeError(f"AKS Azure exposure validation failed: {', '.join(issues)}")
+        return detail
 
     def build_and_load_sipp_image(self, bundle: Path, phases: PhaseLog) -> None:
         if not self.args.build_sipp_image and not self.args.kind_load_image:
@@ -2050,8 +2179,11 @@ class K8sRegressionRunner:
             )
 
         returncode = 0 if status == "passed" else next((code for code in returncodes if code != 0), 1)
+        suite = profile_suite_label(profile)
+        if getattr(self.args, "aks_mode", False):
+            suite = f"Azure AKS {suite}"
         return ReportRow(
-            suite=profile_suite_label(profile),
+            suite=suite,
             name=profile_execution_label(profile),
             status=status,
             returncode=returncode,
@@ -2855,6 +2987,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--profile", action="append", choices=SELECTABLE_PROFILES)
     parser.add_argument("--all-profiles", action="store_true", help="Run the canonical Kubernetes profile catalog, including SIPp, Rasa voice, and Rasa chat/NLU profiles")
     parser.add_argument("--rasa-profiles", action="store_true", help="Run only the Kubernetes AI/Rasa voice and chat/NLU profiles")
+    parser.add_argument("--aks-profiles", action="store_true", help="Run the Azure AKS readiness profile set and collect Azure LoadBalancer evidence")
+    parser.add_argument("--aks-mode", action=argparse.BooleanOptionalAction, default=False, help="Collect Azure AKS LoadBalancer exposure evidence in each bundle")
+    parser.add_argument("--aks-services-selector", default="playsbc.io/cloud=azure", help="Label selector for Azure-specific LoadBalancer services")
+    parser.add_argument("--aks-require-azure-services", action=argparse.BooleanOptionalAction, default=False, help="Fail when the Azure SIP public LoadBalancer service is missing")
+    parser.add_argument("--aks-require-static-sip", action=argparse.BooleanOptionalAction, default=False, help="Fail when the Azure SIP public service lacks a static IP annotation")
+    parser.add_argument("--aks-require-public-sip-ingress", action=argparse.BooleanOptionalAction, default=False, help="Fail until Azure assigns an external public SIP ingress address")
     parser.add_argument("--list-profiles", action="store_true")
     parser.add_argument("--rtpengine-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--active-active-topology", action=argparse.BooleanOptionalAction, default=True, help="Run Kubernetes profiles with active-active PlaySBC/RTPengine topology")
@@ -2889,6 +3027,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.rasa_profiles and (args.all_profiles or args.profile):
         raise SystemExit("--rasa-profiles cannot be combined with --all-profiles or --profile")
+    if args.aks_profiles and (args.rasa_profiles or args.all_profiles or args.profile):
+        raise SystemExit("--aks-profiles cannot be combined with --rasa-profiles, --all-profiles, or --profile")
     if args.rasa_profiles:
         if args.output_root == DEFAULT_OUTPUT_ROOT:
             args.output_root = RASA_OUTPUT_ROOT
@@ -2896,6 +3036,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             args.report_dir = RASA_REPORT_DIR
         if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
             args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
+    if args.aks_profiles:
+        args.aks_mode = True
+        args.aks_require_azure_services = True
+        args.aks_require_static_sip = True
+        if args.output_root == DEFAULT_OUTPUT_ROOT:
+            args.output_root = AKS_OUTPUT_ROOT
+        if args.report_dir == DEFAULT_REPORT_DIR:
+            args.report_dir = AKS_REPORT_DIR
     if args.playsbc_replicas < 1:
         raise SystemExit("--playsbc-replicas must be at least 1")
     if args.rtpengine_replicas < 1:
@@ -2918,15 +3066,18 @@ def main() -> int:
         print("\nRasa shortcut:")
         for profile in RASA_PROFILES:
             print(f"  --rasa-profiles includes {profile}: {profile_display_title(profile)}")
+        print("\nAzure AKS shortcut:")
+        for profile in AKS_PROFILES:
+            print(f"  --aks-profiles includes {profile}: {PROFILE_DESCRIPTIONS.get(profile, 'AKS readiness profile')}")
         print("\nSmoke aliases:")
         for profile in SMOKE_PROFILES:
             print(f"  {profile}")
         return 0
     profiles = selected_profiles(args)
-    run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_run_id())
+    run_id = args.run_id or (make_rasa_run_id() if args.rasa_profiles else make_aks_run_id() if args.aks_profiles else make_run_id())
     output_root = Path(args.output_root)
     report_dir = Path(args.report_dir)
-    if args.rasa_profiles and not args.keep_old_logs:
+    if (args.rasa_profiles or args.aks_profiles) and not args.keep_old_logs:
         shutil.rmtree(output_root, ignore_errors=True)
         if not report_dir.is_relative_to(output_root):
             shutil.rmtree(report_dir, ignore_errors=True)
