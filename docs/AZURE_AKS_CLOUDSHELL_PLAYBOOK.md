@@ -2,6 +2,15 @@
 
 This playbook is the exact first-cloud-lab path for PlaySBC on Azure: create a low-cost AKS test cluster, import PlaySBC images, deploy one PlaySBC pod plus one RTPengine pod, expose SIP and a small RTP media range with Azure LoadBalancers, run the AKS regression profiles from Cloud Shell, and download the evidence.
 
+Validated with `v1.5.2`:
+
+- Azure free subscription plus ephemeral Cloud Shell.
+- One PlaySBC pod and one RTPengine pod on AKS.
+- Public SIP and RTP LoadBalancer services.
+- External SIPp OPTIONS/REGISTER sanity from a Mac to the Azure SIP public IP.
+- AKS regression report generation under `logs/AKS-Regression`.
+- Cloud Shell credential refresh using an `az rest` fallback when `az aks get-credentials` hits an Azure CLI API-version mismatch.
+
 Official references:
 
 - Azure free account: <https://azure.microsoft.com/free/>
@@ -23,7 +32,7 @@ az group delete --name "$NETWORK_RG" --yes --no-wait
 2. Open **Cloud Shell** from the top toolbar.
 3. Pick **Bash**.
 4. If Cloud Shell asks for a subscription, select your free subscription.
-5. Ephemeral Cloud Shell is fine for this playbook; download the evidence bundle before closing the session.
+5. Ephemeral Cloud Shell is fine for this playbook, but files can disappear after the session ends. Download the regression evidence bundle before closing the session. If `/home/sudheer` is empty later, rerun the regression because the old local evidence is gone.
 
 If Cloud Shell asks for provider registration:
 
@@ -62,7 +71,7 @@ export SIP_PIP_NAME=playsbc-sip-pip
 export RTP_PIP_NAME=playsbc-rtp-pip
 export DNS_LABEL=playsbc-sip-lab-$RANDOM
 export RTP_DNS_LABEL=playsbc-rtp-lab-$RANDOM
-export PLAYSBC_VERSION=1.5.1
+export PLAYSBC_VERSION=1.5.2
 ```
 
 Check the generated names:
@@ -151,6 +160,46 @@ kubectl get pods -A
 ```
 
 Expected: the AKS node is `Ready` and `kube-system` pods are `Running`.
+
+### If Cloud Shell Credentials Expire
+
+In a new Cloud Shell session, environment variables and kube credentials may be gone. Re-export the stable names first:
+
+```bash
+export LOCATION=eastus
+export AKS_RG=playsbc-aks-rg
+export NETWORK_RG=playsbc-network-rg
+export AKS_NAME=playsbc-aks
+export PLAYSBC_VERSION=1.5.2
+export ACR_NAME=$(az acr list --resource-group "$AKS_RG" --query "[0].name" -o tsv)
+```
+
+Try the normal AKS credential refresh:
+
+```bash
+az aks get-credentials \
+  --resource-group "$AKS_RG" \
+  --name "$AKS_NAME" \
+  --overwrite-existing
+```
+
+If Azure CLI returns an error like `InvalidApiVersionParameter` for `api-version '2026-03-01'`, write kubeconfig through ARM REST with a supported API version:
+
+```bash
+SUB_ID=$(az account show --query id -o tsv)
+mkdir -p ~/.kube
+
+az rest \
+  --method post \
+  --url "https://management.azure.com/subscriptions/$SUB_ID/resourceGroups/$AKS_RG/providers/Microsoft.ContainerService/managedClusters/$AKS_NAME/listClusterUserCredential?api-version=2025-04-01" \
+  --query "kubeconfigs[0].value" \
+  -o tsv | base64 -d > ~/.kube/config
+
+chmod 600 ~/.kube/config
+kubectl get pods -n playsbc
+```
+
+This does not redeploy anything; it only restores `kubectl` access to the existing AKS cluster.
 
 ## 7. Create Static Public IPs
 
@@ -417,7 +466,7 @@ Download from Cloud Shell:
 3. Paste the expanded path, for example:
 
 ```text
-/home/sudheer/PlaySBC-v1.5.1/logs/AKS-Regression/aks-regression-YYYYMMDD-HHMMSS/AKS-reports/latest.html
+/home/sudheer/PlaySBC-v1.5.2/logs/AKS-Regression/aks-regression-YYYYMMDD-HHMMSS/AKS-reports/latest.html
 ```
 
 For the full evidence bundle:
@@ -425,13 +474,16 @@ For the full evidence bundle:
 ```bash
 cd ~/PlaySBC-v$PLAYSBC_VERSION/logs/AKS-Regression
 tar -czf latest-aks-regression.tgz "$(basename "$RUN")"
+ls -lh latest-aks-regression.tgz
 ```
 
 Download:
 
 ```text
-/home/sudheer/PlaySBC-v1.5.1/logs/AKS-Regression/latest-aks-regression.tgz
+/home/sudheer/PlaySBC-v1.5.2/logs/AKS-Regression/latest-aks-regression.tgz
 ```
+
+If that path is missing after reconnecting to Cloud Shell, the session was ephemeral and the evidence was not persisted. The AKS pods may still be running, but the local report files are gone; rerun the AKS regression and download the `.tgz` immediately.
 
 ## 13. Useful Debug Commands
 
@@ -455,4 +507,3 @@ az group delete --name "$NETWORK_RG" --yes --no-wait
 ```
 
 This deletes AKS, ACR, public IPs, load balancers, and related lab resources.
-

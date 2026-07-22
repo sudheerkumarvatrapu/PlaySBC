@@ -2,8 +2,8 @@ apiVersion: v2
 name: playsbc
 description: PlaySBC SIP, RTP, B2BUA, transcoding and regression lab server
 type: application
-version: 1.5.1
-appVersion: "1.5.1"
+version: 1.5.2
+appVersion: "1.5.2"
 home: https://github.com/sudheerkumarvatrapu/PlaySBC
 sources:
   - https://github.com/sudheerkumarvatrapu/PlaySBC
