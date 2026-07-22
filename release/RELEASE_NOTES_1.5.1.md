@@ -19,7 +19,7 @@ PlaySBC `v1.5.1` is the Azure AKS Cloud Shell playbook release.
 
 ## New Documentation
 
-- `docs/AZURE_AKS_CLOUDSHELL_PLAYBOOK.md`
+- Azure Cloud Shell steps. These are now merged into `docs/AZURE_AKS.md` so the Azure path has one guide.
 
 The playbook covers:
 
@@ -51,4 +51,3 @@ The playbook was created from a successful Azure Cloud Shell run where:
 ## Notes
 
 This remains a lab validation release, not a carrier-production Azure SBC claim. Keep Azure test windows short and delete the lab resource groups after evidence is downloaded.
-

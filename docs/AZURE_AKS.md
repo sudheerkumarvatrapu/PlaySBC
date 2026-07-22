@@ -1,113 +1,173 @@
 # PlaySBC On Azure AKS
 
-This is the Azure-first deployment track for PlaySBC. The goal is to move from a local SBC lab to an AKS-hosted SBC reference architecture without pretending the first cloud cut is already carrier production.
+This is the single Azure guide for PlaySBC. It covers the low-cost Cloud Shell lab, AKS deployment, SIP/RTP LoadBalancers, AKS regression, report download, credential recovery, and cleanup.
+
+Use this as a lab path, not a production SBC claim. Keep test windows short and delete the resource groups when finished.
+
+## What This Deploys
+
+```text
+Mac / SIPp / SIP peer
+  -> Azure public SIP LoadBalancer
+     -> PlaySBC pod
+        -> RTPengine pod
+           -> Azure public RTP LoadBalancer
+```
+
+The first Azure lab intentionally uses:
+
+- one AKS node,
+- one PlaySBC pod,
+- one RTPengine pod,
+- explicit lab RTP ports,
+- AKS regression profiles only.
+
+Active-active, full media ranges, hardphones, and production-grade state are future cloud hardening work.
 
 ## Release Track
 
 | Release | Focus |
 | --- | --- |
-| `v1.4.3` | AKS Helm values, Azure Load Balancer service templates, static public IP wiring, private SIP service option, and observability-ready install commands. |
-| `v1.4.4` | AKS validation profiles, Azure-specific regression evidence, TLS certificate runbook, split public/private SIP exposure hardening, and single-call media dataplane checks. |
-| `v1.5.0` | Production-style AKS reference architecture with full RTP/SRTP media range model, dedicated node pools, NSG/Azure Firewall rules, external shared state, backup/restore, multi-zone failure tests, and a three-hardphone lab. |
-| `v1.5.1` | Cloud Shell playbook for free-account AKS validation: ACR import, one PlaySBC pod, one RTPengine pod, public SIP/RTP LoadBalancers, AKS regression, evidence download, and cleanup. |
-| `v1.5.2` | Cloud Shell recovery hardening: credential refresh fallback for Azure CLI API-version mismatch, ephemeral report handling, and evidence-bundle download workflow. |
-| `v1.5.3` | Cloud Shell cleanup hardening: asynchronous `az group delete --no-wait` behavior, resource-group deletion monitoring, and final cost-stop verification. |
+| `v1.4.3` | AKS Helm values and Azure LoadBalancer service templates. |
+| `v1.4.4` | AKS validation profiles and Azure regression evidence. |
+| `v1.5.0` | First Azure public-cloud validation target. |
+| `v1.5.1` | Cloud Shell end-to-end lab playbook. |
+| `v1.5.2` | Cloud Shell credential and ephemeral-report recovery. |
+| `v1.5.3` | Async Azure cleanup monitoring. |
+| `v1.5.4` | Merged Azure/Cloud Shell docs into this single crisp guide. |
 
-For the copy/paste deployment path validated in Azure Cloud Shell, use [Azure AKS Cloud Shell Playbook](AZURE_AKS_CLOUDSHELL_PLAYBOOK.md).
+## Cost Guardrail
 
-## Target AKS Shape
+The Azure free account may include starter credit, but AKS worker VMs, public IPs, load balancers, storage, and ACR can still consume that credit.
 
-```text
-Internet / SIP trunk peers
-  -> Azure Standard Load Balancer
-     -> PlaySBC active-active StatefulSet
-        -> paired RTPengine StatefulSet
-           -> RTP/SRTP media ports
+Final cleanup is complete only when both return `false`:
 
-Private enterprise/core side
-  -> optional internal Azure Load Balancer
-     -> same PlaySBC active-active pods
-
-Observability
-  -> Prometheus
-  -> Grafana PlaySBC Core/Peer SBC Lab dashboard
+```bash
+az group exists --name "$AKS_RG"
+az group exists --name "$NETWORK_RG"
 ```
 
-## What v1.5.x Provides
+## 1. Start Cloud Shell
 
-- `configs/kubernetes/aks-values.yaml`
-- Azure public SIP LoadBalancer service:
-  - SIP UDP on `service.sipPort`
-  - SIP TCP on `service.sipPort`
-  - SIP TLS on `service.tlsPort`
-  - health TCP on `service.healthPort`
-- Optional Azure internal SIP LoadBalancer service for private/core-side reachability.
-- Optional RTPengine public UDP media service for explicit lab ports.
-- Per-exposure source CIDR controls for public SIP, private SIP, and lab RTP services.
-- `--aks-profiles` Kubernetes regression shortcut with dedicated `logs/AKS-Regression` evidence.
-- AKS bundle evidence:
-  - `aks-services.json`
-  - `aks-services-wide.log`
-  - `aks-services-describe.log`
-  - `aks-validation.json`
-- 31-day Prometheus retention and Grafana dashboard enabled by values.
-- Published `v1.5.3` image/chart coordinates for Azure portal and Cloud Shell validation.
-- Cloud Shell recovery notes for expired kube credentials and missing ephemeral report files.
-- Cloud Shell cleanup notes for confirming that both the AKS resource group and the network resource group are fully deleted.
+1. Open <https://portal.azure.com/>.
+2. Start **Cloud Shell**.
+3. Select **Bash**.
+4. Use your free subscription.
 
-## Important Media Note
+If Cloud Shell asks for provider registration:
 
-Kubernetes Service objects do not express a compact UDP port range like `30000-32000`. Listing thousands of RTP ports in one Service is ugly and not the production answer.
+```bash
+az provider register --namespace Microsoft.CloudShell
+az provider show --namespace Microsoft.CloudShell --query registrationState -o tsv
+```
 
-For `v1.5.x`, PlaySBC keeps RTPengine media range configuration in Helm values and supports a small explicit media-port list for lab exposure. Full production RTP/SRTP range exposure on AKS remains a cloud-validation hardening item using dedicated Azure networking: node pools, NSGs, Azure Firewall or equivalent, static IP/NAT behavior, and RTPengine advertised-address handling.
+Cloud Shell can be ephemeral. Download AKS regression evidence before closing the session.
 
-## Azure Prerequisites
-
-- Azure CLI logged in.
-- AKS cluster using Standard Load Balancer.
-- Helm and `kubectl`.
-- GHCR images reachable from the AKS nodes.
-- Static Public IP for SIP ingress.
-- Network Contributor permission for the AKS cluster identity on the Public IP resource group.
-
-Microsoft AKS currently recommends service annotations such as `service.beta.kubernetes.io/azure-pip-name` or `service.beta.kubernetes.io/azure-load-balancer-ipv4` for static IP assignment rather than relying on deprecated `loadBalancerIP`.
-
-## Create Azure Resources
-
-Set your names:
+## 2. Set Variables
 
 ```bash
 export LOCATION=eastus
 export AKS_RG=playsbc-aks-rg
 export NETWORK_RG=playsbc-network-rg
 export AKS_NAME=playsbc-aks
+export ACR_NAME=playsbcacr$RANDOM
 export SIP_PIP_NAME=playsbc-sip-pip
-export DNS_LABEL=playsbc-sip-lab
+export RTP_PIP_NAME=playsbc-rtp-pip
+export DNS_LABEL=playsbc-sip-lab-$RANDOM
+export RTP_DNS_LABEL=playsbc-rtp-lab-$RANDOM
+export PLAYSBC_VERSION=1.5.4
 ```
 
-Create resource groups:
+## 3. Register Azure Providers
+
+```bash
+az provider register --namespace Microsoft.ContainerRegistry
+az provider register --namespace Microsoft.ContainerService
+az provider register --namespace Microsoft.Network
+az provider register --namespace Microsoft.Compute
+az provider register --namespace Microsoft.ManagedIdentity
+
+az provider show --namespace Microsoft.ContainerRegistry --query registrationState -o tsv
+az provider show --namespace Microsoft.ContainerService --query registrationState -o tsv
+az provider show --namespace Microsoft.Network --query registrationState -o tsv
+az provider show --namespace Microsoft.Compute --query registrationState -o tsv
+az provider show --namespace Microsoft.ManagedIdentity --query registrationState -o tsv
+```
+
+Continue after they show `Registered`.
+
+## 4. Create Resource Groups
 
 ```bash
 az group create --name "$AKS_RG" --location "$LOCATION"
 az group create --name "$NETWORK_RG" --location "$LOCATION"
 ```
 
-Create AKS:
+## 5. Create ACR And Import Images
+
+```bash
+az acr create \
+  --resource-group "$AKS_RG" \
+  --name "$ACR_NAME" \
+  --sku Basic
+
+az acr import --name "$ACR_NAME" \
+  --source ghcr.io/sudheerkumarvatrapu/playsbc:$PLAYSBC_VERSION \
+  --image playsbc:$PLAYSBC_VERSION
+
+az acr import --name "$ACR_NAME" \
+  --source ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:$PLAYSBC_VERSION \
+  --image playsbc-rtpengine:$PLAYSBC_VERSION
+
+az acr import --name "$ACR_NAME" \
+  --source ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:$PLAYSBC_VERSION \
+  --image playsbc-k8s-regression:$PLAYSBC_VERSION
+
+az acr import --name "$ACR_NAME" \
+  --source ghcr.io/sudheerkumarvatrapu/playsbc-sipp:$PLAYSBC_VERSION \
+  --image playsbc-sipp:$PLAYSBC_VERSION
+
+az acr repository list --name "$ACR_NAME" -o table
+```
+
+## 6. Create AKS
 
 ```bash
 az aks create \
   --resource-group "$AKS_RG" \
   --name "$AKS_NAME" \
   --location "$LOCATION" \
-  --node-count 3 \
+  --tier free \
+  --node-count 1 \
+  --node-vm-size Standard_D2as_v7 \
   --load-balancer-sku standard \
+  --attach-acr "$ACR_NAME" \
   --generate-ssh-keys
-
-az aks get-credentials --resource-group "$AKS_RG" --name "$AKS_NAME"
-kubectl create namespace playsbc
 ```
 
-Create a static public IP:
+If Azure rejects that VM size in your subscription or region, try:
+
+```text
+Standard_D2s_v7
+Standard_D2ds_v7
+Standard_F2as_v7
+```
+
+Connect:
+
+```bash
+az aks get-credentials \
+  --resource-group "$AKS_RG" \
+  --name "$AKS_NAME" \
+  --overwrite-existing
+
+kubectl get nodes
+kubectl get pods -A
+```
+
+Expected: one AKS node is `Ready`.
+
+## 7. Create Public IPs
 
 ```bash
 az network public-ip create \
@@ -115,19 +175,31 @@ az network public-ip create \
   --name "$SIP_PIP_NAME" \
   --sku Standard \
   --allocation-method static \
-  --version IPv4
+  --version IPv4 \
+  --dns-name "$DNS_LABEL"
+
+az network public-ip create \
+  --resource-group "$NETWORK_RG" \
+  --name "$RTP_PIP_NAME" \
+  --sku Standard \
+  --allocation-method static \
+  --version IPv4 \
+  --dns-name "$RTP_DNS_LABEL"
 ```
 
-Allow AKS to attach that IP:
+Grant AKS permission to attach them:
 
 ```bash
-export AKS_PRINCIPAL_ID=$(az aks show \
+AKS_PRINCIPAL_ID=$(az aks show \
   --resource-group "$AKS_RG" \
   --name "$AKS_NAME" \
   --query identity.principalId \
   -o tsv)
 
-export NETWORK_RG_ID=$(az group show --name "$NETWORK_RG" --query id -o tsv)
+NETWORK_RG_ID=$(az group show \
+  --name "$NETWORK_RG" \
+  --query id \
+  -o tsv)
 
 az role assignment create \
   --assignee "$AKS_PRINCIPAL_ID" \
@@ -135,152 +207,325 @@ az role assignment create \
   --scope "$NETWORK_RG_ID"
 ```
 
-Find the AKS node resource group:
+## 8. Deploy PlaySBC And RTPengine
+
+Create the lab values file:
 
 ```bash
-export NODE_RG=$(az aks show \
+NODE_RG=$(az aks show \
   --resource-group "$AKS_RG" \
   --name "$AKS_NAME" \
   --query nodeResourceGroup \
   -o tsv)
+
+cat > playsbc-azure-lab-values.yaml <<EOF
+cloud:
+  provider: azure
+  azure:
+    enabled: true
+    nodeResourceGroup: "$NODE_RG"
+    sip:
+      public:
+        enabled: true
+        publicIPResourceGroup: "$NETWORK_RG"
+        publicIPName: "$SIP_PIP_NAME"
+        dnsLabelName: "$DNS_LABEL"
+    media:
+      public:
+        enabled: true
+        publicIPResourceGroup: "$NETWORK_RG"
+        publicIPName: "$RTP_PIP_NAME"
+        dnsLabelName: "$RTP_DNS_LABEL"
+        ports:
+          - 30000
+          - 30001
+          - 30002
+          - 30003
+          - 30004
+          - 30005
+          - 30006
+          - 30007
+          - 30008
+          - 30009
+          - 30010
+          - 30011
+          - 30012
+          - 30013
+          - 30014
+          - 30015
+          - 30016
+          - 30017
+          - 30018
+          - 30019
+
+topology:
+  activeActive:
+    enabled: false
+
+replicaCount: 1
+
+observability:
+  enabled: false
+
+rtpengine:
+  enabled: true
+  replicas: 1
+  hostNetwork: false
+  rtpMin: 30000
+  rtpMax: 30019
+EOF
 ```
 
-## Deploy PlaySBC
+Deploy:
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.3/playsbc-1.5.3.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v$PLAYSBC_VERSION/playsbc-$PLAYSBC_VERSION.tgz \
   --namespace playsbc \
   --create-namespace \
-  -f configs/kubernetes/aks-values.yaml \
-  --set cloud.azure.nodeResourceGroup="$NODE_RG" \
-  --set cloud.azure.sip.public.publicIPResourceGroup="$NETWORK_RG" \
-  --set cloud.azure.sip.public.publicIPName="$SIP_PIP_NAME" \
-  --set cloud.azure.sip.public.dnsLabelName="$DNS_LABEL" \
-  --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.5.3 \
-  --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.5.3
+  -f playsbc-azure-lab-values.yaml \
+  --set image.repository="$ACR_NAME.azurecr.io/playsbc" \
+  --set-string image.tag="$PLAYSBC_VERSION" \
+  --set image.pullPolicy=Always \
+  --set rtpengine.image.repository="$ACR_NAME.azurecr.io/playsbc-rtpengine" \
+  --set-string rtpengine.image.tag="$PLAYSBC_VERSION" \
+  --set rtpengine.image.pullPolicy=Always
 ```
 
-Wait for workloads:
+Verify:
 
 ```bash
-kubectl -n playsbc rollout status statefulset/playsbc-playsbc --timeout=300s
-kubectl -n playsbc rollout status statefulset/playsbc-playsbc-rtpengine --timeout=300s
-kubectl -n playsbc rollout status deployment/playsbc-playsbc-prometheus --timeout=300s
-kubectl -n playsbc rollout status deployment/playsbc-playsbc-grafana --timeout=300s
-```
-
-Check services:
-
-```bash
+kubectl -n playsbc get pods -o wide
 kubectl -n playsbc get svc -o wide
-kubectl -n playsbc describe svc playsbc-playsbc-azure-sip-public
+kubectl -n playsbc logs deployment/playsbc-playsbc --tail=80
+kubectl -n playsbc logs deployment/playsbc-playsbc-rtpengine --tail=80
 ```
 
-## TLS
-
-Create a TLS secret before enabling SIP TLS:
-
-```bash
-kubectl -n playsbc create secret tls playsbc-sip-tls \
-  --cert=/path/to/tls.crt \
-  --key=/path/to/tls.key
-
-helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.3/playsbc-1.5.3.tgz \
-  --namespace playsbc \
-  -f configs/kubernetes/aks-values.yaml \
-  --set tls.enabled=true \
-  --set tls.existingSecret=playsbc-sip-tls
-```
-
-## Run AKS Readiness Regression
-
-Run this after the Helm rollout is ready. It validates the Azure LoadBalancer service objects before each profile and stores local evidence under `logs/AKS-Regression`.
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
-  --aks-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.3 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.3 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.3 \
-  --set-playsbc-image \
-  --no-load-playsbc-image \
-  --no-load-sipp-image
-```
-
-Use the stricter form only when Azure has already assigned the external SIP IP:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
-  --aks-profiles \
-  --aks-require-public-sip-ingress \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.3 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.3 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.3 \
-  --set-playsbc-image \
-  --no-load-playsbc-image \
-  --no-load-sipp-image
-```
-
-The `v1.5.3` AKS profile set covers:
-
-| Profile | Purpose |
-| --- | --- |
-| `esbc-options-keepalive` | SIP listener and OPTIONS reachability. |
-| `register-auth-success` | SIP Digest REGISTER plus B2BUA call setup. |
-| `registered-inbound` | Registrar-backed inbound call routing. |
-| `rtpengine-media` | G.711 RTP call anchored by RTPengine. |
-| `rtpengine-transcoding` | PCMU-to-PCMA transcoding intent with RTPengine. |
-| `tcp-rtpengine-transcoding` | SIP over TCP plus media anchoring. |
-| `tls-transport-policy` | SIP over TLS transport policy. |
-| `tls-srtp-to-udp-rtp` | TLS/SRTP core leg to UDP/RTP peer leg. |
-| `udp-rtp-to-tls-srtp` | UDP/RTP core leg to TLS/SRTP peer leg. |
-| `rtcp-receiver-quality` | RTCP receiver-report quality analytics. |
-
-## Firewall And Port Checklist
-
-| Direction | Protocol | Port / Range | Purpose |
-| --- | --- | --- | --- |
-| Internet or SIP peer -> PlaySBC | UDP | `5060` | SIP UDP |
-| Internet or SIP peer -> PlaySBC | TCP | `5060` | SIP TCP |
-| Internet or SIP peer -> PlaySBC | TCP | `5061` | SIP TLS |
-| Load Balancer -> PlaySBC | TCP | `8080` | Health and metrics |
-| SIP/RTP peers -> RTPengine | UDP | `30000-32000` | RTP/SRTP media range target |
-| PlaySBC -> RTPengine | UDP | `2223` | RTPengine NG control |
-| Operators -> Grafana | TCP | `3000` | Dashboard, usually via private access or port-forward |
-| Operators -> Prometheus | TCP | `9090` | Metrics, usually private |
-
-Keep production source ranges narrow. Do not expose Grafana or Prometheus publicly.
-
-## Observability
-
-```bash
-kubectl -n playsbc port-forward svc/playsbc-playsbc-grafana 3000:3000
-```
-
-Open:
+Expected:
 
 ```text
-http://127.0.0.1:3000/d/playsbc-sbc-lab/playsbc-core-peer-sbc-lab
+playsbc-playsbc                    1/1 Running
+playsbc-playsbc-rtpengine          1/1 Running
+playsbc-playsbc-azure-sip-public   LoadBalancer EXTERNAL-IP
+playsbc-playsbc-azure-rtp-public   LoadBalancer EXTERNAL-IP
 ```
 
-Prometheus keeps 31 days of data by default in the AKS values file.
+## 9. Health Check
 
-## AKS Hardening Work Remaining
+Cloud Shell may reserve local port `8080`, so check from inside the pod:
 
-- Full RTP/SRTP media range design using Azure networking rather than giant Service port lists.
-- Public/private realm separation with Multus or Azure CNI overlay-friendly alternatives.
-- Redis/PostgreSQL shared registrar/dialog state.
-- Multi-zone AKS, PodDisruptionBudgets, node affinity, topology spread, and controlled drain tests.
-- Azure Monitor managed Prometheus / Managed Grafana option beside the in-chart lab stack.
-- Capacity tests with increasing registrations, CPS, concurrent calls, RTP sessions, and soak duration.
-- Real hardphone lab: register three SIP devices and call between them through Azure public SIP IP/DNS.
+```bash
+kubectl -n playsbc exec deployment/playsbc-playsbc -- \
+  python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/readyz').read().decode())"
+
+kubectl -n playsbc exec deployment/playsbc-playsbc -- \
+  python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/metrics').read().decode()[:1000])"
+```
+
+Expected:
+
+```text
+ready
+playsbc_active_calls 0
+```
+
+## 10. Optional External SIPp Check
+
+From your Mac:
+
+```bash
+sipp <SIP_PUBLIC_IP>:5062 \
+  -sf sipp/scenarios/options.xml \
+  -s playsbc \
+  -i 0.0.0.0 \
+  -p 5065 \
+  -m 1 \
+  -trace_msg \
+  -trace_err
+```
+
+Then in Cloud Shell:
+
+```bash
+kubectl -n playsbc logs deployment/playsbc-playsbc --tail=120
+```
+
+Expected:
+
+```text
+SIP OPTIONS from <your-public-ip>:5065
+```
+
+## 11. Run AKS Regression
+
+Clone the matching release source:
+
+```bash
+rm -rf PlaySBC-v$PLAYSBC_VERSION
+git clone --branch v$PLAYSBC_VERSION --depth 1 https://github.com/sudheerkumarvatrapu/PlaySBC.git PlaySBC-v$PLAYSBC_VERSION
+cd PlaySBC-v$PLAYSBC_VERSION
+```
+
+Run AKS profiles:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
+  --aks-profiles \
+  --aks-mode \
+  --aks-require-azure-services \
+  --aks-require-static-sip \
+  --aks-require-public-sip-ingress \
+  --runner-image "$ACR_NAME.azurecr.io/playsbc-k8s-regression:$PLAYSBC_VERSION" \
+  --sipp-image "$ACR_NAME.azurecr.io/playsbc-sipp:$PLAYSBC_VERSION" \
+  --playsbc-image "$ACR_NAME.azurecr.io/playsbc:$PLAYSBC_VERSION" \
+  --rtpengine-image "$ACR_NAME.azurecr.io/playsbc-rtpengine:$PLAYSBC_VERSION" \
+  --set-playsbc-image \
+  --set-rtpengine-image \
+  --no-load-playsbc-image \
+  --no-load-rtpengine-image \
+  --no-load-sipp-image \
+  --rtpengine-enabled \
+  --no-active-active-topology \
+  --job-timeout 3600
+```
+
+AKS profiles currently cover OPTIONS, REGISTER auth, registered inbound routing, RTPengine media, RTPengine transcoding, SIP TCP, SIP TLS, SRTP/RTP interop, and RTCP quality evidence.
+
+## 12. Download Report Evidence
+
+Find the latest run:
+
+```bash
+RUN=$(ls -td ~/PlaySBC-v$PLAYSBC_VERSION/logs/AKS-Regression/aks-regression-* | head -1)
+echo "$RUN"
+tail -120 "$RUN/runner.log"
+ls -l "$RUN/AKS-reports"
+```
+
+Download the HTML report:
+
+```text
+$RUN/AKS-reports/latest.html
+```
+
+Package and download the full bundle:
+
+```bash
+cd ~/PlaySBC-v$PLAYSBC_VERSION/logs/AKS-Regression
+tar -czf latest-aks-regression.tgz "$(basename "$RUN")"
+ls -lh latest-aks-regression.tgz
+```
+
+Download this path from the Cloud Shell toolbar:
+
+```text
+/home/sudheer/PlaySBC-v1.5.4/logs/AKS-Regression/latest-aks-regression.tgz
+```
+
+If the path is missing after reconnecting to Cloud Shell, the session was ephemeral. Rerun regression and download the `.tgz` immediately.
+
+## 13. Recover Kube Credentials
+
+In a new Cloud Shell session, re-export stable names:
+
+```bash
+export LOCATION=eastus
+export AKS_RG=playsbc-aks-rg
+export NETWORK_RG=playsbc-network-rg
+export AKS_NAME=playsbc-aks
+export PLAYSBC_VERSION=1.5.4
+export ACR_NAME=$(az acr list --resource-group "$AKS_RG" --query "[0].name" -o tsv)
+```
+
+Try:
+
+```bash
+az aks get-credentials \
+  --resource-group "$AKS_RG" \
+  --name "$AKS_NAME" \
+  --overwrite-existing
+```
+
+If Azure CLI returns `InvalidApiVersionParameter`, use the REST fallback:
+
+```bash
+SUB_ID=$(az account show --query id -o tsv)
+mkdir -p ~/.kube
+
+az rest \
+  --method post \
+  --url "https://management.azure.com/subscriptions/$SUB_ID/resourceGroups/$AKS_RG/providers/Microsoft.ContainerService/managedClusters/$AKS_NAME/listClusterUserCredential?api-version=2025-04-01" \
+  --query "kubeconfigs[0].value" \
+  -o tsv | base64 -d > ~/.kube/config
+
+chmod 600 ~/.kube/config
+kubectl get pods -n playsbc
+```
+
+## 14. Cleanup
+
+Start cleanup:
+
+```bash
+az group delete --name "$AKS_RG" --yes --no-wait
+az group delete --name "$NETWORK_RG" --yes --no-wait
+```
+
+`--no-wait` is asynchronous. It is normal to see:
+
+```text
+AKS_RG exists: true
+NETWORK_RG exists: false
+```
+
+That means the network group is gone while AKS is still deleting. `kubectl` may still show pods until the AKS API server disappears.
+
+Wait until both groups are gone:
+
+```bash
+while true; do
+  date
+  echo "AKS_RG exists: $(az group exists --name "$AKS_RG")"
+  echo "NETWORK_RG exists: $(az group exists --name "$NETWORK_RG")"
+
+  if [ "$(az group exists --name "$AKS_RG")" = "false" ] && \
+     [ "$(az group exists --name "$NETWORK_RG")" = "false" ]; then
+    echo "AKS lab cleanup completed."
+    break
+  fi
+
+  if [ "$(az group exists --name "$AKS_RG")" = "true" ]; then
+    az resource list \
+      --resource-group "$AKS_RG" \
+      --query "[].{name:name,type:type}" \
+      -o table
+  fi
+
+  sleep 30
+done
+```
+
+Final cost-stop gate:
+
+```text
+AKS_RG exists: false
+NETWORK_RG exists: false
+```
+
+After that, `kubectl get pods -n playsbc` should fail with an AKS API DNS error. That is expected.
+
+## Hardening Still To Do
+
+- Full RTP/SRTP media range model for production Azure networking.
+- Public/private realm separation with Azure CNI, Multus, or equivalent.
+- Redis/PostgreSQL shared registrar and dialog state.
+- Multi-zone AKS and node/pod failure testing.
+- Three-hardphone registration and calling lab.
+- Azure Monitor managed Prometheus / Managed Grafana option.
 
 ## References
 
-- Microsoft AKS static public IP with LoadBalancer: <https://learn.microsoft.com/azure/aks/static-ip>
-- Microsoft AKS Standard Load Balancer annotations and client IP behavior: <https://learn.microsoft.com/azure/aks/configure-load-balancer-standard>
-- Microsoft AKS internal LoadBalancer: <https://learn.microsoft.com/azure/aks/internal-lb>
+- Azure free account: <https://azure.microsoft.com/free/>
+- AKS Free tier: <https://learn.microsoft.com/azure/aks/free-standard-pricing-tiers>
+- AKS static public IP: <https://learn.microsoft.com/azure/aks/static-ip>
+- AKS Standard LoadBalancer: <https://learn.microsoft.com/azure/aks/configure-load-balancer-standard>
