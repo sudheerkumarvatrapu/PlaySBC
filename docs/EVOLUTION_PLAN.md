@@ -85,6 +85,7 @@ Azure release track:
 - `v1.5.0`: first Azure AKS public-cloud validation target with production-style reference architecture, dedicated node pools, RTP/SRTP range validation path, NSG/Azure Firewall guidance, external shared state planning, multi-zone failure planning, backup/restore planning, upgrade/rollback planning, and a three-hardphone registration/calling lab target. The same v1.5.0 chart must also stay kind-compatible through the local-image Kubernetes regression command.
 - `v1.5.1`: Azure Cloud Shell playbook milestone. Document the validated free-account AKS path end to end: provider registration, ACR import, one PlaySBC pod, one RTPengine pod, public SIP/RTP LoadBalancers, AKS regression profiles, report download, and cleanup.
 - `v1.5.2`: Azure Cloud Shell resilience milestone. Document the kube-credential refresh workaround for Azure CLI API-version mismatch, the need to re-export session variables, and immediate report/evidence download when Cloud Shell is ephemeral.
+- `v1.5.3`: Azure Cloud Shell cleanup milestone. Document asynchronous `az group delete --no-wait` behavior, split resource-group deletion progress, and the final verification gate that both lab resource groups are gone.
 
 Production-readiness gates:
 

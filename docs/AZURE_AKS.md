@@ -11,6 +11,7 @@ This is the Azure-first deployment track for PlaySBC. The goal is to move from a
 | `v1.5.0` | Production-style AKS reference architecture with full RTP/SRTP media range model, dedicated node pools, NSG/Azure Firewall rules, external shared state, backup/restore, multi-zone failure tests, and a three-hardphone lab. |
 | `v1.5.1` | Cloud Shell playbook for free-account AKS validation: ACR import, one PlaySBC pod, one RTPengine pod, public SIP/RTP LoadBalancers, AKS regression, evidence download, and cleanup. |
 | `v1.5.2` | Cloud Shell recovery hardening: credential refresh fallback for Azure CLI API-version mismatch, ephemeral report handling, and evidence-bundle download workflow. |
+| `v1.5.3` | Cloud Shell cleanup hardening: asynchronous `az group delete --no-wait` behavior, resource-group deletion monitoring, and final cost-stop verification. |
 
 For the copy/paste deployment path validated in Azure Cloud Shell, use [Azure AKS Cloud Shell Playbook](AZURE_AKS_CLOUDSHELL_PLAYBOOK.md).
 
@@ -50,8 +51,9 @@ Observability
   - `aks-services-describe.log`
   - `aks-validation.json`
 - 31-day Prometheus retention and Grafana dashboard enabled by values.
-- Published `v1.5.2` image/chart coordinates for Azure portal and Cloud Shell validation.
+- Published `v1.5.3` image/chart coordinates for Azure portal and Cloud Shell validation.
 - Cloud Shell recovery notes for expired kube credentials and missing ephemeral report files.
+- Cloud Shell cleanup notes for confirming that both the AKS resource group and the network resource group are fully deleted.
 
 ## Important Media Note
 
@@ -147,7 +149,7 @@ export NODE_RG=$(az aks show \
 
 ```bash
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.2/playsbc-1.5.2.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.3/playsbc-1.5.3.tgz \
   --namespace playsbc \
   --create-namespace \
   -f configs/kubernetes/aks-values.yaml \
@@ -156,9 +158,9 @@ helm upgrade --install playsbc \
   --set cloud.azure.sip.public.publicIPName="$SIP_PIP_NAME" \
   --set cloud.azure.sip.public.dnsLabelName="$DNS_LABEL" \
   --set image.repository=ghcr.io/sudheerkumarvatrapu/playsbc \
-  --set-string image.tag=1.5.2 \
+  --set-string image.tag=1.5.3 \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=1.5.2
+  --set-string rtpengine.image.tag=1.5.3
 ```
 
 Wait for workloads:
@@ -187,7 +189,7 @@ kubectl -n playsbc create secret tls playsbc-sip-tls \
   --key=/path/to/tls.key
 
 helm upgrade --install playsbc \
-  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.2/playsbc-1.5.2.tgz \
+  https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v1.5.3/playsbc-1.5.3.tgz \
   --namespace playsbc \
   -f configs/kubernetes/aks-values.yaml \
   --set tls.enabled=true \
@@ -201,9 +203,9 @@ Run this after the Helm rollout is ready. It validates the Azure LoadBalancer se
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --aks-profiles \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.2 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.2 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.2 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.3 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.3 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.3 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image
@@ -215,15 +217,15 @@ Use the stricter form only when Azure has already assigned the external SIP IP:
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regression_job.py \
   --aks-profiles \
   --aks-require-public-sip-ingress \
-  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.2 \
-  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.2 \
-  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.2 \
+  --runner-image ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:1.5.3 \
+  --sipp-image ghcr.io/sudheerkumarvatrapu/playsbc-sipp:1.5.3 \
+  --playsbc-image ghcr.io/sudheerkumarvatrapu/playsbc:1.5.3 \
   --set-playsbc-image \
   --no-load-playsbc-image \
   --no-load-sipp-image
 ```
 
-The `v1.5.2` AKS profile set covers:
+The `v1.5.3` AKS profile set covers:
 
 | Profile | Purpose |
 | --- | --- |

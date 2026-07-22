@@ -2,7 +2,7 @@
 
 This playbook is the exact first-cloud-lab path for PlaySBC on Azure: create a low-cost AKS test cluster, import PlaySBC images, deploy one PlaySBC pod plus one RTPengine pod, expose SIP and a small RTP media range with Azure LoadBalancers, run the AKS regression profiles from Cloud Shell, and download the evidence.
 
-Validated with `v1.5.2`:
+Validated with `v1.5.3`:
 
 - Azure free subscription plus ephemeral Cloud Shell.
 - One PlaySBC pod and one RTPengine pod on AKS.
@@ -10,6 +10,7 @@ Validated with `v1.5.2`:
 - External SIPp OPTIONS/REGISTER sanity from a Mac to the Azure SIP public IP.
 - AKS regression report generation under `logs/AKS-Regression`.
 - Cloud Shell credential refresh using an `az rest` fallback when `az aks get-credentials` hits an Azure CLI API-version mismatch.
+- Cleanup verification after `az group delete --no-wait`, including the normal case where the network resource group is gone before the AKS resource group finishes deleting.
 
 Official references:
 
@@ -25,6 +26,8 @@ The Azure free account may include starter credit, but AKS worker VMs, public IP
 az group delete --name "$AKS_RG" --yes --no-wait
 az group delete --name "$NETWORK_RG" --yes --no-wait
 ```
+
+`--no-wait` starts deletion in the background. Billing-related resources are not fully gone until both resource groups return `false` from `az group exists`.
 
 ## 1. Start From Azure Portal
 
@@ -71,7 +74,7 @@ export SIP_PIP_NAME=playsbc-sip-pip
 export RTP_PIP_NAME=playsbc-rtp-pip
 export DNS_LABEL=playsbc-sip-lab-$RANDOM
 export RTP_DNS_LABEL=playsbc-rtp-lab-$RANDOM
-export PLAYSBC_VERSION=1.5.2
+export PLAYSBC_VERSION=1.5.3
 ```
 
 Check the generated names:
@@ -170,7 +173,7 @@ export LOCATION=eastus
 export AKS_RG=playsbc-aks-rg
 export NETWORK_RG=playsbc-network-rg
 export AKS_NAME=playsbc-aks
-export PLAYSBC_VERSION=1.5.2
+export PLAYSBC_VERSION=1.5.3
 export ACR_NAME=$(az acr list --resource-group "$AKS_RG" --query "[0].name" -o tsv)
 ```
 
@@ -466,7 +469,7 @@ Download from Cloud Shell:
 3. Paste the expanded path, for example:
 
 ```text
-/home/sudheer/PlaySBC-v1.5.2/logs/AKS-Regression/aks-regression-YYYYMMDD-HHMMSS/AKS-reports/latest.html
+/home/sudheer/PlaySBC-v1.5.3/logs/AKS-Regression/aks-regression-YYYYMMDD-HHMMSS/AKS-reports/latest.html
 ```
 
 For the full evidence bundle:
@@ -480,7 +483,7 @@ ls -lh latest-aks-regression.tgz
 Download:
 
 ```text
-/home/sudheer/PlaySBC-v1.5.2/logs/AKS-Regression/latest-aks-regression.tgz
+/home/sudheer/PlaySBC-v1.5.3/logs/AKS-Regression/latest-aks-regression.tgz
 ```
 
 If that path is missing after reconnecting to Cloud Shell, the session was ephemeral and the evidence was not persisted. The AKS pods may still be running, but the local report files are gone; rerun the AKS regression and download the `.tgz` immediately.
@@ -506,4 +509,56 @@ az group delete --name "$AKS_RG" --yes --no-wait
 az group delete --name "$NETWORK_RG" --yes --no-wait
 ```
 
-This deletes AKS, ACR, public IPs, load balancers, and related lab resources.
+Deletion is asynchronous. It is normal to see:
+
+```text
+AKS_RG exists: true
+NETWORK_RG exists: false
+```
+
+That means the public IP / network resource group has already gone, while Azure is still deleting AKS, ACR, managed cluster references, node resources, disks, NICs, or load-balancer dependencies. `kubectl get pods -n playsbc` may still show old pods for a short time because the AKS API server has not been torn down yet.
+
+Check progress:
+
+```bash
+az group show \
+  --name "$AKS_RG" \
+  --query "properties.provisioningState" \
+  -o tsv
+
+az resource list \
+  --resource-group "$AKS_RG" \
+  -o table
+```
+
+Wait until both lab resource groups are gone:
+
+```bash
+while true; do
+  date
+  echo "AKS_RG exists: $(az group exists --name "$AKS_RG")"
+  echo "NETWORK_RG exists: $(az group exists --name "$NETWORK_RG")"
+
+  if [ "$(az group exists --name "$AKS_RG")" = "false" ] && \
+     [ "$(az group exists --name "$NETWORK_RG")" = "false" ]; then
+    echo "AKS lab cleanup completed."
+    break
+  fi
+
+  if [ "$(az group exists --name "$AKS_RG")" = "true" ]; then
+    az resource list \
+      --resource-group "$AKS_RG" \
+      --query "[].{name:name,type:type}" \
+      -o table
+  fi
+
+  sleep 30
+done
+```
+
+This deletes AKS, ACR, public IPs, load balancers, and related lab resources. The final cost-stop gate is:
+
+```text
+AKS_RG exists: false
+NETWORK_RG exists: false
+```
