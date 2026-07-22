@@ -240,7 +240,7 @@ PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache python3 tools/run_k8s_regressio
   --kind-cluster playsbc
 ```
 
-This is also the v1.5.0 development safety gate. If you upgrade the local chart/app version to v1.5.0 before publishing images, run this local-image command; it uses the source tree and does not require `ghcr.io/...:1.5.0` to exist yet.
+This is also the v1.5.0 development safety gate. If you upgrade the local chart/app version to v1.5.0 before publishing images, run this local-image command; it uses the source tree and does not require `ghcr.io/...:1.5.1` to exist yet.
 
 Use published release images:
 

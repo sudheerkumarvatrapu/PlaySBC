@@ -83,6 +83,7 @@ Azure release track:
 - `v1.4.3`: AKS Helm values, Azure public SIP LoadBalancer service, optional private SIP LoadBalancer service, static public IP annotations, lab media-port service wiring, observability defaults, and `docs/AZURE_AKS.md`.
 - `v1.4.4`: AKS-specific regression/report evidence, `--aks-profiles`, Azure LoadBalancer validation for SIP UDP/TCP/TLS, TLS certificate lifecycle notes, per-exposure source CIDR hardening, and single-call media dataplane checks.
 - `v1.5.0`: first Azure AKS public-cloud validation target with production-style reference architecture, dedicated node pools, RTP/SRTP range validation path, NSG/Azure Firewall guidance, external shared state planning, multi-zone failure planning, backup/restore planning, upgrade/rollback planning, and a three-hardphone registration/calling lab target. The same v1.5.0 chart must also stay kind-compatible through the local-image Kubernetes regression command.
+- `v1.5.1`: Azure Cloud Shell playbook milestone. Document the validated free-account AKS path end to end: provider registration, ACR import, one PlaySBC pod, one RTPengine pod, public SIP/RTP LoadBalancers, AKS regression profiles, report download, and cleanup.
 
 Production-readiness gates:
 
