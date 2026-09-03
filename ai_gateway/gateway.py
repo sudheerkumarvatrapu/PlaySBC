@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .adapters import SpeechToTextAdapter, SttResult, TextToSpeechAdapter, TtsResult
+from .providers import ConversationProvider, ConversationRequest, RasaConversationProvider, collect_responses
 from .rasa import RasaBotResponse, RasaRestClient, RasaRestConfig, RasaRestError
 
 
@@ -167,7 +168,7 @@ class DtmfIntentMapper:
 
 
 class AiVoiceGateway:
-    def __init__(self, config: AiVoiceConfig):
+    def __init__(self, config: AiVoiceConfig, conversation_provider: Optional[ConversationProvider] = None):
         if config.provider != "rasa":
             raise ValueError(f"Unsupported AI voice provider {config.provider!r}")
         self.config = config
@@ -177,6 +178,7 @@ class AiVoiceGateway:
                 timeout=config.rasa_timeout,
             )
         )
+        self.conversation_provider = conversation_provider or RasaConversationProvider(self.rasa)
         self.dtmf_mapper = DtmfIntentMapper(config.dtmf_intents)
         self.stt = SpeechToTextAdapter(config.stt_provider, config.stt_command)
         self.tts = TextToSpeechAdapter(config.tts_provider, config.tts_command)
@@ -223,7 +225,10 @@ class AiVoiceGateway:
                 response_mode=self.config.response_mode,
             )
         try:
-            responses = await self.rasa.send_message_async(sender, user_text, metadata or {})
+            responses = await collect_responses(
+                self.conversation_provider,
+                ConversationRequest(sender=sender, text=user_text, metadata=dict(metadata or {})),
+            )
             rendered_text = " ".join(response.text for response in responses if response.text)
             tts_chunks = await self.synthesize_response_chunks(
                 responses,

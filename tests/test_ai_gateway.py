@@ -6,7 +6,8 @@ from unittest import mock
 from pathlib import Path
 import tempfile
 
-from ai_gateway import AiVoiceConfig, AiVoiceGateway, DtmfIntentMapper, RasaRestClient, RasaRestConfig, TextToSpeechAdapter
+from ai_gateway import AiVoiceConfig, AiVoiceGateway, ConversationChunk, DtmfIntentMapper, RasaRestClient, RasaRestConfig, TextToSpeechAdapter
+from ai_gateway.rasa import RasaBotResponse
 from ai_gateway.speech import decode_rtp_pcap_to_wav, iter_rtp_payloads
 from tools import check_rasa
 
@@ -28,6 +29,27 @@ class FakeHttpResponse:
 
 
 class RasaRestClientTests(unittest.TestCase):
+    def test_ai_voice_gateway_accepts_provider_neutral_ordered_stream(self):
+        class StreamingProvider:
+            async def stream(self, request):
+                self.assert_request(request)
+                yield ConversationChunk(RasaBotResponse(text="first"), 1, False)
+                yield ConversationChunk(RasaBotResponse(text="second"), 2, True)
+
+            @staticmethod
+            def assert_request(request):
+                if request.sender != "provider-call" or request.metadata["tenant"] != "commercial":
+                    raise AssertionError("provider request contract was not preserved")
+
+        gateway = AiVoiceGateway(
+            AiVoiceConfig(enabled=True, initial_message="hello", response_mode="streaming"),
+            conversation_provider=StreamingProvider(),
+        )
+        result = asyncio.run(gateway.start_turn("provider-call", {"tenant": "commercial"}))
+
+        self.assertEqual(result.rendered_text, "first second")
+        self.assertEqual(result.tts_chunk_count, 2)
+
     def test_rasa_rest_client_posts_sender_message_and_metadata(self):
         captured = {}
 

@@ -2,6 +2,11 @@
 
 PlaySBC can answer a SIP call as an AI endpoint, anchor its media through RTPengine, convert speech to text, send the transcript to Rasa, synthesize the response, and preserve the evidence in one report.
 
+The commercial pre-v6 foundation exposes a provider-neutral, ordered
+asynchronous response stream. Rasa is the first adapter; future bot providers
+implement the same `ConversationProvider` contract without changing SIP or
+media control.
+
 ```text
 SIPp caller -> PlaySBC -> RTPengine -> STT -> Rasa -> TTS -> RTP response
 ```
@@ -62,6 +67,16 @@ python3 tools/run_k8s_regression_job.py \
   --kind-load-images \
   --kind-cluster playsbc
 ```
+
+Run the fast commercial foundation profiles before cluster regression:
+
+```bash
+python3 tools/run_commercial_foundation_regression.py
+```
+
+The command validates `ai-provider-streaming-contract` and
+`rfc5359-consultation-hold`. Either profile can be selected independently with
+`--profile`.
 
 Use [KUBERNETES_HELM_RUNBOOK.md](KUBERNETES_HELM_RUNBOOK.md) for installation, image, observability, and cleanup commands.
 
