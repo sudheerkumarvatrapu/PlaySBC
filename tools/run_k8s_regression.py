@@ -2680,7 +2680,12 @@ class K8sRegressionRunner:
             "header_normalization": getattr(profile, "header_normalization", {}),
             "transport_policies": getattr(profile, "transport_policies", []),
             "call_admission": getattr(profile, "call_admission", {}),
+            "business_services": format_config_value(
+                getattr(profile, "business_services", {}),
+                profile,
+            ),
             "b2bua_ladder_logs": getattr(profile, "ladder_enabled", True),
+            "b2bua_invite_timeout": getattr(profile, "b2bua_invite_timeout", 10.0),
             "media_backend": getattr(profile, "media_backend", "internal"),
             "rtpengine_url": getattr(profile, "rtpengine_url", f"udp://{self.args.rtpengine_service}:2223"),
             "rtpengine_timeout": getattr(profile, "rtpengine_timeout", 3.0),

@@ -464,6 +464,12 @@ playsbc:
     header_normalization: {}
     transport_policies: []
     call_admission: {}
+    business_services:
+      transfer:
+        enabled: true
+      forwarding:
+        max_hops: 5
+        rules: []
     b2bua_ladder_logs: true
     b2bua_invite_timeout: 10.0
     media_backend: internal
@@ -511,6 +517,7 @@ playsbc:
       bot_name: rasa-support
       rasa_webhook_url: http://rasa:5005/webhooks/rest/webhook
       rasa_timeout: 3.0
+      provider_timeout: 3.0
       input_mode: scripted
       stt_provider: lab-scripted
       stt_command: ""

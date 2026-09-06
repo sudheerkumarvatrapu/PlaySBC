@@ -12,6 +12,10 @@
   "bridge_rooms": ["bridge"],
   "b2bua_routes": {},
   "route_policies": [],
+  "business_services": {
+    "transfer": {"enabled": true},
+    "forwarding": {"max_hops": 5, "rules": []}
+  },
   "b2bua_ladder_logs": true,
   "media_backend": "internal",
   "rtpengine_url": "udp://127.0.0.1:2223",

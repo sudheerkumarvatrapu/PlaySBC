@@ -16,7 +16,8 @@ PlaySBC also exports RTPengine and AI/Rasa state derived from its call-control e
 | SIP | requests and responses by realm, method, direction, status, and class |
 | Media | negotiated codecs, transcoding intent, active RTPengine sessions, failures |
 | HA | node health, drain state, shared registrations, shared dialogs |
-| AI | STT, Rasa, TTS, prompt, fallback, and bot-action counters |
+| AI | STT, provider timeout/failure/interruption, Rasa, TTS, prompt, fallback, and bot-action counters |
+| Business services | accepted/completed/recovered transfer and selected/redirected forwarding transitions |
 
 Prometheus defaults to a short scrape interval for brief SIPp calls and 31-day retention. Persistence depends on a working cluster storage class.
 
@@ -58,7 +59,15 @@ sum by (cluster,node) (playsbc_ha_shared_dialogs)
 sum by (cluster,node) (playsbc_ha_node_draining)
 sum by (bot,stt,tts) (increase(playsbc_ai_voice_turns_total[15m]))
 sum(increase(playsbc_ai_rasa_failures_total[15m]))
+sum by (provider) (increase(playsbc_ai_provider_timeouts_total[15m]))
+sum by (provider) (increase(playsbc_ai_provider_failures_total[15m]))
+sum by (provider) (increase(playsbc_ai_provider_interruptions_total[15m]))
+sum by (service,outcome) (increase(playsbc_business_service_events_total[15m]))
 ```
+
+Provider interruptions are call-control outcomes and are tracked separately
+from provider failures. A caller ending an AI call should increase the
+interruption counter without synthesizing fallback audio for that ended call.
 
 ## Interpret The Panels
 

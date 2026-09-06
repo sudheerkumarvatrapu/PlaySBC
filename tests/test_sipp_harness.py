@@ -2468,7 +2468,7 @@ Content-Length: 0
         self.assertIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("evidence-b2bua-two-leg-pcap", run_regression_suite.ALL_B2BUA_PROFILES)
-        self.assertEqual(len(run_k8s_regression.ALL_PROFILES), 70)
+        self.assertEqual(len(run_k8s_regression.ALL_PROFILES), 78)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2524,6 +2524,30 @@ Content-Length: 0
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-options-health-recovery", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-node-draining", run_regression_suite.ALL_B2BUA_PROFILES)
+        for profile in (
+            "rfc5359-unattended-transfer",
+            "rfc5359-unconditional-forwarding",
+            "rfc5359-forwarding-on-busy",
+            "rfc5359-forwarding-on-no-answer",
+            "rfc5359-unattended-transfer-rtpengine",
+            "rfc5359-unconditional-forwarding-rtpengine",
+            "rfc5359-forwarding-on-busy-rtpengine",
+            "rfc5359-forwarding-on-no-answer-rtpengine",
+        ):
+            self.assertIn(profile, run_regression_suite.ALL_B2BUA_PROFILES)
+        for profile in (
+            "rfc5359-unattended-transfer-rtpengine",
+            "rfc5359-unconditional-forwarding-rtpengine",
+            "rfc5359-forwarding-on-busy-rtpengine",
+            "rfc5359-forwarding-on-no-answer-rtpengine",
+        ):
+            self.assertIn(profile, run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+            values = run_k8s_regression.profile_values(profile, "unit-k8s")
+            self.assertEqual(values.media_backend, "rtpengine")
+            self.assertIn(
+                "RTPENGINE OFFER",
+                values.expected_log_markers["log.media"],
+            )
         for profile in (
             "ha-playsbc-precall-failover",
             "ha-playsbc-midcall-failover",
@@ -3333,6 +3357,26 @@ class RealTopologyTests(unittest.TestCase):
             "udp://playsbc-playsbc-rtpengine-1.playsbc-playsbc-rtpengine-headless:2223",
         )
         self.assertEqual(ha["failover"]["mid_call_failover"], "dialog-restore-only")
+
+    def test_kubernetes_business_service_profiles_preserve_policy_and_timeout(self):
+        args = run_k8s_regression.parse_args(["--profile", "rfc5359-forwarding-on-no-answer"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values(
+            "rfc5359-forwarding-on-no-answer",
+            "unit-k8s",
+        )
+
+        config = runner.profile_config(profile)
+
+        self.assertEqual(config["b2bua_invite_timeout"], 1.0)
+        self.assertEqual(
+            config["business_services"]["forwarding"]["rules"][0]["condition"],
+            "no-answer",
+        )
+        self.assertEqual(
+            config["business_services"]["forwarding"]["rules"][0]["target"],
+            "forward-target",
+        )
 
     def test_kubernetes_profile_auth_secret_does_not_leak_from_real_device_values(self):
         args = run_k8s_regression.parse_args(["--aks-profiles", "--aks-mode"])

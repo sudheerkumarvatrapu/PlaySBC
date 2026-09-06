@@ -25,6 +25,7 @@ ai_voice_gateway:
   bot_name: rasa-support
   rasa_webhook_url: http://127.0.0.1:5005/webhooks/rest/webhook
   rasa_timeout: 3.0
+  provider_timeout: 3.0
   input_mode: scripted
   initial_message: hello from playsbc real rasa
   stt_provider: lab-scripted

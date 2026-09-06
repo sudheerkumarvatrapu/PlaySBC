@@ -33,6 +33,7 @@ import ssl
 import sqlite3
 import struct
 import time
+from urllib.parse import quote
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
@@ -43,6 +44,14 @@ from rtp.analyzer import RtpAnalyzer
 from rtp.packet import RtpPacket
 from rtp.rtcp import build_compound_sender_report, parse_compound_rtcp, parse_receiver_reports
 from rtp.rtpengine import RtpengineClient, RtpengineError, parse_rtpengine_url
+from sip.business_services import (
+    BusinessServiceError,
+    CallForwarding,
+    CallTransfer,
+    ForwardingDecision,
+    TransferState,
+    parse_refer_to,
+)
 from sip.dialog import CallState, DialogError, DialogManager, SipDialog
 from sip.transaction import TransactionManager
 
@@ -110,6 +119,7 @@ class ServerConfig:
     header_normalization: Dict[str, Any] = field(default_factory=dict)
     transport_policies: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
     call_admission: Dict[str, Any] = field(default_factory=dict)
+    business_services: Dict[str, Any] = field(default_factory=dict)
     b2bua_ladder_logs: bool = True
     b2bua_invite_timeout: float = 10.0
     media_backend: str = "internal"
@@ -169,6 +179,7 @@ SERVER_CONFIG_KEYS = {
     "header_normalization",
     "transport_policies",
     "call_admission",
+    "business_services",
     "b2bua_ladder_logs",
     "b2bua_invite_timeout",
     "media_backend",
@@ -718,6 +729,10 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_b2bua_calls_answered_total": ("counter", "Total B2BUA calls answered by PlaySBC."),
     "playsbc_b2bua_calls_completed_total": ("counter", "Total B2BUA calls completed by PlaySBC."),
     "playsbc_b2bua_calls_failed_total": ("counter", "Total B2BUA calls failed before normal completion."),
+    "playsbc_business_service_events_total": (
+        "counter",
+        "Total RFC 5359 business-service state transitions observed by PlaySBC.",
+    ),
     "playsbc_media_negotiations_total": ("counter", "Total answered calls with negotiated media codecs."),
     "playsbc_transcoding_sessions_total": ("counter", "Total answered calls where PlaySBC negotiated different inbound and outbound audio codecs."),
     "playsbc_registrations_total": ("counter", "Total successful SIP registrations accepted by PlaySBC."),
@@ -746,6 +761,9 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_ai_voice_calls_total": ("counter", "Total AI voice calls accepted by PlaySBC."),
     "playsbc_ai_voice_turns_total": ("counter", "Total AI voice turns started."),
     "playsbc_ai_voice_turn_failures_total": ("counter", "Total AI voice turns that returned an error or fallback."),
+    "playsbc_ai_provider_timeouts_total": ("counter", "Total AI provider turns that exceeded their deadline."),
+    "playsbc_ai_provider_interruptions_total": ("counter", "Total AI provider turns interrupted by call control."),
+    "playsbc_ai_provider_failures_total": ("counter", "Total AI provider turns that failed or timed out."),
     "playsbc_ai_stt_audio_decodes_total": ("counter", "Total AI voice turns with decoded caller audio."),
     "playsbc_ai_rasa_requests_total": ("counter", "Total Rasa REST turns attempted."),
     "playsbc_ai_rasa_failures_total": ("counter", "Total Rasa REST turns that used fallback because of an error."),
@@ -1466,6 +1484,8 @@ class B2BUACall:
     local_reinvite_cseqs: set[int] = field(default_factory=set)
     reinvite_pending: bool = False
     inbound_bye_sent: bool = False
+    transfer: Optional[CallTransfer] = None
+    transfer_origin_inbound: bool = True
     finalized: bool = False
 
 
@@ -1487,6 +1507,7 @@ class AIVoiceCall:
     rtpengine_query_retries: int = 0
     bot_actions: List[BotAction] = field(default_factory=list)
     task: Optional[asyncio.Task] = None
+    cancellation_event: Optional[asyncio.Event] = None
     finalized: bool = False
 
 
@@ -2125,6 +2146,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         header_normalization: Optional[Dict[str, Any]] = None,
         transport_policies: Tuple[Dict[str, Any], ...] = (),
         call_admission: Optional[Dict[str, Any]] = None,
+        business_services: Optional[Dict[str, Any]] = None,
         media_backend: str = "internal",
         rtpengine_client: Optional[RtpengineClient] = None,
         reject_unknown_routes: bool = False,
@@ -2183,6 +2205,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             transport_policies,
             call_admission,
         )
+        self.business_services_config = dict(business_services or {})
+        forwarding_config = self.business_services_config.get("forwarding", {})
+        if not isinstance(forwarding_config, dict):
+            forwarding_config = {}
+        forwarding_rules = forwarding_config.get("rules", ())
+        if not isinstance(forwarding_rules, (list, tuple)):
+            forwarding_rules = ()
+        self.call_forwarding = CallForwarding(
+            forwarding_rules,
+            max_hops=int(forwarding_config.get("max_hops", 5)),
+        )
+        transfer_config = self.business_services_config.get("transfer", {})
+        self.transfer_enabled = bool(
+            transfer_config.get("enabled", True) if isinstance(transfer_config, dict) else True
+        )
         self.dialogs = DialogManager()
         self.transactions = TransactionManager(self._send_packet)
         self.pending_outbound_responses: Dict[str, asyncio.Queue] = {}
@@ -2213,6 +2250,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.ai_voice_calls_total = 0
         self.ai_voice_turns_total = 0
         self.ai_voice_turn_failures_total = 0
+        self.ai_provider_timeouts_total = 0
+        self.ai_provider_interruptions_total = 0
+        self.ai_provider_failures_total = 0
         self.ai_stt_audio_decodes_total = 0
         self.ai_rasa_requests_total = 0
         self.ai_rasa_failures_total = 0
@@ -2227,6 +2267,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.b2bua_calls_answered_total = 0
         self.b2bua_calls_completed_total = 0
         self.b2bua_calls_failed_total = 0
+        self.business_service_events_total: Dict[Tuple[str, str], int] = {}
         self.media_negotiations_total: Dict[Tuple[str, str, str, str, str, str], int] = {}
         self.transcoding_sessions_total: Dict[Tuple[str, str, str, str, str], int] = {}
         self.registrations_total = 0
@@ -2293,6 +2334,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             transcoding_key = (backend, from_realm, to_realm, inbound_codec, outbound_codec)
             self.transcoding_sessions_total[transcoding_key] = self.transcoding_sessions_total.get(transcoding_key, 0) + 1
 
+    def observe_business_service(self, service: str, outcome: str) -> None:
+        key = (service, outcome)
+        self.business_service_events_total[key] = self.business_service_events_total.get(key, 0) + 1
+
     def prometheus_samples(self) -> List[Tuple[str, int | float, Dict[str, str]]]:
         base_labels = {"cluster": self.cluster_id, "node": self.node_id}
         samples: List[Tuple[str, int | float, Dict[str, str]]] = []
@@ -2338,6 +2383,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ("playsbc_ha_b2bua_restores_total", self.ha_b2bua_restores, base_labels),
             ]
         )
+        for (service, outcome), value in sorted(self.business_service_events_total.items()):
+            samples.append(
+                (
+                    "playsbc_business_service_events_total",
+                    value,
+                    {**base_labels, "service": service, "outcome": outcome},
+                )
+            )
         for (method, transport, direction, realm), value in sorted(self.sip_requests_total.items()):
             samples.append(
                 (
@@ -2448,6 +2501,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ("playsbc_ai_voice_calls_total", self.ai_voice_calls_total, ai_labels),
                 ("playsbc_ai_voice_turns_total", self.ai_voice_turns_total, ai_labels),
                 ("playsbc_ai_voice_turn_failures_total", self.ai_voice_turn_failures_total, ai_labels),
+                ("playsbc_ai_provider_timeouts_total", self.ai_provider_timeouts_total, ai_labels),
+                ("playsbc_ai_provider_interruptions_total", self.ai_provider_interruptions_total, ai_labels),
+                ("playsbc_ai_provider_failures_total", self.ai_provider_failures_total, ai_labels),
                 ("playsbc_ai_stt_audio_decodes_total", self.ai_stt_audio_decodes_total, ai_labels),
                 ("playsbc_ai_rasa_requests_total", self.ai_rasa_requests_total, ai_labels),
                 ("playsbc_ai_rasa_failures_total", self.ai_rasa_failures_total, ai_labels),
@@ -2699,6 +2755,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         b2bua_call = self.b2bua_calls_by_outbound.get(call_id)
+        if not b2bua_call:
+            b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
         if b2bua_call:
             logging.info(
                 "B2BUA outbound response %s for inbound call %s",
@@ -2707,6 +2765,34 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             if b2bua_call.outbound_cancel_sent and cseq_method == "CANCEL" and message.status_code >= 200:
                 b2bua_call.flow_log.sip("SIPp B", "B2BUA", f"{message.status_code} {message.reason_phrase or 'OK'}", "CANCEL")
+                return
+            if cseq_method == "REFER" and message.status_code >= 200:
+                b2bua_call.flow_log.sip(
+                    "SIPp B" if call_id == b2bua_call.outbound_call_id else "SIPp A",
+                    "B2BUA",
+                    f"{message.status_code} {message.reason_phrase or 'Response'}",
+                    "REFER",
+                )
+                if message.status_code >= 300 and b2bua_call.transfer:
+                    try:
+                        b2bua_call.transfer.notify(
+                            message.status_code,
+                            message.reason_phrase or "REFER rejected",
+                        )
+                        b2bua_call.transfer.recover_original()
+                    except BusinessServiceError:
+                        pass
+                    self.observe_business_service(
+                        f"{b2bua_call.transfer.kind.value}-transfer",
+                        b2bua_call.transfer.state.value,
+                    )
+                    self.send_transfer_notify(
+                        b2bua_call,
+                        message.status_code,
+                        message.reason_phrase or "REFER rejected",
+                    )
+                return
+            if cseq_method == "NOTIFY" and message.status_code >= 200:
                 return
             if b2bua_call.outbound_bye_sent and message.status_code >= 200:
                 b2bua_call.flow_log.sip("SIPp B", "B2BUA", f"{message.status_code} {message.reason_phrase or 'OK'}")
@@ -2778,8 +2864,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 200,
                 "OK",
                 extra_headers={
-                    "Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE, CANCEL",
+                    "Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE, CANCEL, REFER, NOTIFY",
                     "Accept": "application/sdp",
+                    "Supported": "replaces",
                 },
             )
             return
@@ -3003,6 +3090,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 if ai_call:
                     ai_call.flow_log.flow("SIPp A", "PlaySBC", "ACK")
                     if not ai_call.task:
+                        ai_call.cancellation_event = asyncio.Event()
                         ai_call.task = asyncio.create_task(
                             self.run_ai_voice_turn(
                                 ai_call=ai_call,
@@ -3023,6 +3111,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.send_response(message, 200, "OK", to_header=message.header("to"))
             b2bua_call.flow_log.sip("B2BUA", "SIPp A", "200 OK", "CANCEL")
             self.send_outbound_cancel(b2bua_call)
+            return
+
+        if method == "REFER":
+            await self.handle_b2bua_refer(message)
+            return
+
+        if method == "NOTIFY":
+            await self.handle_b2bua_transfer_notify(message)
             return
 
         if method == "BYE":
@@ -3137,7 +3233,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.media.close_session(call_id)
             return
 
-        self.send_response(message, 405, "Method Not Allowed", extra_headers={"Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE, CANCEL"})
+        self.send_response(
+            message,
+            405,
+            "Method Not Allowed",
+            extra_headers={"Allow": "REGISTER, OPTIONS, INVITE, ACK, BYE, CANCEL, REFER, NOTIFY"},
+        )
 
     def resolve_invite_target(self, message: SipMessage, call_id: str) -> Tuple[str, Optional[RouteResult]]:
         request_user = extract_request_user(message.start_line)
@@ -3154,8 +3255,56 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             call_id=call_id,
         )
         for candidate in candidates:
-            route = self.routing_engine.resolve(candidate, self.registrations)
+            routed_candidate = candidate
+            forward_history: Tuple[str, ...] = ()
+            while True:
+                try:
+                    forwarding = self.call_forwarding.select(
+                        routed_candidate,
+                        history=forward_history,
+                    )
+                except BusinessServiceError as exc:
+                    self.logger.sip(
+                        "CALL FORWARDING REJECTED",
+                        f"target_user={candidate} reason={exc}",
+                        call_id=call_id,
+                    )
+                    return candidate, None
+                if forwarding is None:
+                    break
+                forward_history = forwarding.history
+                self.logger.sip(
+                    "CALL FORWARDING SELECTED",
+                    (
+                        f"original={candidate} current={routed_candidate} target={forwarding.target} "
+                        f"condition={forwarding.condition.value} rule={forwarding.rule_name}"
+                    ),
+                    call_id=call_id,
+                )
+                self.observe_business_service(
+                    f"forwarding-{forwarding.condition.value}",
+                    "selected",
+                )
+                if forwarding.target.lower().startswith(("sip:", "sips:")):
+                    try:
+                        target = parse_sip_uri(forwarding.target)
+                    except ValueError:
+                        return candidate, None
+                    return target.user, RouteResult(
+                        target=target,
+                        policy_name=forwarding.rule_name,
+                        source="business-forwarding",
+                        original_user=candidate,
+                        routed_user=target.user,
+                    )
+                routed_candidate = forwarding.target
+
+            route = self.routing_engine.resolve(routed_candidate, self.registrations)
             if route:
+                if routed_candidate != candidate:
+                    route.original_user = candidate
+                    route.routed_user = routed_candidate
+                    route.source = "business-forwarding"
                 event = "INVITE ROUTE SELECTED"
                 if candidate == to_user and candidate != request_user:
                     event = "INVITE TARGET FALLBACK TO HEADER"
@@ -3168,7 +3317,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     ),
                     call_id=call_id,
                 )
-                return candidate, route
+                return routed_candidate, route
         target_user = candidates[0] if candidates else "echo"
         self.logger.sip(
             "INVITE ROUTE FAILED",
@@ -3547,7 +3696,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             detail = f"route={target.uri} reason=outbound_invite_timeout timeout_seconds={self.b2bua_invite_timeout:g}"
             inbound_rtp.log("B2BUA FAILURE", detail)
             flow_log.write("B2BUA FAILURE", detail)
-            self.send_response(message, 480, "Temporarily Unavailable", to_header=to_header)
+            self.send_outbound_cancel(b2bua_call)
+            if not self.maybe_send_conditional_forwarding(
+                message,
+                to_header,
+                target_user,
+                timed_out=True,
+                flow_log=flow_log,
+            ):
+                self.send_response(message, 480, "Temporarily Unavailable", to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
             return
         finally:
@@ -3563,8 +3720,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             inbound_rtp.log("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
             flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
             self.send_outbound_ack(b2bua_call, invite_transaction=True)
-            flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
-            self.send_response(message, status, reason, to_header=to_header)
+            if not self.maybe_send_conditional_forwarding(
+                message,
+                to_header,
+                target_user,
+                status=status,
+                flow_log=flow_log,
+            ):
+                flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
+                self.send_response(message, status, reason, to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
             return
 
@@ -3626,6 +3790,70 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "B2BUA ANSWERED",
             f"inbound_call_id={inbound_call_id} outbound_payload={CODEC_NAMES.get(outbound_rtp.preferred_payload, outbound_rtp.preferred_payload)}",
         )
+
+    def maybe_send_conditional_forwarding(
+        self,
+        message: SipMessage,
+        to_header: str,
+        target_user: str,
+        *,
+        status: int = 0,
+        timed_out: bool = False,
+        flow_log: Optional[B2BUAFlowLog] = None,
+    ) -> bool:
+        """Return a policy-controlled 302 for busy or no-answer forwarding."""
+        if not timed_out and status not in CallForwarding.BUSY_STATUSES:
+            return False
+        try:
+            decision = self.call_forwarding.select(
+                target_user,
+                status=status,
+                timed_out=timed_out,
+            )
+        except BusinessServiceError as exc:
+            self.logger.sip(
+                "CALL FORWARDING REJECTED",
+                f"target_user={target_user} reason={exc}",
+                call_id=message.header("call-id"),
+            )
+            return False
+        if decision is None:
+            return False
+
+        contact = self.forwarding_contact(decision)
+        self.send_response(
+            message,
+            302,
+            "Moved Temporarily",
+            to_header=to_header,
+            extra_headers={
+                "Contact": f"<{contact}>",
+                "Reason": (
+                    f'SIP ;cause={status or 480} ;text="PlaySBC {decision.condition.value} forwarding"'
+                ),
+            },
+        )
+        detail = (
+            f"original={target_user} target={decision.target} contact={contact} "
+            f"condition={decision.condition.value} rule={decision.rule_name}"
+        )
+        self.logger.sip("CALL FORWARDING REDIRECT", detail, call_id=message.header("call-id"))
+        self.observe_business_service(
+            f"forwarding-{decision.condition.value}",
+            "redirected",
+        )
+        if flow_log:
+            flow_log.write("CALL FORWARDING REDIRECT", detail)
+            flow_log.sip("B2BUA", "SIPp A", "302 Moved Temporarily", decision.condition.value)
+        return True
+
+    def forwarding_contact(self, decision: ForwardingDecision) -> str:
+        if decision.target.lower().startswith(("sip:", "sips:")):
+            return decision.target
+        registration = self.registrations.get(decision.target)
+        if registration and not registration.is_expired():
+            return registration.contact_uri
+        return f"sip:{decision.target}@{self.sip_advertised_ip}:{self.local_port}"
 
     def maybe_add_explicit_rtcp_sdp(
         self,
@@ -3917,7 +4145,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 "B2BUA FAILURE",
                 f"route={target.uri} reason=outbound_invite_timeout timeout_seconds={self.b2bua_invite_timeout:g}",
             )
-            self.send_response(message, 480, "Temporarily Unavailable", to_header=to_header)
+            self.send_outbound_cancel(b2bua_call)
+            if not self.maybe_send_conditional_forwarding(
+                message,
+                to_header,
+                target_user,
+                timed_out=True,
+                flow_log=flow_log,
+            ):
+                self.send_response(message, 480, "Temporarily Unavailable", to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
             return
         finally:
@@ -3932,8 +4168,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.log_policy_metrics("TRUNK FAILURE", route, inbound_call_id)
             flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
             self.send_outbound_ack(b2bua_call, invite_transaction=True)
-            flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
-            self.send_response(message, status, reason, to_header=to_header)
+            if not self.maybe_send_conditional_forwarding(
+                message,
+                to_header,
+                target_user,
+                status=status,
+                flow_log=flow_log,
+            ):
+                flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
+                self.send_response(message, status, reason, to_header=to_header)
             self.cleanup_b2bua_call(b2bua_call)
             return
 
@@ -4069,6 +4312,224 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         dialog.mark_answered()
         self.save_dialog_state(dialog)
         self.save_b2bua_call_state(b2bua_call)
+
+    async def handle_b2bua_refer(self, message: SipMessage) -> None:
+        """Accept and relay an in-dialog REFER across the B2BUA call legs."""
+        call_id = message.header("call-id")
+        b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+        from_inbound = b2bua_call is not None
+        if b2bua_call is None:
+            b2bua_call = self.b2bua_calls_by_outbound.get(call_id)
+        if b2bua_call is None:
+            self.send_response(message, 481, "Call/Transaction Does Not Exist")
+            return
+        if not self.transfer_enabled:
+            self.send_response(message, 403, "Transfer Disabled", to_header=message.header("to"))
+            return
+
+        refer_to = message.header("refer-to")
+        try:
+            transfer = CallTransfer(call_id)
+            target = transfer.request(refer_to)
+            translated_refer_to = self.translate_refer_to(
+                refer_to,
+                from_inbound=from_inbound,
+            )
+        except BusinessServiceError as exc:
+            self.logger.sip("B2BUA REFER REJECTED", f"reason={exc}", call_id=call_id)
+            self.send_response(message, 400, "Bad Refer-To", to_header=message.header("to"))
+            return
+
+        b2bua_call.transfer = transfer
+        b2bua_call.transfer_origin_inbound = from_inbound
+        transfer.accept()
+        self.send_response(
+            message,
+            202,
+            "Accepted",
+            to_header=message.header("to"),
+            extra_headers={"Supported": "replaces"},
+        )
+        headers = {"Refer-To": translated_refer_to}
+        if message.header("referred-by"):
+            headers["Referred-By"] = message.header("referred-by")
+        if message.header("refer-sub"):
+            headers["Refer-Sub"] = message.header("refer-sub")
+        self.send_b2bua_in_dialog_request(
+            b2bua_call,
+            "REFER",
+            to_inbound=not from_inbound,
+            extra_headers=headers,
+        )
+        kind = target.kind.value
+        self.logger.sip(
+            "B2BUA REFER RELAYED",
+            (
+                f"kind={kind} target={target.uri} direction="
+                f"{'inbound-to-outbound' if from_inbound else 'outbound-to-inbound'}"
+            ),
+            call_id=call_id,
+        )
+        self.observe_business_service(f"{kind}-transfer", "accepted")
+        b2bua_call.flow_log.sip(
+            "SIPp A" if from_inbound else "SIPp B",
+            "B2BUA",
+            "REFER",
+            f"kind={kind}",
+        )
+        b2bua_call.flow_log.sip(
+            "B2BUA",
+            "SIPp B" if from_inbound else "SIPp A",
+            "REFER",
+            f"kind={kind}",
+        )
+
+    async def handle_b2bua_transfer_notify(self, message: SipMessage) -> None:
+        """Consume a transfer NOTIFY and relay its sipfrag result to the REFER origin."""
+        call_id = message.header("call-id")
+        b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
+        from_inbound = b2bua_call is not None
+        if b2bua_call is None:
+            b2bua_call = self.b2bua_calls_by_outbound.get(call_id)
+        if b2bua_call is None or b2bua_call.transfer is None:
+            self.send_response(message, 481, "Subscription Does Not Exist")
+            return
+        if from_inbound == b2bua_call.transfer_origin_inbound:
+            self.send_response(message, 481, "Subscription Does Not Exist")
+            return
+
+        status, reason = parse_sipfrag_status(message.body)
+        if not status:
+            self.send_response(message, 400, "Bad sipfrag")
+            return
+        try:
+            b2bua_call.transfer.notify(status, reason)
+            if b2bua_call.transfer.state is TransferState.FAILED:
+                b2bua_call.transfer.recover_original()
+        except BusinessServiceError as exc:
+            self.logger.sip("B2BUA TRANSFER NOTIFY REJECTED", f"reason={exc}", call_id=call_id)
+            self.send_response(message, 481, "Subscription Does Not Exist")
+            return
+
+        self.send_response(message, 200, "OK", to_header=message.header("to"))
+        self.send_b2bua_in_dialog_request(
+            b2bua_call,
+            "NOTIFY",
+            to_inbound=b2bua_call.transfer_origin_inbound,
+            body=message.body,
+            extra_headers={
+                "Event": message.header("event") or "refer",
+                "Subscription-State": message.header("subscription-state") or (
+                    "terminated;reason=noresource" if status >= 200 else "active"
+                ),
+                "Content-Type": message.header("content-type") or "message/sipfrag;version=2.0",
+            },
+        )
+        self.logger.sip(
+            "B2BUA TRANSFER NOTIFY RELAYED",
+            f"status={status} reason={reason or 'none'} state={b2bua_call.transfer.state.value}",
+            call_id=call_id,
+        )
+        self.observe_business_service(
+            f"{b2bua_call.transfer.kind.value}-transfer",
+            b2bua_call.transfer.state.value,
+        )
+
+    def translate_refer_to(self, refer_to: str, *, from_inbound: bool) -> str:
+        """Translate a Replaces Call-ID and tags to the opposite B2BUA leg."""
+        target = parse_refer_to(refer_to)
+        if not target.replaces_call_id:
+            return refer_to
+        replaced = (
+            self.b2bua_calls_by_inbound.get(target.replaces_call_id)
+            if from_inbound
+            else self.b2bua_calls_by_outbound.get(target.replaces_call_id)
+        )
+        if replaced is None:
+            raise BusinessServiceError(
+                f"Replaces dialog {target.replaces_call_id!r} is not active on the source leg"
+            )
+        if from_inbound:
+            mapped_call_id = replaced.outbound_call_id
+            to_tag = extract_header_tag(replaced.outbound_to_header)
+            from_tag = extract_header_tag(replaced.outbound_from_header)
+        else:
+            mapped_call_id = replaced.inbound_call_id
+            to_tag = extract_header_tag(replaced.inbound_to_header)
+            from_tag = extract_header_tag(replaced.inbound_from_header)
+        if not to_tag or not from_tag:
+            raise BusinessServiceError("Replaces dialog tags are incomplete on the opposite leg")
+        replaces = quote(
+            f"{mapped_call_id};to-tag={to_tag};from-tag={from_tag}",
+            safe="",
+        )
+        return f"<{target.uri}?Replaces={replaces}>"
+
+    def send_transfer_notify(self, b2bua_call: B2BUACall, status: int, reason: str) -> None:
+        body = f"SIP/2.0 {status} {reason}\r\n"
+        self.send_b2bua_in_dialog_request(
+            b2bua_call,
+            "NOTIFY",
+            to_inbound=b2bua_call.transfer_origin_inbound,
+            body=body,
+            extra_headers={
+                "Event": "refer",
+                "Subscription-State": "terminated;reason=noresource",
+                "Content-Type": "message/sipfrag;version=2.0",
+            },
+        )
+
+    def send_b2bua_in_dialog_request(
+        self,
+        b2bua_call: B2BUACall,
+        method: str,
+        *,
+        to_inbound: bool,
+        body: str = "",
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> None:
+        if to_inbound:
+            request_uri = b2bua_call.inbound_contact_uri or (
+                f"sip:{extract_user(b2bua_call.inbound_from_header) or 'caller'}@"
+                f"{self.b2bua_advertised_ip}:{self.local_port}"
+            )
+            b2bua_call.inbound_cseq += 1
+            call_id = b2bua_call.inbound_call_id
+            cseq = b2bua_call.inbound_cseq
+            from_header = b2bua_call.inbound_to_header
+            to_header = b2bua_call.inbound_from_header
+            destination = self.inbound_destination(b2bua_call)
+            try:
+                transport_name = parse_sip_uri(request_uri).transport
+            except ValueError:
+                transport_name = "udp"
+            peer = "core"
+        else:
+            request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+            b2bua_call.outbound_cseq += 1
+            call_id = b2bua_call.outbound_call_id
+            cseq = b2bua_call.outbound_cseq
+            from_header = b2bua_call.outbound_from_header
+            to_header = b2bua_call.outbound_to_header
+            destination = self.outbound_destination(b2bua_call)
+            transport_name = self.outbound_transport(b2bua_call)
+            peer = "peer"
+        headers = {
+            "Via": self.make_via_header(transport_name),
+            "From": from_header,
+            "To": to_header,
+            "Call-ID": call_id,
+            "CSeq": f"{cseq} {method}",
+            "Contact": f"<{self.local_contact_uri(transport_name)}>",
+            "Max-Forwards": "69",
+        }
+        headers.update(extra_headers or {})
+        self._send_packet(
+            build_sip_request(method, request_uri, headers, body),
+            destination,
+            transport_name=transport_name,
+        )
+        self.observe_sip_request(method, transport_name, "tx", peer)
 
     async def handle_b2bua_inbound_reinvite(self, message: SipMessage, b2bua_call: B2BUACall) -> None:
         """Propagate a caller-leg dialog refresh and update the existing media session."""
@@ -4648,7 +5109,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             tts_output_path=tts_wav_path,
             tts_rtp_path=tts_rtp_path,
             tts_codec=self.ai_voice_config.tts_output_codec,
+            cancellation_event=ai_call.cancellation_event,
         )
+        if result.interrupted:
+            self.ai_provider_interruptions_total += 1
+            self.logger.ai(
+                "AI PROVIDER INTERRUPTED",
+                (
+                    f"provider={self.ai_voice_config.provider} error_code={result.error_code} "
+                    f"duration_seconds={result.duration_seconds:.3f} fallback_used=false tts_chunk_count=0"
+                ),
+                call_id=ai_call.call_id,
+            )
+            ai_call.flow_log.flow(bot_node, "PlaySBC", "provider turn interrupted")
+            ai_call.flow_log.render()
+            return
         stt = result.stt
         if stt:
             self.logger.ai(
@@ -4663,9 +5138,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if result.error:
             self.ai_rasa_failures_total += 1
             self.ai_voice_turn_failures_total += 1
+            if result.error_code in {"provider_timeout", "provider_error"}:
+                self.ai_provider_failures_total += 1
+            if result.error_code == "provider_timeout":
+                self.ai_provider_timeouts_total += 1
             self.logger.ai(
                 "RASA REST ERROR",
-                f"fallback_used=true error={result.error}",
+                f"fallback_used=true error_code={result.error_code or 'unspecified'} error={result.error}",
                 call_id=ai_call.call_id,
             )
         elif result.fallback_used:
@@ -4675,6 +5154,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             (
                 f"response_count={len(result.bot_responses)} fallback_used={str(result.fallback_used).lower()} "
                 f"duration_seconds={result.duration_seconds:.3f} response_mode={result.response_mode} "
+                f"error_code={result.error_code or 'none'} "
                 f"tts_chunk_count={result.tts_chunk_count} "
                 f"text={json.dumps(result.rendered_text)}"
             ),
@@ -4789,6 +5269,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if ai_call.finalized:
             return
         ai_call.finalized = True
+        if ai_call.cancellation_event is not None:
+            ai_call.cancellation_event.set()
         self.routing_engine.release(ai_call.route_result)
         self.log_policy_metrics("CALL RELEASED", ai_call.route_result, ai_call.call_id)
         task_status = "not_started"
@@ -5516,6 +5998,17 @@ def parse_cseq_number(cseq_header: str) -> int:
         return int(parts[0])
     except ValueError:
         return 0
+
+
+def parse_sipfrag_status(body: str) -> Tuple[int, str]:
+    """Return the status line carried by a REFER NOTIFY message/sipfrag body."""
+    match = re.search(r"(?im)^SIP/2\.0\s+(\d{3})(?:\s+([^\r\n]+))?", body or "")
+    if not match:
+        return 0, ""
+    status = int(match.group(1))
+    if status < 100 or status > 699:
+        return 0, ""
+    return status, (match.group(2) or "").strip()
 
 
 def extract_sip_uri(value: str) -> str:
@@ -6415,7 +6908,14 @@ def coerce_config_value(key: str, value: Any) -> Any:
                 raise ValueError(f"each {key} entry must be a JSON object")
             policies.append(dict(item))
         return tuple(policies)
-    if key in {"header_normalization", "call_admission", "media_quality", "ai_voice_gateway", "ha"}:
+    if key in {
+        "header_normalization",
+        "call_admission",
+        "business_services",
+        "media_quality",
+        "ai_voice_gateway",
+        "ha",
+    }:
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a JSON object")
         return dict(value)
@@ -6483,6 +6983,7 @@ def resolve_runtime_config(config: ServerConfig) -> ServerConfig:
     config.sip_advertised_ip = str(resolve_runtime_value(config.sip_advertised_ip))
     config.b2bua_advertised_ip = str(resolve_runtime_value(config.b2bua_advertised_ip))
     config.rtpengine_url = str(resolve_runtime_value(config.rtpengine_url))
+    config.business_services = resolve_runtime_value(config.business_services)
     config.ha = resolve_runtime_value(config.ha)
     config.ai_voice_gateway = resolve_runtime_value(config.ai_voice_gateway)
     return config
@@ -6607,6 +7108,8 @@ def validate_config(config: ServerConfig) -> None:
             raise ValueError("ai_voice_gateway.rasa_webhook_url must be an HTTP or HTTPS URL")
         if ai_config.rasa_timeout <= 0:
             raise ValueError("ai_voice_gateway.rasa_timeout must be greater than zero")
+        if ai_config.provider_timeout <= 0:
+            raise ValueError("ai_voice_gateway.provider_timeout must be greater than zero")
         if ai_config.stt_provider not in {"lab-scripted", "scripted", "whisper", "vosk"}:
             raise ValueError("ai_voice_gateway.stt_provider must be lab-scripted, whisper, or vosk")
         if ai_config.tts_provider not in {"text-only", "lab-text", "piper", "coqui"}:
@@ -6619,6 +7122,21 @@ def validate_config(config: ServerConfig) -> None:
             raise ValueError("ai_voice_gateway.response_mode must be rest, callback, or streaming")
     if config.ha:
         config.ha = dict(config.ha)
+    if not isinstance(config.business_services, dict):
+        raise ValueError("business_services must be an object")
+    transfer_config = config.business_services.get("transfer", {})
+    if transfer_config and not isinstance(transfer_config, dict):
+        raise ValueError("business_services.transfer must be an object")
+    forwarding_config = config.business_services.get("forwarding", {})
+    if forwarding_config and not isinstance(forwarding_config, dict):
+        raise ValueError("business_services.forwarding must be an object")
+    forwarding_rules = forwarding_config.get("rules", []) if forwarding_config else []
+    if not isinstance(forwarding_rules, list):
+        raise ValueError("business_services.forwarding.rules must be a list")
+    CallForwarding(
+        forwarding_rules,
+        max_hops=int(forwarding_config.get("max_hops", 5)) if forwarding_config else 5,
+    )
     if ha_enabled(config.ha):
         node_id = ha_node_id(config.ha)
         if not node_id:
@@ -6875,6 +7393,7 @@ async def main() -> None:
         header_normalization=config.header_normalization,
         transport_policies=config.transport_policies,
         call_admission=config.call_admission,
+        business_services=config.business_services,
         media_backend=config.media_backend,
         rtpengine_client=rtpengine_client,
         reject_unknown_routes=config.reject_unknown_routes,
