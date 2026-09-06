@@ -511,7 +511,7 @@ def later_page(canvas, doc):
     canvas.drawString(20 * mm, height - 12.5 * mm, f"PlaySBC v{GUIDE_VERSION} Product Guide")
     canvas.setFillColor(MUTED)
     canvas.setFont("Helvetica", 7)
-    canvas.drawRightString(width - 20 * mm, height - 12.5 * mm, "Final public MIT engineering baseline")
+    canvas.drawRightString(width - 20 * mm, height - 12.5 * mm, "Public and private build tracks")
     canvas.setStrokeColor(LINE)
     canvas.line(20 * mm, 14 * mm, width - 20 * mm, 14 * mm)
     canvas.setFillColor(MUTED)
@@ -586,7 +586,7 @@ def build(source_path: Path, output_path: Path, version: str = "2.6.0"):
             Paragraph("Features, architecture, deployment, operations, regression, and evidence", subtitle_style),
             Spacer(1, 27 * mm),
             Paragraph(f"Version {version}", cover_meta),
-            Paragraph("Final public MIT engineering baseline", cover_meta),
+            Paragraph("Public v2.6.0 and private commercial build tracks", cover_meta),
             Spacer(1, 8 * mm),
             Paragraph("Contributor", cover_meta),
             Paragraph("<b>Sudheer Kumar Vatrapu</b>", cover_meta),
