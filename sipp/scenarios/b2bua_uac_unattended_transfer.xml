@@ -70,14 +70,9 @@
   <recv request="NOTIFY" crlf="true">
     <action>
       <ereg regexp="SIP/2.0 200 OK" search_in="msg" check_it="true" assign_to="1" />
-    </action>
-  </recv>
-
-  <nop>
-    <action>
       <log message="transfer-result=[$1]" />
     </action>
-  </nop>
+  </recv>
 
   <send>
     <![CDATA[

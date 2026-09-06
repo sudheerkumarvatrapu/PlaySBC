@@ -574,6 +574,12 @@ def k8s_pcap_capture_roles(profile: SimpleNamespace) -> tuple[str, ...]:
         roles.append("peer")
     elif bool(getattr(profile, "run_call", True)) and bool(getattr(profile, "start_uas", True)):
         roles.append("peer")
+    profile_name = str(getattr(profile, "profile", ""))
+    if profile_name.startswith("rfc5359-") and any(
+        token in profile_name
+        for token in ("unattended-transfer", "forwarding-on-busy", "forwarding-on-no-answer")
+    ):
+        roles.append("target")
 
     return tuple(dict.fromkeys(roles))
 
@@ -1035,6 +1041,20 @@ def validate_k8s_profile_evidence(profile_name: str, bundle: Path) -> list[str]:
                 )
             if largest_gap < 0.5:
                 failures.append("RFC 5359 media evidence did not prove a held-media gap before resume")
+
+    if profile_name.startswith("rfc5359-") and any(
+        token in profile_name
+        for token in ("unattended-transfer", "forwarding-on-busy", "forwarding-on-no-answer")
+    ):
+        evidence = read_bundle_evidence_text(
+            bundle,
+            ("sipmsg.log", "log.sip", "target-sipp-c-uas/sipp-traces.log"),
+        )
+        target = "transfer-target" if "unattended-transfer" in profile_name else "forward-target"
+        if not re.search(rf"(?im)^INVITE\s+sip:{re.escape(target)}@", evidence):
+            failures.append(f"RFC 5359 evidence is missing the third-endpoint INVITE to {target}")
+        if "target-c-" not in evidence:
+            failures.append("RFC 5359 evidence is missing a response from target endpoint C")
 
     if profile_name in STRICT_SRTP_PROFILES:
         call_ids = sipmsg_call_ids(bundle)
@@ -3216,11 +3236,21 @@ class K8sRegressionRunner:
         stem = short_name(f"{self.run_id}-{profile_name}", limit=48)
         core_pod = f"{stem}-core"
         peer_pod = f"{stem}-peer"
+        needs_target_c = profile_name.startswith("rfc5359-") and any(
+            token in profile_name
+            for token in ("unattended-transfer", "forwarding-on-busy", "forwarding-on-no-answer")
+        )
+        target_pod = f"{stem}-target" if needs_target_c else ""
         tls_secret = self.args.tls_secret_name if profile_uses_tls(profile) else ""
         if tls_secret:
             self.ensure_tls_secret(bundle)
         core_ip = self.create_agent(core_pod, bundle, realm="core", tls_secret=tls_secret)
         peer_ip = self.create_agent(peer_pod, bundle, realm="peer", tls_secret=tls_secret)
+        target_ip = (
+            self.create_agent(target_pod, bundle, realm="target", tls_secret=tls_secret)
+            if target_pod
+            else ""
+        )
         profile.host = peer_ip
         profile.server_host = self.args.service
         profile.server_port = self.args.sip_port
@@ -3244,7 +3274,8 @@ class K8sRegressionRunner:
             setup_started,
             (
                 f"Started Kubernetes dual-realm SIPp pods: core={core_pod} ip={core_ip}, "
-                f"peer={peer_pod} ip={peer_ip}. PlaySBC topology="
+                f"peer={peer_pod} ip={peer_ip}"
+                f"{f', target={target_pod} ip={target_ip}' if target_pod else ''}. PlaySBC topology="
                 f"{'active-active StatefulSet' if self.active_active_enabled() else 'single workload'}; "
                 f"RTPengine pairing={'enabled' if profile_enables_rtpengine_deployment(profile, self.args) else 'not-required'}; "
                 f"Multus={'enabled' if getattr(self.args, 'multus_enabled', False) else 'logical-dual-realm'}."
@@ -3253,6 +3284,31 @@ class K8sRegressionRunner:
 
         self.apply_profile_config(profile, bundle, phases)
         uac_scenario, uas_scenario, register_scenario = self.prepare_profile_scenarios(profile, core_pod, peer_pod)
+        target_scenario = ""
+        transfer_target_uac = ""
+        forwarding_target_uac = ""
+        if target_pod:
+            target_scenario = f"/tmp/{short_name(profile.profile)}-target-uas.xml"
+            self.write_text_to_pod(
+                target_pod,
+                target_scenario,
+                (SCENARIO_DIR / "b2bua_uas_forward_target.xml").read_text(encoding="ISO-8859-1"),
+            )
+            self.write_text_to_pod(target_pod, register_scenario, rendered_scenario(profile, "register"))
+        if "unattended-transfer" in profile_name:
+            transfer_target_uac = f"/tmp/{short_name(profile.profile)}-target-uac.xml"
+            self.write_text_to_pod(
+                peer_pod,
+                transfer_target_uac,
+                (SCENARIO_DIR / "b2bua_uac_transfer_target.xml").read_text(encoding="ISO-8859-1"),
+            )
+        elif target_pod:
+            forwarding_target_uac = f"/tmp/{short_name(profile.profile)}-forward-target-uac.xml"
+            self.write_text_to_pod(
+                core_pod,
+                forwarding_target_uac,
+                (SCENARIO_DIR / "b2bua_uac_forward_target.xml").read_text(encoding="ISO-8859-1"),
+            )
         self.run_ha_action(profile, bundle, phases, "precall")
 
         execution_started = time.monotonic()
@@ -3266,6 +3322,8 @@ class K8sRegressionRunner:
 
         try:
             pod_by_role = {"core": core_pod, "peer": peer_pod}
+            if target_pod:
+                pod_by_role["target"] = target_pod
             capture_pods = [(role, pod_by_role[role]) for role in k8s_pcap_capture_roles(profile)]
             captures = self.start_packet_captures(profile, bundle, capture_pods)
             if getattr(profile, "start_uas", True):
@@ -3274,6 +3332,59 @@ class K8sRegressionRunner:
                 processes.append(("peer-sipp-b-uas", peer_pod, uas_process))
                 commands.append(command_text(self.sipp_exec_command(peer_pod, uas_args)))
                 time.sleep(self.args.uas_start_delay)
+
+            if target_pod:
+                target_profile = copy.copy(profile)
+                target_profile.callee = "transfer-target" if "unattended-transfer" in profile_name else "forward-target"
+                target_args = self.b2bua_uas_args(target_profile, target_scenario, target_ip)
+                target_process = self.start_sipp_process(target_pod, "target-sipp-c-uas", target_args, bundle)
+                processes.append(("target-sipp-c-uas", target_pod, target_process))
+                commands.append(command_text(self.sipp_exec_command(target_pod, target_args)))
+                time.sleep(self.args.uas_start_delay)
+
+                target_register_args = self.b2bua_register_args(
+                    target_profile,
+                    register_scenario,
+                    str(target_profile.callee),
+                    target_ip,
+                    "peer",
+                )
+                result = self.run_sipp_step(
+                    target_pod, "target-registration-callee", target_register_args, bundle, timeout=30
+                )
+                returncodes.append(result.returncode)
+                commands.append(command_text(result.command))
+
+                if transfer_target_uac:
+                    transfer_profile = copy.copy(profile)
+                    transfer_profile.callee = "transfer-target"
+                    transfer_args = [
+                        f"{self.args.service}:{self.args.sip_port}",
+                        "-sf", transfer_target_uac,
+                        "-s", "transfer-target",
+                        *self.b2bua_base_args(transfer_profile, peer_ip, 5080),
+                        *transport_args(getattr(profile, "uas_transport", "udp"), "client"),
+                    ]
+                    transfer_process = self.start_sipp_process(
+                        peer_pod, "peer-sipp-b-target-uac", transfer_args, bundle
+                    )
+                    processes.append(("peer-sipp-b-target-uac", peer_pod, transfer_process))
+                    commands.append(command_text(self.sipp_exec_command(peer_pod, transfer_args)))
+                elif forwarding_target_uac:
+                    forward_profile = copy.copy(profile)
+                    forward_profile.callee = "forward-target"
+                    forward_args = [
+                        f"{self.args.service}:{self.args.sip_port}",
+                        "-sf", forwarding_target_uac,
+                        "-s", "forward-target",
+                        *self.b2bua_base_args(forward_profile, core_ip, 5080),
+                        *transport_args(getattr(profile, "uac_transport", "udp"), "client"),
+                    ]
+                    forward_process = self.start_sipp_process(
+                        core_pod, "core-sipp-a-forward-target-uac", forward_args, bundle
+                    )
+                    processes.append(("core-sipp-a-forward-target-uac", core_pod, forward_process))
+                    commands.append(command_text(self.sipp_exec_command(core_pod, forward_args)))
 
             if getattr(profile, "register_callee", True):
                 register_args = self.b2bua_register_args(
@@ -3477,6 +3588,10 @@ class K8sRegressionRunner:
         if profile_uses_rtpengine(profile):
             participants.extend(rtpengine_nodes)
         participants.append("Peer SIPp B")
+        if profile_name.startswith("rfc5359-") and any(
+            token in profile_name for token in ("unattended-transfer", "forwarding")
+        ):
+            participants.append("Target SIPp C")
         return tuple(participants)
 
     def ha_ladder_playsbc_nodes(self, profile: SimpleNamespace) -> tuple[str, ...]:
@@ -3521,9 +3636,17 @@ class K8sRegressionRunner:
         return "\n".join(lines)
 
     def add_registration_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
-        if getattr(profile, "register_callee", True):
+        profile_name = str(getattr(profile, "profile", ""))
+        if getattr(profile, "register_callee", True) and "unconditional-forwarding" not in profile_name:
             auth_outcome = str(getattr(profile, "registration_auth_expected", "") or "")
             self.add_registration_flow(flow, profile, "Peer SIPp B", auth_outcome)
+        if "unconditional-forwarding" in profile_name or (
+            profile_name.startswith("rfc5359-") and any(
+            token in profile_name
+            for token in ("unattended-transfer", "forwarding-on-busy", "forwarding-on-no-answer")
+            )
+        ):
+            self.add_registration_flow(flow, profile, "Target SIPp C", "")
         if getattr(profile, "register_caller", False):
             self.add_registration_flow(flow, profile, "Core SIPp A", "")
 
@@ -3628,6 +3751,16 @@ class K8sRegressionRunner:
         flow.sip(sbc, "Core SIPp A", "200 OK")
 
     def add_call_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
+        profile_name = str(getattr(profile, "profile", ""))
+        if profile_name.startswith("rfc5359-unattended-transfer"):
+            self.add_unattended_transfer_events(flow, profile)
+            return
+        if profile_name.startswith("rfc5359-unconditional-forwarding"):
+            self.add_unconditional_forwarding_events(flow, profile)
+            return
+        if profile_name.startswith("rfc5359-forwarding-on-"):
+            self.add_conditional_forwarding_events(flow, profile)
+            return
         expect_failure = str(getattr(profile, "uac_scenario", "")).endswith("expect_488.xml") or profile.profile in {
             "unknown-route",
             "esbc-call-admission",
@@ -3733,6 +3866,51 @@ class K8sRegressionRunner:
         if getattr(profile, "k8s_verify_drain_reject", False) and "K8s HA" in flow.participants:
             flow.sip("Core SIPp A", sbc, "new INVITE while draining")
             flow.sip(sbc, "Core SIPp A", "503 Node Draining")
+
+    def add_unattended_transfer_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
+        sbc = self.playsbc_node_for_ladder(profile)
+        rtpe = self.rtpengine_node_for_ladder(profile)
+        for source, target, label in (
+            ("Core SIPp A", sbc, "INVITE transfer-b"),
+            (sbc, "Peer SIPp B", "INVITE"),
+            ("Peer SIPp B", sbc, "200 OK"),
+            (sbc, "Core SIPp A", "200 OK"),
+            ("Core SIPp A", sbc, "ACK"),
+            (sbc, "Peer SIPp B", "ACK"),
+            ("Core SIPp A", sbc, "REFER transfer-target"),
+            (sbc, "Peer SIPp B", "REFER transfer-target"),
+            ("Peer SIPp B", sbc, "202 Accepted"),
+            (sbc, "Core SIPp A", "202 Accepted"),
+            ("Peer SIPp B", sbc, "INVITE transfer-target"),
+            (sbc, "Target SIPp C", "INVITE transfer-target"),
+            ("Target SIPp C", sbc, "200 OK"),
+            (sbc, "Peer SIPp B", "200 OK"),
+            ("Peer SIPp B", sbc, "NOTIFY sipfrag 200"),
+            (sbc, "Core SIPp A", "NOTIFY sipfrag 200"),
+        ):
+            flow.sip(source, target, label)
+        if profile_uses_rtpengine(profile):
+            flow.sip(sbc, rtpe, "media session update")
+
+    def add_unconditional_forwarding_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
+        sbc = self.playsbc_node_for_ladder(profile)
+        flow.sip("Core SIPp A", sbc, "INVITE forward-source")
+        flow.sip(sbc, "Peer SIPp B", "policy skip (unconditional)")
+        flow.sip(sbc, "Target SIPp C", "INVITE forward-target")
+        flow.sip("Target SIPp C", sbc, "200 OK")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
+
+    def add_conditional_forwarding_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
+        sbc = self.playsbc_node_for_ladder(profile)
+        condition = "486 Busy Here" if "busy" in str(profile.profile) else "ring timeout"
+        flow.sip("Core SIPp A", sbc, "INVITE original B")
+        flow.sip(sbc, "Peer SIPp B", "INVITE")
+        flow.sip("Peer SIPp B", sbc, condition)
+        flow.sip(sbc, "Core SIPp A", "302 Contact: forward-target")
+        flow.sip("Core SIPp A", sbc, "INVITE forward-target")
+        flow.sip(sbc, "Target SIPp C", "INVITE")
+        flow.sip("Target SIPp C", sbc, "200 OK")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
 
     def profile_options(self, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
         setup_started = time.monotonic()
