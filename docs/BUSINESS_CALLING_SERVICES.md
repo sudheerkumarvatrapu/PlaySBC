@@ -11,16 +11,52 @@ subscription flow.
 
 | Service | PlaySBC behavior | Automated evidence | Remaining acceptance |
 | --- | --- | --- | --- |
-| Call hold/resume | Relays in-dialog re-INVITE/SDP between independent B2BUA legs; preserves CSeq/dialog state; updates the existing internal or RTPengine media session | SIPp over UDP, TCP, TLS, and RTPengine | OBi1022/Zoiper bidirectional physical-device capture |
-| Consultation hold | Maintains distinct original and consultation Call-IDs with deterministic complete, failed-consultation recovery, and original-BYE race states | Unit and fast state profiles | Dedicated multi-dialog SIPp flow, media evidence, kind/AKS, and devices |
-| Music on hold | Defines the hold/music/resume state contract and validates its lifecycle | Unit and fast state profile | Controlled RTP source, anchoring, live SIPp, kind/AKS, and devices |
-| Unattended transfer | Accepts in-dialog REFER, relays it across the B2BUA legs, relays `message/sipfrag` NOTIFY progress, and preserves the original call after rejection | Protocol unit test; internal and RTPengine SIPp profiles | Execute/retain kind and AKS evidence; devices that support REFER subscriptions |
-| Attended transfer | Parses RFC 3891 Replaces and maps the referenced Call-ID and tags from one B2BUA leg to the other | Protocol unit test and fast state profile | Multi-dialog SIPp, kind/AKS, and physical-device evidence |
-| Unconditional forwarding | Applies ordered policy before normal routing, supports registered users or explicit SIP URIs, and rejects loops/hop overflow | Unit; internal and RTPengine SIPp profiles | Execute/retain kind and AKS evidence; devices |
-| Forwarding on busy | Maps configured busy responses to a policy-controlled `302 Moved Temporarily` Contact | Unit; internal and RTPengine SIPp profiles | Execute/retain kind and AKS evidence; confirm that the originating device follows 302 |
-| Forwarding on no answer | Applies a bounded INVITE timeout, cancels the original B-leg, and returns a policy-controlled 302 Contact | Unit; internal and RTPengine SIPp profiles | Execute/retain kind and AKS evidence; confirm that the originating device follows 302 |
-| Instant-messaging transfer | Deferred | None | Product decision and implementation |
+| 2.1 Call hold/resume | Relays in-dialog re-INVITE/SDP between independent B2BUA legs; preserves CSeq/dialog state; updates the existing internal or RTPengine media session | SIPp over UDP, TCP, TLS, and RTPengine | OBi1022/Zoiper bidirectional physical-device capture |
+| 2.2 Consultation hold | Maintains distinct original and consultation Call-IDs with deterministic complete, failed-consultation recovery, and original-BYE race states | Unit and fast state profiles | **Active next chunk:** dedicated three-endpoint multi-dialog SIPp flow, media evidence, kind/AKS, and devices |
+| 2.3 Music on hold | Defines the hold/music/resume state contract and validates its lifecycle | Unit and fast state profile | Controlled RTP source, anchoring, live SIPp, kind/AKS, and devices |
+| 2.4 Unattended transfer | Accepts in-dialog REFER, relays it across the B2BUA legs, relays `message/sipfrag` NOTIFY progress, and preserves the original call after rejection | Protocol unit test; passing three-endpoint kind evidence for internal and RTPengine profiles | AKS and devices that support REFER subscriptions |
+| 2.5 Attended transfer | Parses RFC 3891 Replaces and maps the referenced Call-ID and tags from one B2BUA leg to the other | Protocol unit test and fast state profile | Multi-dialog SIPp, kind/AKS, and physical-device evidence |
+| 2.6 Instant-messaging transfer | Deferred pending product decision; retained explicitly so RFC coverage is not hidden | None | Decide scope, then require three independent SIP endpoints if implemented |
+| 2.7 Unconditional forwarding | Applies ordered policy before normal routing, supports registered users or explicit SIP URIs, and rejects loops/hop overflow | Unit; internal and RTPengine SIPp profiles | Execute/retain kind and AKS evidence; devices |
+| 2.8 Forwarding on busy | Maps configured busy responses to a policy-controlled `302 Moved Temporarily` Contact | Unit; passing three-endpoint kind evidence for internal and RTPengine profiles | AKS and physical-device redirect behavior |
+| 2.9 Forwarding on no answer | Applies a bounded INVITE timeout, cancels the original B-leg, and returns a policy-controlled 302 Contact | Unit; passing three-endpoint kind evidence for internal and RTPengine profiles | AKS and physical-device redirect behavior |
+| 2.10 3-Way Conference: third party added | Planned network conference focus/bridge with three distinct dialogs and media legs | None | Three-node SIPp internal/RTPengine, AKS, and two real-device combinations |
+| 2.11 3-Way Conference: third party joins | Planned dial-in conference focus with authorization and participant lifecycle | None | Three-node SIPp internal/RTPengine, AKS, and two real-device combinations |
+| 2.12 Find-Me | Ordered sequential/parallel target policy with bounds, duplicate detection, and loop protection; live forking is not wired yet | Unit policy tests | Three independent SIPp nodes, RTPengine, AKS, and registered real devices |
+| 2.13 Incoming call screening | Directional caller/callee allow/reject policy foundation; live INVITE enforcement is not wired yet | Unit policy tests | SIP response and audit evidence from three SIPp nodes, AKS, and devices |
+| 2.14 Outgoing call screening | Directional caller/callee allow/reject policy foundation; live INVITE enforcement is not wired yet | Unit policy tests | SIP response and audit evidence from three SIPp nodes, AKS, and devices |
+| 2.15 Call park | Planned network-owned park slot, retrieval authorization, timeout, and original-party recovery | None | Three-node park/retrieve and timeout profiles with RTPengine, AKS, and devices |
+| 2.16 Call pickup | Planned pickup-group policy and deterministic competing-pickup handling | None | Three-node ringing/pickup/race profiles with RTPengine, AKS, and devices |
+| 2.17 Automatic redial | Planned bounded retry policy with cancellation, answer race, and overload protection | None | Three-node busy/retry/answer profiles with RTPengine, AKS, and devices |
+| 2.18 Click to dial | Planned authenticated controller-triggered two-leg call with consent and cleanup | None | Controller plus three-node SIP evidence, RTPengine, AKS, and real devices |
 
+## Complete RFC 5359 Delivery Plan
+
+The plan covers every service example in RFC 5359 sections 2.1 through 2.18.
+Work proceeds in four gates: (1) finish live consultation hold, music on hold,
+and attended transfer; (2) wire Find-Me and incoming/outgoing screening into
+normal INVITE routing; (3) add both three-way conference variants, call park,
+and call pickup; (4) add automatic redial and click-to-dial, and resolve the
+explicit product decision for instant-messaging transfer.
+
+Every live multi-party profile must use three independent SIPp pods A, B, and
+C. Reusing one pod for multiple roles is a failure. SIPp is only synthetic
+evidence: implementation must use standard SIP methods, dialog identifiers,
+SDP, RTP/RTCP, and configurable timers so normal phones and softphones work.
+Each service closes only after internal-media and RTPengine kind runs, AKS
+evidence, and physical-device validation in both supported device directions.
+The exact paired profile names, A/B/C roles, and RTPengine assertions are in
+[RFC 5359 Regression Profile Plan](RFC5359_REGRESSION_PLAN.md).
+
+## Active Next Chunk: Live Consultation Hold
+
+The next implementation gate uses caller A, original party B, and consultation
+party C. It must prove that A places B on hold, establishes an independent
+dialog with C, preserves both dialog identifiers and media ownership, then
+either resumes B after consultation failure or completes the selected transfer
+path. A synthetic state-only result is insufficient: the kind report must carry
+the three endpoint captures, both Call-IDs, SDP direction changes, RTPengine
+session evidence, and deterministic cleanup.
 The implementation is suitable for interoperability testing now. Do not call
 the whole RFC 5359 track production-ready until the remaining cells above have
 retained evidence.
@@ -53,6 +89,23 @@ business_services:
         target: "4499"
         condition: no-answer
         priority: 30
+  screening:
+    rules:
+      - name: reject-premium-outbound
+        direction: outgoing
+        caller: "4*"
+        callee: "1900*"
+        action: reject
+        status: 603
+        reason: Decline
+  find_me:
+    max_targets: 8
+    rules:
+      - name: support-find-me
+        match: "4100"
+        targets: ["4101", "sip:4102@branch.example.com"]
+        mode: sequential
+        no_answer_timeout: 15
 ```
 
 Rules are evaluated by ascending `priority`, then name. `match` uses shell-style
@@ -123,6 +176,9 @@ For each service, retain:
 
 A service passes the real-device gate only when signaling and media both pass,
 the call tears down cleanly, and no PlaySBC or RTPengine session leaks.
+For a service involving three parties, the synthetic prerequisite is three
+separate SIPp pods and the device gate must exercise a real phone or softphone
+in every active party role; no SIPp-only extension may be required by the SBC.
 
 ## Metrics And Troubleshooting
 

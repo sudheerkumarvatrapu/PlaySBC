@@ -47,7 +47,9 @@ from rtp.rtpengine import RtpengineClient, RtpengineError, parse_rtpengine_url
 from sip.business_services import (
     BusinessServiceError,
     CallForwarding,
+    CallScreening,
     CallTransfer,
+    FindMe,
     ForwardingDecision,
     TransferState,
     parse_refer_to,
@@ -2215,6 +2217,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.call_forwarding = CallForwarding(
             forwarding_rules,
             max_hops=int(forwarding_config.get("max_hops", 5)),
+        )
+        screening_config = self.business_services_config.get("screening", {})
+        if not isinstance(screening_config, dict):
+            screening_config = {}
+        self.call_screening = CallScreening(screening_config.get("rules", ()))
+        find_me_config = self.business_services_config.get("find_me", {})
+        if not isinstance(find_me_config, dict):
+            find_me_config = {}
+        self.find_me = FindMe(
+            find_me_config.get("rules", ()),
+            max_targets=int(find_me_config.get("max_targets", 8)),
         )
         transfer_config = self.business_services_config.get("transfer", {})
         self.transfer_enabled = bool(
@@ -7137,6 +7150,20 @@ def validate_config(config: ServerConfig) -> None:
         forwarding_rules,
         max_hops=int(forwarding_config.get("max_hops", 5)) if forwarding_config else 5,
     )
+    screening_config = config.business_services.get("screening", {})
+    if screening_config and not isinstance(screening_config, dict):
+        raise ValueError("business_services.screening must be an object")
+    screening_rules = screening_config.get("rules", []) if screening_config else []
+    if not isinstance(screening_rules, list):
+        raise ValueError("business_services.screening.rules must be a list")
+    CallScreening(screening_rules)
+    find_me_config = config.business_services.get("find_me", {})
+    if find_me_config and not isinstance(find_me_config, dict):
+        raise ValueError("business_services.find_me must be an object")
+    find_me_rules = find_me_config.get("rules", []) if find_me_config else []
+    if not isinstance(find_me_rules, list):
+        raise ValueError("business_services.find_me.rules must be a list")
+    FindMe(find_me_rules, max_targets=int(find_me_config.get("max_targets", 8)) if find_me_config else 8)
     if ha_enabled(config.ha):
         node_id = ha_node_id(config.ha)
         if not node_id:

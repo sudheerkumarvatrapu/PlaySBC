@@ -18,13 +18,19 @@ from ai_gateway import AiVoiceConfig, AiVoiceGateway, ConversationChunk, Convers
 from ai_gateway.rasa import RasaBotResponse
 from sip.business_services import (
     CallForwarding,
+    CallScreening,
     CallTransfer,
     ConsultationHold,
     ConsultationState,
     ForwardCondition,
     ForwardingRule,
+    FindMe,
+    FindMeMode,
+    FindMeRule,
     HoldState,
     MusicOnHold,
+    ScreeningDirection,
+    ScreeningRule,
     TransferKind,
     TransferState,
 )
@@ -39,6 +45,8 @@ PROFILES = (
     "rfc5359-unattended-transfer",
     "rfc5359-attended-transfer",
     "rfc5359-call-forwarding",
+    "rfc5359-find-me-policy",
+    "rfc5359-call-screening-policy",
 )
 
 
@@ -264,6 +272,40 @@ def run_call_forwarding() -> dict[str, object]:
     }
 
 
+def run_find_me_policy() -> dict[str, object]:
+    service = FindMe((
+        FindMeRule("sequential", "4100", ("4101", "4102")),
+        FindMeRule("parallel", "4200", ("4201", "4202"), FindMeMode.PARALLEL),
+    ))
+    sequential = service.select("4100")
+    parallel = service.select("4200")
+    return {
+        "profile": "rfc5359-find-me-policy",
+        "passed": bool(sequential and parallel
+                       and sequential.targets == ("4101", "4102")
+                       and parallel.mode is FindMeMode.PARALLEL),
+        "sequential_targets": list(sequential.targets) if sequential else [],
+        "parallel_targets": list(parallel.targets) if parallel else [],
+    }
+
+
+def run_call_screening_policy() -> dict[str, object]:
+    service = CallScreening((
+        ScreeningRule("incoming", ScreeningDirection.INCOMING, caller="1900*", callee="4*"),
+        ScreeningRule("outgoing", ScreeningDirection.OUTGOING, caller="4*", callee="1900*"),
+    ))
+    incoming = service.evaluate("incoming", "19005550100", "4100")
+    outgoing = service.evaluate("outgoing", "4100", "19005550100")
+    unrelated = service.evaluate("incoming", "12025550100", "4100")
+    return {
+        "profile": "rfc5359-call-screening-policy",
+        "passed": not incoming.allowed and not outgoing.allowed and unrelated.allowed,
+        "incoming_status": incoming.status,
+        "outgoing_status": outgoing.status,
+        "unrelated_allowed": unrelated.allowed,
+    }
+
+
 async def run_profile(profile: str) -> dict[str, object]:
     if profile == "ai-provider-streaming-contract":
         return await run_ai_provider_streaming_contract()
@@ -279,6 +321,10 @@ async def run_profile(profile: str) -> dict[str, object]:
         return run_unattended_transfer()
     if profile == "rfc5359-attended-transfer":
         return run_attended_transfer()
+    if profile == "rfc5359-find-me-policy":
+        return run_find_me_policy()
+    if profile == "rfc5359-call-screening-policy":
+        return run_call_screening_policy()
     return run_call_forwarding()
 
 

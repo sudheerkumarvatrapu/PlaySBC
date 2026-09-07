@@ -3,13 +3,20 @@ import unittest
 from sip.business_services import (
     BusinessServiceError,
     CallForwarding,
+    CallScreening,
     CallTransfer,
     ConsultationHold,
     ConsultationState,
     ForwardCondition,
     ForwardingRule,
+    FindMe,
+    FindMeMode,
+    FindMeRule,
     HoldState,
     MusicOnHold,
+    ScreeningAction,
+    ScreeningDirection,
+    ScreeningRule,
     TransferKind,
     TransferState,
     parse_refer_to,
@@ -179,6 +186,43 @@ class CallForwardingTests(unittest.TestCase):
         )
         with self.assertRaises(BusinessServiceError):
             forwarding.select("1001", history=("3001", "3002"))
+
+
+class CallScreeningTests(unittest.TestCase):
+    def test_directional_policy_and_default_allow(self):
+        screening = CallScreening((
+            ScreeningRule("blocked-in", ScreeningDirection.INCOMING,
+                          caller="1900*", callee="4*"),
+            ScreeningRule("allowed-out", ScreeningDirection.OUTGOING,
+                          caller="4*", callee="18005551212",
+                          action=ScreeningAction.ALLOW),
+        ))
+        rejected = screening.evaluate("incoming", "19005550100", "4100")
+        self.assertFalse(rejected.allowed)
+        self.assertEqual((rejected.status, rejected.rule_name), (603, "blocked-in"))
+        self.assertTrue(screening.evaluate("outgoing", "4100", "18005551212").allowed)
+        self.assertTrue(screening.evaluate("incoming", "12025550100", "4100").allowed)
+
+    def test_reject_status_validation(self):
+        with self.assertRaises(BusinessServiceError):
+            CallScreening((ScreeningRule("bad", ScreeningDirection.OUTGOING, status=200),))
+
+
+class FindMeTests(unittest.TestCase):
+    def test_ordered_and_parallel_target_selection(self):
+        sequential = FindMe((FindMeRule("support", "4100", ("4101", "sip:4102@example.com"), no_answer_timeout=12),))
+        decision = sequential.select("4100")
+        self.assertEqual(decision.targets, ("4101", "sip:4102@example.com"))
+        self.assertEqual(decision.no_answer_timeout, 12)
+        parallel = FindMe(({"match": "42*", "targets": ["4201", "4202"], "mode": "parallel"},))
+        self.assertEqual(parallel.select("4200").mode, FindMeMode.PARALLEL)
+
+    def test_duplicate_and_loop_protection(self):
+        with self.assertRaises(BusinessServiceError):
+            FindMe((FindMeRule("duplicate", "4100", ("4101", "4101")),))
+        service = FindMe((FindMeRule("loop", "4100", ("4101", "4102")),))
+        with self.assertRaises(BusinessServiceError):
+            service.select("4100", history=("4102",))
 
 
 if __name__ == "__main__":

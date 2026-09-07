@@ -390,3 +390,148 @@ def _forward_target_user(target: str) -> str:
         match = match.split(":", 1)[1]
         return match.split("@", 1)[0].split(";", 1)[0]
     return match
+
+
+class ScreeningDirection(Enum):
+    INCOMING = "incoming"
+    OUTGOING = "outgoing"
+
+
+class ScreeningAction(Enum):
+    ALLOW = "allow"
+    REJECT = "reject"
+
+
+@dataclass(frozen=True)
+class ScreeningRule:
+    """Ordered caller/callee policy for RFC 5359 call screening."""
+    name: str
+    direction: ScreeningDirection
+    caller: str = "*"
+    callee: str = "*"
+    action: ScreeningAction = ScreeningAction.REJECT
+    status: int = 603
+    reason: str = "Decline"
+    priority: int = 100
+    enabled: bool = True
+
+    @classmethod
+    def from_config(cls, value: dict) -> "ScreeningRule":
+        try:
+            direction = ScreeningDirection(str(value.get("direction", "incoming")).lower())
+            action = ScreeningAction(str(value.get("action", "reject")).lower())
+        except ValueError as exc:
+            raise BusinessServiceError("screening direction/action is invalid") from exc
+        return cls(str(value.get("name") or "screening-rule"), direction,
+                   str(value.get("caller", "*")), str(value.get("callee", "*")),
+                   action, int(value.get("status", 603)),
+                   str(value.get("reason", "Decline")), int(value.get("priority", 100)),
+                   bool(value.get("enabled", True)))
+
+
+@dataclass(frozen=True)
+class ScreeningDecision:
+    action: ScreeningAction
+    rule_name: str = "default-allow"
+    status: int = 0
+    reason: str = ""
+
+    @property
+    def allowed(self) -> bool:
+        return self.action is ScreeningAction.ALLOW
+
+
+class CallScreening:
+    """Evaluates standard SIP identities; it has no SIPp-specific dependency."""
+    def __init__(self, rules: Iterable[Union[ScreeningRule, dict]] = ()):
+        self.rules = tuple(sorted(
+            (rule if isinstance(rule, ScreeningRule) else ScreeningRule.from_config(rule)
+             for rule in rules), key=lambda rule: (rule.priority, rule.name)))
+        for rule in self.rules:
+            if not rule.name or not rule.caller or not rule.callee:
+                raise BusinessServiceError("screening rules require name, caller, and callee")
+            if rule.action is ScreeningAction.REJECT and not 400 <= rule.status <= 699:
+                raise BusinessServiceError("screening rejection status must be 400..699")
+
+    def evaluate(self, direction: Union[ScreeningDirection, str], caller: str,
+                 callee: str) -> ScreeningDecision:
+        try:
+            selected = direction if isinstance(direction, ScreeningDirection) else ScreeningDirection(str(direction).lower())
+        except ValueError as exc:
+            raise BusinessServiceError("screening direction must be incoming or outgoing") from exc
+        for rule in self.rules:
+            if (rule.enabled and rule.direction is selected
+                    and fnmatch.fnmatchcase(caller, rule.caller)
+                    and fnmatch.fnmatchcase(callee, rule.callee)):
+                if rule.action is ScreeningAction.ALLOW:
+                    return ScreeningDecision(rule.action, rule.name)
+                return ScreeningDecision(rule.action, rule.name, rule.status, rule.reason)
+        return ScreeningDecision(ScreeningAction.ALLOW)
+
+
+class FindMeMode(Enum):
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+
+
+@dataclass(frozen=True)
+class FindMeRule:
+    name: str
+    match: str
+    targets: Tuple[str, ...]
+    mode: FindMeMode = FindMeMode.SEQUENTIAL
+    no_answer_timeout: float = 15.0
+    priority: int = 100
+    enabled: bool = True
+
+    @classmethod
+    def from_config(cls, value: dict) -> "FindMeRule":
+        try:
+            mode = FindMeMode(str(value.get("mode", "sequential")).lower())
+        except ValueError as exc:
+            raise BusinessServiceError("find-me mode must be sequential or parallel") from exc
+        targets = value.get("targets", ())
+        if isinstance(targets, str):
+            targets = (targets,)
+        return cls(str(value.get("name") or value.get("match") or "find-me-rule"),
+                   str(value.get("match", "*")), tuple(str(v) for v in targets), mode,
+                   float(value.get("no_answer_timeout", 15.0)),
+                   int(value.get("priority", 100)), bool(value.get("enabled", True)))
+
+
+@dataclass(frozen=True)
+class FindMeDecision:
+    rule_name: str
+    mode: FindMeMode
+    targets: Tuple[str, ...]
+    no_answer_timeout: float
+
+
+class FindMe:
+    """Selects a bounded, loop-free target set for ordinary SIP endpoints."""
+    def __init__(self, rules: Iterable[Union[FindMeRule, dict]] = (), max_targets: int = 8):
+        if max_targets < 1:
+            raise BusinessServiceError("find-me max_targets must be at least 1")
+        self.max_targets = max_targets
+        self.rules = tuple(sorted(
+            (rule if isinstance(rule, FindMeRule) else FindMeRule.from_config(rule)
+             for rule in rules), key=lambda rule: (rule.priority, rule.name)))
+        for rule in self.rules:
+            if not rule.name or not rule.match or not rule.targets:
+                raise BusinessServiceError("find-me rules require name, match, and targets")
+            if rule.no_answer_timeout <= 0 or len(rule.targets) > max_targets:
+                raise BusinessServiceError("find-me timeout/target limit is invalid")
+            normalized = tuple(_forward_target_user(v) for v in rule.targets)
+            if len(set(normalized)) != len(normalized):
+                raise BusinessServiceError("find-me targets must be unique")
+
+    def select(self, user: str, history: Sequence[str] = ()) -> Optional[FindMeDecision]:
+        visited = {str(value) for value in history} | {user}
+        for rule in self.rules:
+            if not rule.enabled or not fnmatch.fnmatchcase(user, rule.match):
+                continue
+            for target in rule.targets:
+                if target in visited or _forward_target_user(target) in visited:
+                    raise BusinessServiceError(f"find-me loop detected via {target!r}")
+            return FindMeDecision(rule.name, rule.mode, rule.targets, rule.no_answer_timeout)
+        return None

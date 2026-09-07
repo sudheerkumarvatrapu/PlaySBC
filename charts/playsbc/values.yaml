@@ -470,6 +470,11 @@ playsbc:
       forwarding:
         max_hops: 5
         rules: []
+      screening:
+        rules: []
+      find_me:
+        max_targets: 8
+        rules: []
     b2bua_ladder_logs: true
     b2bua_invite_timeout: 10.0
     media_backend: internal

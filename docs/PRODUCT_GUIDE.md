@@ -99,12 +99,36 @@ helm package charts/playsbc --destination "$PACKAGE_DIR"
 helm upgrade --install playsbc "$PLAYSBC_CHART" --kube-context kind-playsbc \
   --namespace playsbc --create-namespace --reuse-values --atomic --wait --timeout 10m \
   --set image.repository="$PLAYSBC_REPOSITORY" --set-string image.tag="$SOURCE_TAG" \
-  --set image.pullPolicy=IfNotPresent
+  --set image.pullPolicy=IfNotPresent --set rtpengine.enabled=true \
+  --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
+  --set-string rtpengine.image.tag=2.6.0 --set rtpengine.hostNetwork=false \
+  --set playsbc.config.media_backend=rtpengine \
+  --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223 \
+  --set observability.enabled=true
+kubectl --context kind-playsbc -n playsbc rollout restart \
+  statefulset/playsbc-playsbc statefulset/playsbc-playsbc-rtpengine \
+  deployment/playsbc-playsbc-prometheus deployment/playsbc-playsbc-grafana
 kubectl --context kind-playsbc -n playsbc rollout status \
   statefulset/playsbc-playsbc --timeout=240s
+kubectl --context kind-playsbc -n playsbc rollout status \
+  statefulset/playsbc-playsbc-rtpengine --timeout=240s
+kubectl --context kind-playsbc -n playsbc rollout status \
+  deployment/playsbc-playsbc-prometheus --timeout=240s
+kubectl --context kind-playsbc -n playsbc rollout status \
+  deployment/playsbc-playsbc-grafana --timeout=240s
+kubectl --context kind-playsbc -n playsbc get pods -o wide
 ```
 
 # Private Commercial RFC 5359 Regression
+
+The RFC 5359 plan covers all sections 2.1 through 2.18. Every multi-party
+regression must run three independent SIPp pods (A/B/C), including internal
+media and RTPengine variants. SIPp is not the production acceptance gate:
+standard-SIP real phones and softphones must also pass signaling, media,
+failure recovery, and cleanup in both supported device directions. See
+`docs/BUSINESS_CALLING_SERVICES.md` for the per-service status matrix.
+The paired internal/RTPengine profile catalog and compulsory A/B/C roles are
+defined in `docs/RFC5359_REGRESSION_PLAN.md`.
 
 ```bash
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
