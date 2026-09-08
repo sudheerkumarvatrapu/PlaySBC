@@ -956,13 +956,58 @@ def rtpengine_two_way_verdict_observed(bundle: Path, call_ids: Optional[set[str]
     return False
 
 
-def validate_k8s_profile_evidence(profile_name: str, bundle: Path) -> list[str]:
+LADDER_SIP_METHODS = (
+    "REGISTER", "OPTIONS", "INVITE", "ACK", "BYE", "CANCEL", "REFER",
+    "NOTIFY", "PRACK", "MESSAGE",
+)
+
+
+def validate_ladder_against_sipmsg(ladder: str, sipmsg_text: str) -> list[str]:
+    """Reject hand-authored ladders that invent or omit observed SIP behavior."""
+    if not ladder or not sipmsg_text or "NLP CHAT / RASA LADDER" in ladder:
+        return []
+    failures: list[str] = []
+    ladder_methods = {
+        method for method in LADDER_SIP_METHODS if re.search(rf"\b{method}\b", ladder)
+    }
+    evidence_methods = {
+        method
+        for method in LADDER_SIP_METHODS
+        if re.search(rf"(?im)^(?:{method}\s+sip:|CSeq:\s*\d+\s+{method}\s*$)", sipmsg_text)
+    }
+    if ladder_methods != evidence_methods:
+        invented = sorted(ladder_methods - evidence_methods)
+        omitted = sorted(evidence_methods - ladder_methods)
+        failures.append(
+            f"ladder SIP methods disagree with sipmsg.log: invented={invented} omitted={omitted}"
+        )
+    ladder_failures = set(re.findall(r"\b([456]\d\d)\b", ladder))
+    evidence_failures = set(re.findall(r"(?m)^SIP/2\.0\s+([456]\d\d)\b", sipmsg_text))
+    if ladder_failures != evidence_failures:
+        invented = sorted(ladder_failures - evidence_failures)
+        omitted = sorted(evidence_failures - ladder_failures)
+        failures.append(
+            f"ladder final statuses disagree with sipmsg.log: invented={invented} omitted={omitted}"
+        )
+    return failures
+
+
+def validate_k8s_profile_evidence(
+    profile_name: str, bundle: Path, sip_ladder: str = ""
+) -> list[str]:
     failures: list[str] = []
     profile = profile_values(profile_name, "evidence") if profile_name in CATALOG_PROFILES else None
 
     sipmsg = bundle / "sipmsg.log"
     if profile_name not in RASA_NLU_PROFILES and not sipmsg.exists():
         failures.append("missing root sipmsg.log")
+    if sipmsg.exists() and sip_ladder:
+        failures.extend(
+            validate_ladder_against_sipmsg(
+                sip_ladder,
+                sipmsg.read_text(encoding="utf-8", errors="replace"),
+            )
+        )
 
     if profile and k8s_pcap_capture_roles(profile):
         capture = bundle / "capture.pcap"
@@ -980,6 +1025,20 @@ def validate_k8s_profile_evidence(profile_name: str, bundle: Path) -> list[str]:
             failures.append("OPTIONS evidence is missing an OPTIONS CSeq")
         elif OPTIONS_OTHER_CSEQ_PATTERN.search(options_text):
             failures.append("OPTIONS evidence contains non-OPTIONS SIP traffic")
+
+    if profile_name == "invalid-bye" and sipmsg.exists():
+        invalid_bye_text = sipmsg.read_text(encoding="utf-8", errors="replace")
+        if not re.search(r"(?im)^BYE\s+sip:", invalid_bye_text):
+            failures.append("invalid-BYE evidence is missing the out-of-dialog BYE request")
+        if not re.search(r"(?im)^CSeq:\s*\d+\s+BYE\s*$", invalid_bye_text):
+            failures.append("invalid-BYE evidence is missing a BYE CSeq")
+        if not re.search(
+            r"(?im)^SIP/2\.0\s+481\s+Call/Transaction Does Not Exist\s*$",
+            invalid_bye_text,
+        ):
+            failures.append("invalid-BYE evidence is missing the 481 response")
+        if re.search(r"(?im)^INVITE\s+", invalid_bye_text):
+            failures.append("invalid-BYE evidence unexpectedly contains an INVITE")
 
     if profile_name.startswith("rfc5359-call-hold-resume") and sipmsg.exists():
         hold_text = sipmsg.read_text(encoding="utf-8", errors="replace")
@@ -3062,7 +3121,7 @@ class K8sRegressionRunner:
                 "COMBINED SIPMSG LOG",
                 f"file=sipmsg.log sections={sipmsg_sections}",
             )
-            evidence_failures = validate_k8s_profile_evidence(profile, bundle)
+            evidence_failures = validate_k8s_profile_evidence(profile, bundle, sip_ladder)
             if evidence_failures:
                 status = "failed"
                 if not any(code != 0 for code in returncodes):
@@ -3566,6 +3625,8 @@ class K8sRegressionRunner:
         profile_name = str(getattr(profile, "profile", ""))
         playsbc_nodes = self.ha_ladder_playsbc_nodes(profile)
         rtpengine_nodes = self.ha_ladder_rtpengine_nodes(profile)
+        if profile_name == "invalid-bye":
+            return ("Core SIPp A", playsbc_nodes[0])
         if "ai-rasa" in profile_name:
             if profile_name in {
                 "ai-rasa-rtpengine-speech",
@@ -3589,7 +3650,8 @@ class K8sRegressionRunner:
             participants.extend(rtpengine_nodes)
         participants.append("Peer SIPp B")
         if profile_name.startswith("rfc5359-") and any(
-            token in profile_name for token in ("unattended-transfer", "forwarding")
+            token in profile_name
+            for token in ("unattended-transfer", "forwarding-on-busy", "forwarding-on-no-answer")
         ):
             participants.append("Target SIPp C")
         return tuple(participants)
@@ -3637,15 +3699,13 @@ class K8sRegressionRunner:
 
     def add_registration_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         profile_name = str(getattr(profile, "profile", ""))
-        if getattr(profile, "register_callee", True) and "unconditional-forwarding" not in profile_name:
+        if getattr(profile, "register_callee", True):
             auth_outcome = str(getattr(profile, "registration_auth_expected", "") or "")
             self.add_registration_flow(flow, profile, "Peer SIPp B", auth_outcome)
-        if "unconditional-forwarding" in profile_name or (
-            profile_name.startswith("rfc5359-") and any(
-            token in profile_name
-            for token in ("unattended-transfer", "forwarding-on-busy", "forwarding-on-no-answer")
-            )
-        ):
+        if profile_name.startswith("rfc5359-") and any(
+                token in profile_name
+                for token in ("unattended-transfer", "forwarding-on-busy", "forwarding-on-no-answer")
+            ):
             self.add_registration_flow(flow, profile, "Target SIPp C", "")
         if getattr(profile, "register_caller", False):
             self.add_registration_flow(flow, profile, "Core SIPp A", "")
@@ -3752,6 +3812,18 @@ class K8sRegressionRunner:
 
     def add_call_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         profile_name = str(getattr(profile, "profile", ""))
+        if profile_name == "invalid-bye":
+            sbc = self.playsbc_node_for_ladder(profile)
+            flow.sip("Core SIPp A", sbc, "BYE (unknown dialog)")
+            flow.sip(sbc, "Core SIPp A", "481 No Matching Dialog")
+            return
+        if profile_name == "ha-node-draining":
+            sbc = self.playsbc_node_for_ladder(profile)
+            flow.sip("K8s HA", sbc, "mark node draining")
+            flow.sip("Core SIPp A", sbc, "INVITE")
+            flow.sip(sbc, "Core SIPp A", "503 Node Draining")
+            flow.sip("Core SIPp A", sbc, "ACK")
+            return
         if profile_name.startswith("rfc5359-unattended-transfer"):
             self.add_unattended_transfer_events(flow, profile)
             return
@@ -3767,6 +3839,7 @@ class K8sRegressionRunner:
             "rtpengine-control-failure",
             "rtpengine-port-exhaustion",
             "rtpengine-interface-failure",
+            "tcp-connection-failure",
         }
         cancel_flow = "cancel" in profile.profile
         outbound_failure = "failed-outbound" in profile.profile or "trunk-failure" in profile.profile
@@ -3788,7 +3861,15 @@ class K8sRegressionRunner:
             if profile_uses_rtpengine(profile):
                 flow.sip(sbc, rtpe, "OFFER")
                 flow.sip(rtpe, sbc, "failed OFFER")
-            flow.sip(sbc, "Core SIPp A", "final rejection")
+            rejection = {
+                "unknown-route": "404 Not Found",
+                "esbc-call-admission": "503 Service Unavailable",
+                "rtpengine-control-failure": "488 Not Acceptable Here",
+                "rtpengine-port-exhaustion": "503 Media Exhausted",
+                "rtpengine-interface-failure": "488 Not Acceptable Here",
+                "tcp-connection-failure": "480 Temporary Unavailable",
+            }.get(profile_name, "488 Not Acceptable Here")
+            flow.sip(sbc, "Core SIPp A", rejection)
             flow.sip("Core SIPp A", sbc, "ACK")
             return
         if profile_uses_rtpengine(profile):
@@ -3872,7 +3953,9 @@ class K8sRegressionRunner:
         rtpe = self.rtpengine_node_for_ladder(profile)
         for source, target, label in (
             ("Core SIPp A", sbc, "INVITE transfer-b"),
+            (sbc, "Core SIPp A", "100 Trying"),
             (sbc, "Peer SIPp B", "INVITE"),
+            ("Peer SIPp B", sbc, "100 Trying"),
             ("Peer SIPp B", sbc, "200 OK"),
             (sbc, "Core SIPp A", "200 OK"),
             ("Core SIPp A", sbc, "ACK"),
@@ -3887,6 +3970,18 @@ class K8sRegressionRunner:
             (sbc, "Peer SIPp B", "200 OK"),
             ("Peer SIPp B", sbc, "NOTIFY sipfrag 200"),
             (sbc, "Core SIPp A", "NOTIFY sipfrag 200"),
+            ("Core SIPp A", sbc, "200 OK (NOTIFY)"),
+            (sbc, "Peer SIPp B", "200 OK (NOTIFY)"),
+            ("Peer SIPp B", sbc, "BYE original dialog"),
+            (sbc, "Core SIPp A", "BYE original dialog"),
+            ("Core SIPp A", sbc, "200 OK (BYE)"),
+            (sbc, "Peer SIPp B", "200 OK (BYE)"),
+            ("Peer SIPp B", sbc, "ACK"),
+            (sbc, "Target SIPp C", "ACK"),
+            ("Peer SIPp B", sbc, "BYE transfer-target"),
+            (sbc, "Target SIPp C", "BYE transfer-target"),
+            ("Target SIPp C", sbc, "200 OK (BYE)"),
+            (sbc, "Peer SIPp B", "200 OK (BYE)"),
         ):
             flow.sip(source, target, label)
         if profile_uses_rtpengine(profile):
@@ -3895,20 +3990,48 @@ class K8sRegressionRunner:
     def add_unconditional_forwarding_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         sbc = self.playsbc_node_for_ladder(profile)
         flow.sip("Core SIPp A", sbc, "INVITE forward-source")
-        flow.sip(sbc, "Peer SIPp B", "policy skip (unconditional)")
-        flow.sip(sbc, "Target SIPp C", "INVITE forward-target")
-        flow.sip("Target SIPp C", sbc, "200 OK")
+        flow.sip(sbc, "Core SIPp A", "100 Trying")
+        flow.sip(sbc, "Peer SIPp B", "INVITE forward-target")
+        flow.sip("Peer SIPp B", sbc, "100 Trying")
+        flow.sip("Peer SIPp B", sbc, "180 Ringing")
+        flow.sip(sbc, "Core SIPp A", "180 Ringing")
+        flow.sip("Peer SIPp B", sbc, "200 OK")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
+        flow.sip("Core SIPp A", sbc, "ACK")
+        flow.sip(sbc, "Peer SIPp B", "ACK")
+        flow.sip("Core SIPp A", sbc, "BYE")
+        flow.sip(sbc, "Peer SIPp B", "BYE")
+        flow.sip("Peer SIPp B", sbc, "200 OK")
         flow.sip(sbc, "Core SIPp A", "200 OK")
 
     def add_conditional_forwarding_events(self, flow: B2BUAFlowLog, profile: SimpleNamespace) -> None:
         sbc = self.playsbc_node_for_ladder(profile)
-        condition = "486 Busy Here" if "busy" in str(profile.profile) else "ring timeout"
+        busy = "busy" in str(profile.profile)
         flow.sip("Core SIPp A", sbc, "INVITE original B")
+        flow.sip(sbc, "Core SIPp A", "100 Trying")
         flow.sip(sbc, "Peer SIPp B", "INVITE")
-        flow.sip("Peer SIPp B", sbc, condition)
+        if busy:
+            flow.sip("Peer SIPp B", sbc, "486 Busy Here")
+            flow.sip(sbc, "Peer SIPp B", "ACK")
+        else:
+            flow.sip("Peer SIPp B", sbc, "180 Ringing")
+            flow.sip(sbc, "Core SIPp A", "180 Ringing")
+            flow.sip(sbc, "Peer SIPp B", "CANCEL")
+            flow.sip("Peer SIPp B", sbc, "200 OK (CANCEL)")
+            flow.sip("Peer SIPp B", sbc, "487 Request Terminated")
+            flow.sip(sbc, "Peer SIPp B", "ACK")
         flow.sip(sbc, "Core SIPp A", "302 Contact: forward-target")
+        flow.sip("Core SIPp A", sbc, "ACK (302)")
         flow.sip("Core SIPp A", sbc, "INVITE forward-target")
+        flow.sip(sbc, "Core SIPp A", "100 Trying")
         flow.sip(sbc, "Target SIPp C", "INVITE")
+        flow.sip("Target SIPp C", sbc, "100 Trying")
+        flow.sip("Target SIPp C", sbc, "200 OK")
+        flow.sip(sbc, "Core SIPp A", "200 OK")
+        flow.sip("Core SIPp A", sbc, "ACK")
+        flow.sip(sbc, "Target SIPp C", "ACK")
+        flow.sip("Core SIPp A", sbc, "BYE")
+        flow.sip(sbc, "Target SIPp C", "BYE")
         flow.sip("Target SIPp C", sbc, "200 OK")
         flow.sip(sbc, "Core SIPp A", "200 OK")
 

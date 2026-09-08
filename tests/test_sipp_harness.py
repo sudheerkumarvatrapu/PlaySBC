@@ -3728,6 +3728,110 @@ class RealTopologyTests(unittest.TestCase):
         self.assertNotIn("INVITE", ladder)
         self.assertNotIn("BYE", ladder)
 
+    def test_kubernetes_invalid_bye_ladder_matches_out_of_dialog_exchange(self):
+        args = run_k8s_regression.parse_args(["--aks-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("invalid-bye", "unit-k8s")
+
+        ladder = runner.dual_realm_ladder(profile)
+
+        self.assertIn("BYE (unknown dialog)", ladder)
+        self.assertIn("481 No Matching Dialog", ladder)
+        self.assertNotIn("INVITE", ladder)
+        self.assertNotIn("Peer SIPp B", ladder)
+
+    def test_kubernetes_invalid_bye_evidence_requires_exact_exchange(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            write_test_pcap(bundle / "capture.pcap", 1.0, b"packet", linktype=1)
+            (bundle / "sipmsg.log").write_text(
+                "BYE sip:missing@example.test SIP/2.0\n"
+                "CSeq: 2 BYE\n"
+                "SIP/2.0 481 Call/Transaction Does Not Exist\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                run_k8s_regression.validate_k8s_profile_evidence("invalid-bye", bundle),
+                [],
+            )
+
+            (bundle / "sipmsg.log").write_text(
+                "INVITE sip:callee@example.test SIP/2.0\nCSeq: 1 INVITE\n",
+                encoding="utf-8",
+            )
+            failures = run_k8s_regression.validate_k8s_profile_evidence(
+                "invalid-bye", bundle
+            )
+            self.assertTrue(any("missing the out-of-dialog BYE" in item for item in failures))
+            self.assertTrue(any("unexpectedly contains an INVITE" in item for item in failures))
+
+    def test_kubernetes_rejection_ladders_use_profile_specific_statuses(self):
+        args = run_k8s_regression.parse_args(["--aks-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        expected = {
+            "unknown-route": "404 Not Found",
+            "esbc-call-admission": "503 Service Unavailable",
+            "rtpengine-control-failure": "488 Not Acceptable Here",
+            "rtpengine-port-exhaustion": "503 Media Exhausted",
+            "rtpengine-interface-failure": "488 Not Acceptable Here",
+            "tcp-connection-failure": "480 Temporary Unavailable",
+        }
+        for profile_name, response in expected.items():
+            with self.subTest(profile=profile_name):
+                profile = run_k8s_regression.profile_values(profile_name, "unit-k8s")
+                ladder = runner.dual_realm_ladder(profile)
+                self.assertIn(response, ladder)
+                self.assertNotIn("final rejection", ladder)
+                self.assertNotIn("BYE", ladder)
+
+    def test_kubernetes_rfc5359_ladders_retain_cleanup_and_endpoint_roles(self):
+        args = run_k8s_regression.parse_args(["--aks-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+
+        unconditional = runner.dual_realm_ladder(
+            run_k8s_regression.profile_values("rfc5359-unconditional-forwarding", "unit-k8s")
+        )
+        self.assertIn("Peer SIPp B", unconditional)
+        self.assertNotIn("Target SIPp C", unconditional)
+        self.assertIn("ACK", unconditional)
+        self.assertIn("BYE", unconditional)
+
+        no_answer = runner.dual_realm_ladder(
+            run_k8s_regression.profile_values("rfc5359-forwarding-on-no-answer", "unit-k8s")
+        )
+        for token in ("Peer SIPp B", "Target SIPp C", "CANCEL", "487 Request Terminated", "ACK", "BYE"):
+            self.assertIn(token, no_answer)
+
+        transfer = runner.dual_realm_ladder(
+            run_k8s_regression.profile_values("rfc5359-unattended-transfer", "unit-k8s")
+        )
+        for token in ("REFER", "NOTIFY", "Target SIPp C", "ACK", "BYE"):
+            self.assertIn(token, transfer)
+
+    def test_report_catalog_retains_ai_and_transport_evidence(self):
+        artifacts = {filename for _label, filename in run_regression_suite.REPORT_ARTIFACTS}
+        self.assertTrue({"log.ai", "log.udp", "log.tcp", "log.tls"}.issubset(artifacts))
+        execution = set(run_regression_suite.PHASE_ARTIFACTS["Test Execution"])
+        self.assertTrue({"log.ai", "log.udp", "log.tcp", "log.tls"}.issubset(execution))
+
+    def test_ladder_validation_rejects_invented_and_omitted_sip_events(self):
+        correct = "Core | BYE | PlaySBC\nCore | 481 No Matching Dialog | PlaySBC"
+        sipmsg = (
+            "BYE sip:missing@example.test SIP/2.0\nCSeq: 2 BYE\n"
+            "SIP/2.0 481 Call/Transaction Does Not Exist\nCSeq: 2 BYE\n"
+        )
+        self.assertEqual(
+            run_k8s_regression.validate_ladder_against_sipmsg(correct, sipmsg),
+            [],
+        )
+        failures = run_k8s_regression.validate_ladder_against_sipmsg(
+            "Core | INVITE | PlaySBC\nPlaySBC | 200 OK | Core",
+            sipmsg,
+        )
+        self.assertTrue(any("invented=['INVITE']" in item for item in failures))
+        self.assertTrue(any("omitted=['BYE']" in item for item in failures))
+        self.assertTrue(any("omitted=['481']" in item for item in failures))
+
     def test_kubernetes_evidence_validation_requires_srtp_two_way_verdict(self):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
