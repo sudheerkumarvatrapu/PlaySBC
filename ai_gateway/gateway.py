@@ -6,6 +6,7 @@ Rasa owns the conversation brain behind a REST webhook.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -13,6 +14,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .adapters import SpeechToTextAdapter, SttResult, TextToSpeechAdapter, TtsResult
+from .providers import (
+    ConversationProvider,
+    ConversationProviderCancelled,
+    ConversationProviderError,
+    ConversationProviderTimeout,
+    ConversationRequest,
+    RasaConversationProvider,
+    collect_responses,
+)
 from .rasa import RasaBotResponse, RasaRestClient, RasaRestConfig, RasaRestError
 
 
@@ -34,6 +44,7 @@ class AiVoiceConfig:
     bot_name: str = "rasa-support"
     rasa_webhook_url: str = "http://127.0.0.1:5005/webhooks/rest/webhook"
     rasa_timeout: float = 3.0
+    provider_timeout: float = 3.0
     initial_message: str = "hello"
     fallback_text: str = "AI assistant is not available right now."
     no_input_text: str = "I did not hear anything. Please say support, sales, billing, or agent."
@@ -67,6 +78,7 @@ class AiVoiceConfig:
             bot_name=str(raw.get("bot_name", "rasa-support")),
             rasa_webhook_url=str(raw.get("rasa_webhook_url", "http://127.0.0.1:5005/webhooks/rest/webhook")),
             rasa_timeout=float(raw.get("rasa_timeout", 3.0)),
+            provider_timeout=float(raw.get("provider_timeout", raw.get("rasa_timeout", 3.0))),
             initial_message=str(raw.get("initial_message", "hello")),
             fallback_text=str(raw.get("fallback_text", "AI assistant is not available right now.")),
             no_input_text=str(
@@ -98,6 +110,7 @@ class AiVoiceConfig:
             "bot_name": self.bot_name,
             "rasa_webhook_url": self.rasa_webhook_url,
             "rasa_timeout": self.rasa_timeout,
+            "provider_timeout": self.provider_timeout,
             "initial_message": self.initial_message,
             "fallback_text": self.fallback_text,
             "no_input_text": self.no_input_text,
@@ -142,6 +155,8 @@ class AiTurnResult:
     tts_chunks: List[TtsResult] = field(default_factory=list)
     bot_actions: List[BotAction] = field(default_factory=list)
     response_mode: str = "rest"
+    error_code: str = ""
+    interrupted: bool = False
 
     @property
     def rendered_text(self) -> str:
@@ -167,9 +182,11 @@ class DtmfIntentMapper:
 
 
 class AiVoiceGateway:
-    def __init__(self, config: AiVoiceConfig):
+    def __init__(self, config: AiVoiceConfig, conversation_provider: Optional[ConversationProvider] = None):
         if config.provider != "rasa":
             raise ValueError(f"Unsupported AI voice provider {config.provider!r}")
+        if config.provider_timeout <= 0:
+            raise ValueError("AI voice provider timeout must be greater than zero")
         self.config = config
         self.rasa = RasaRestClient(
             RasaRestConfig(
@@ -177,6 +194,7 @@ class AiVoiceGateway:
                 timeout=config.rasa_timeout,
             )
         )
+        self.conversation_provider = conversation_provider or RasaConversationProvider(self.rasa)
         self.dtmf_mapper = DtmfIntentMapper(config.dtmf_intents)
         self.stt = SpeechToTextAdapter(config.stt_provider, config.stt_command)
         self.tts = TextToSpeechAdapter(config.tts_provider, config.tts_command)
@@ -198,6 +216,7 @@ class AiVoiceGateway:
         tts_output_path: str = "",
         tts_rtp_path: str = "",
         tts_codec: str = "PCMU",
+        cancellation_event: Optional[asyncio.Event] = None,
     ) -> AiTurnResult:
         started = time.monotonic()
         stt_result = await self.stt.transcribe(self.initial_user_text(dtmf_digits), audio_path)
@@ -221,9 +240,17 @@ class AiVoiceGateway:
                 tts_chunks=[tts_result],
                 bot_actions=[],
                 response_mode=self.config.response_mode,
+                error_code="no_input",
             )
         try:
-            responses = await self.rasa.send_message_async(sender, user_text, metadata or {})
+            responses = await collect_responses(
+                self.conversation_provider,
+                ConversationRequest(sender=sender, text=user_text, metadata=dict(metadata or {})),
+                timeout_seconds=self.config.provider_timeout,
+                cancellation_event=cancellation_event,
+            )
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise ConversationProviderCancelled("conversation provider turn was interrupted")
             rendered_text = " ".join(response.text for response in responses if response.text)
             tts_chunks = await self.synthesize_response_chunks(
                 responses,
@@ -246,7 +273,23 @@ class AiVoiceGateway:
                 bot_actions=self.extract_bot_actions(responses),
                 response_mode=self.config.response_mode,
             )
-        except RasaRestError as exc:
+        except ConversationProviderCancelled as exc:
+            return AiTurnResult(
+                sender=sender,
+                user_text=user_text,
+                bot_responses=[],
+                fallback_used=False,
+                error=str(exc),
+                duration_seconds=time.monotonic() - started,
+                stt=stt_result,
+                tts=None,
+                tts_chunks=[],
+                bot_actions=[],
+                response_mode=self.config.response_mode,
+                error_code="provider_cancelled",
+                interrupted=True,
+            )
+        except (ConversationProviderTimeout, ConversationProviderError, RasaRestError) as exc:
             fallback = RasaBotResponse(text=self.config.fallback_text)
             tts_result = await self.tts.synthesize(
                 fallback.text,
@@ -266,6 +309,9 @@ class AiVoiceGateway:
                 tts_chunks=[tts_result],
                 bot_actions=[],
                 response_mode=self.config.response_mode,
+                error_code=(
+                    "provider_timeout" if isinstance(exc, ConversationProviderTimeout) else "provider_error"
+                ),
             )
 
     def prepare_user_text(self, text: str) -> str:

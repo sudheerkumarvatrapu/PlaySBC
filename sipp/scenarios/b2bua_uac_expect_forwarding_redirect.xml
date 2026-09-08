@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<scenario name="RFC 5359 conditional forwarding redirect">
+  <send retrans="500" start_rtd="invite">
+    <![CDATA[
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-forward-[call_number]
+      From: [caller] <sip:[caller]@[local_ip]:[local_port]>;tag=[call_number]
+      To: <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:[caller]@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=forward-a 53655765 1 IN IP4 [local_ip]
+      s=RFC 5359 conditional forwarding
+      c=IN IP[media_ip_type] [media_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0 8 101
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=rtpmap:101 telephone-event/8000
+      a=sendrecv
+    ]]>
+  </send>
+
+  <recv response="100" optional="true" />
+  <recv response="180" optional="true" />
+  <recv response="302" rtd="invite">
+    <action>
+      <ereg regexp="Contact:[ ]*&lt;sip:forward-target@" search_in="msg" check_it="true" assign_to="1" />
+    </action>
+  </recv>
+
+  <nop>
+    <action>
+      <log message="forward-contact=[$1]" />
+    </action>
+  </nop>
+
+  <send>
+    <![CDATA[
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=z9hG4bK-forward-[call_number]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      CSeq: 1 ACK
+      Contact: <sip:[caller]@[local_ip]:[local_port]>
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <ResponseTimeRepartition value="10,20,50,100,150,500,1000,2000" />
+  <CallLengthRepartition value="100,250,500,1000,2000,5000" />
+</scenario>

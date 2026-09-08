@@ -6,7 +6,8 @@ from unittest import mock
 from pathlib import Path
 import tempfile
 
-from ai_gateway import AiVoiceConfig, AiVoiceGateway, DtmfIntentMapper, RasaRestClient, RasaRestConfig, TextToSpeechAdapter
+from ai_gateway import AiVoiceConfig, AiVoiceGateway, ConversationChunk, DtmfIntentMapper, RasaRestClient, RasaRestConfig, TextToSpeechAdapter
+from ai_gateway.rasa import RasaBotResponse
 from ai_gateway.speech import decode_rtp_pcap_to_wav, iter_rtp_payloads
 from tools import check_rasa
 
@@ -28,6 +29,138 @@ class FakeHttpResponse:
 
 
 class RasaRestClientTests(unittest.TestCase):
+    def test_ai_voice_gateway_accepts_provider_neutral_ordered_stream(self):
+        class StreamingProvider:
+            async def stream(self, request):
+                self.assert_request(request)
+                yield ConversationChunk(RasaBotResponse(text="first"), 1, False)
+                yield ConversationChunk(RasaBotResponse(text="second"), 2, True)
+
+            @staticmethod
+            def assert_request(request):
+                if request.sender != "provider-call" or request.metadata["tenant"] != "commercial":
+                    raise AssertionError("provider request contract was not preserved")
+
+        gateway = AiVoiceGateway(
+            AiVoiceConfig(enabled=True, initial_message="hello", response_mode="streaming"),
+            conversation_provider=StreamingProvider(),
+        )
+        result = asyncio.run(gateway.start_turn("provider-call", {"tenant": "commercial"}))
+
+        self.assertEqual(result.rendered_text, "first second")
+        self.assertEqual(result.tts_chunk_count, 2)
+
+    def test_ai_voice_gateway_times_out_provider_and_synthesizes_fallback(self):
+        class StalledProvider:
+            async def stream(self, _request):
+                await asyncio.Event().wait()
+                yield ConversationChunk(RasaBotResponse(text="unreachable"), 1, True)
+
+        gateway = AiVoiceGateway(
+            AiVoiceConfig(
+                enabled=True,
+                initial_message="support",
+                provider_timeout=0.01,
+                fallback_text="Please try again later.",
+            ),
+            conversation_provider=StalledProvider(),
+        )
+        result = asyncio.run(gateway.start_turn("provider-timeout", {}))
+
+        self.assertTrue(result.fallback_used)
+        self.assertFalse(result.interrupted)
+        self.assertEqual(result.error_code, "provider_timeout")
+        self.assertEqual(result.rendered_text, "Please try again later.")
+        self.assertEqual(result.tts_chunk_count, 1)
+
+    def test_ai_voice_gateway_interrupts_inflight_provider_without_fallback_or_tts(self):
+        async def scenario():
+            started = asyncio.Event()
+            provider_cancelled = asyncio.Event()
+
+            class StalledProvider:
+                async def stream(self, _request):
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        provider_cancelled.set()
+                    yield ConversationChunk(RasaBotResponse(text="unreachable"), 1, True)
+
+            cancellation = asyncio.Event()
+            gateway = AiVoiceGateway(
+                AiVoiceConfig(enabled=True, initial_message="support", provider_timeout=1.0),
+                conversation_provider=StalledProvider(),
+            )
+            turn = asyncio.create_task(
+                gateway.start_turn("provider-interrupted", {}, cancellation_event=cancellation)
+            )
+            await asyncio.wait_for(started.wait(), timeout=0.25)
+            cancellation.set()
+            result = await asyncio.wait_for(turn, timeout=0.25)
+            await asyncio.wait_for(provider_cancelled.wait(), timeout=0.25)
+            return result
+
+        result = asyncio.run(scenario())
+
+        self.assertTrue(result.interrupted)
+        self.assertFalse(result.fallback_used)
+        self.assertEqual(result.error_code, "provider_cancelled")
+        self.assertEqual(result.bot_responses, [])
+        self.assertEqual(result.tts_chunk_count, 0)
+
+    def test_ai_voice_gateway_converts_unexpected_provider_failure_to_fallback(self):
+        class FailedProvider:
+            async def stream(self, _request):
+                raise RuntimeError("provider connection lost")
+                yield ConversationChunk(RasaBotResponse(text="unreachable"), 1, True)
+
+        gateway = AiVoiceGateway(
+            AiVoiceConfig(enabled=True, initial_message="support", fallback_text="Fallback response."),
+            conversation_provider=FailedProvider(),
+        )
+        result = asyncio.run(gateway.start_turn("provider-failure", {}))
+
+        self.assertTrue(result.fallback_used)
+        self.assertEqual(result.error_code, "provider_error")
+        self.assertIn("provider connection lost", result.error)
+        self.assertEqual(result.rendered_text, "Fallback response.")
+
+    def test_provider_timeout_defaults_to_the_rasa_transport_timeout(self):
+        config = AiVoiceConfig.from_dict({"rasa_timeout": 4.5})
+
+        self.assertEqual(config.provider_timeout, 4.5)
+        self.assertEqual(config.to_dict()["provider_timeout"], 4.5)
+
+    def test_ai_voice_gateway_rejects_nonpositive_provider_timeout(self):
+        with self.assertRaisesRegex(ValueError, "provider timeout must be greater than zero"):
+            AiVoiceGateway(AiVoiceConfig(enabled=True, provider_timeout=0))
+
+    def test_call_interruption_wins_race_with_provider_final_chunk(self):
+        async def scenario():
+            cancellation = asyncio.Event()
+
+            class RacingProvider:
+                async def stream(self, _request):
+                    cancellation.set()
+                    yield ConversationChunk(RasaBotResponse(text="late response"), 1, True)
+
+            gateway = AiVoiceGateway(
+                AiVoiceConfig(enabled=True, initial_message="support"),
+                conversation_provider=RacingProvider(),
+            )
+            return await gateway.start_turn(
+                "provider-race",
+                {},
+                cancellation_event=cancellation,
+            )
+
+        result = asyncio.run(scenario())
+
+        self.assertTrue(result.interrupted)
+        self.assertEqual(result.error_code, "provider_cancelled")
+        self.assertEqual(result.tts_chunk_count, 0)
+
     def test_rasa_rest_client_posts_sender_message_and_metadata(self):
         captured = {}
 

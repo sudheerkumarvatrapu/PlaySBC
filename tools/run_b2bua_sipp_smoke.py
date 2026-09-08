@@ -164,6 +164,8 @@ BASE_DEFAULTS = {
     "header_normalization": {},
     "transport_policies": [],
     "call_admission": {},
+    "business_services": {},
+    "b2bua_invite_timeout": 10.0,
     "media_quality": {},
     "ai_voice_gateway": {},
     "ha": {},
@@ -1122,6 +1124,99 @@ B2BUA_PROFILES = {
             "log.tls": ["TLS CONNECTED", "TLS RX", "TLS TX"],
         },
     },
+    "rfc5359-unattended-transfer": {
+        "caller": "transfer-a",
+        "callee": "transfer-b",
+        "uac_scenario": "b2bua_uac_unattended_transfer.xml",
+        "uas_scenario": "b2bua_uas_unattended_transfer.xml",
+        "business_services": {"transfer": {"enabled": True}},
+        "expected_log_markers": {
+            "log.sip": [
+                "B2BUA REFER RELAYED",
+                "kind=unattended",
+                "B2BUA TRANSFER NOTIFY RELAYED",
+                "state=completed",
+            ],
+        },
+    },
+    "rfc5359-unconditional-forwarding": {
+        "caller": "forward-caller",
+        "callee": "forward-target",
+        "uac_scenario": "b2bua_uac_unconditional_forward.xml",
+        "business_services": {
+            "forwarding": {
+                "max_hops": 5,
+                "rules": [
+                    {
+                        "name": "forward-source-to-target",
+                        "match": "forward-source",
+                        "target": "forward-target",
+                        "condition": "unconditional",
+                    }
+                ],
+            }
+        },
+        "expected_log_markers": {
+            "log.sip": [
+                "CALL FORWARDING SELECTED",
+                "condition=unconditional",
+                "target=forward-target",
+                "B2BUA ANSWERED",
+            ],
+        },
+    },
+    "rfc5359-forwarding-on-busy": {
+        "caller": "busy-caller",
+        "callee": "busy-endpoint",
+        "uac_scenario": "b2bua_uac_expect_forwarding_redirect.xml",
+        "uas_scenario": "b2bua_uas_busy.xml",
+        "business_services": {
+            "forwarding": {
+                "rules": [
+                    {
+                        "name": "busy-to-target",
+                        "match": "busy-endpoint",
+                        "target": "forward-target",
+                        "condition": "busy",
+                    }
+                ]
+            }
+        },
+        "expected_log_markers": {
+            "log.sip": [
+                "CALL FORWARDING REDIRECT",
+                "condition=busy",
+                "302 Moved Temporarily",
+            ],
+        },
+    },
+    "rfc5359-forwarding-on-no-answer": {
+        "caller": "no-answer-caller",
+        "callee": "no-answer-endpoint",
+        "uac_scenario": "b2bua_uac_expect_forwarding_redirect.xml",
+        "uas_scenario": "b2bua_uas_no_answer.xml",
+        "b2bua_invite_timeout": 1.0,
+        "business_services": {
+            "forwarding": {
+                "rules": [
+                    {
+                        "name": "no-answer-to-target",
+                        "match": "no-answer-endpoint",
+                        "target": "forward-target",
+                        "condition": "no-answer",
+                    }
+                ]
+            }
+        },
+        "expected_log_markers": {
+            "log.sip": [
+                "CALL FORWARDING REDIRECT",
+                "condition=no-answer",
+                "B2BUA -> SIPp B: CANCEL",
+                "302 Moved Temporarily",
+            ],
+        },
+    },
     "ha-node-draining": {
         "caller": "ha-drain-a",
         "callee": "ha-drain-b",
@@ -1501,6 +1596,31 @@ B2BUA_PROFILES = {
         },
     },
 }
+
+for _profile_name in (
+    "rfc5359-unattended-transfer",
+    "rfc5359-unconditional-forwarding",
+    "rfc5359-forwarding-on-busy",
+    "rfc5359-forwarding-on-no-answer",
+):
+    _base_profile = B2BUA_PROFILES[_profile_name]
+    _expected_markers = {
+        log_name: list(markers)
+        for log_name, markers in _base_profile.get("expected_log_markers", {}).items()
+    }
+    _rtpengine_markers = ["RTPENGINE OFFER"]
+    if _profile_name in {
+        "rfc5359-unattended-transfer",
+        "rfc5359-unconditional-forwarding",
+    }:
+        _rtpengine_markers.append("RTPENGINE ANSWER")
+    _expected_markers["log.media"] = _rtpengine_markers
+    B2BUA_PROFILES[f"{_profile_name}-rtpengine"] = {
+        **_base_profile,
+        "media_backend": "rtpengine",
+        "expected_log_markers": _expected_markers,
+    }
+
 PROFILE_DESCRIPTIONS = {
     "basic-signalling": "One SIPp A -> B2BUA -> registered SIPp B call without RTP replay.",
     "evidence-b2bua-two-leg-pcap": "One bridged call whose combined Kubernetes PCAP must prove core and peer capture roles plus distinct B2BUA INVITE legs.",
@@ -1550,6 +1670,14 @@ PROFILE_DESCRIPTIONS = {
     "rfc5359-call-hold-resume-rtpengine": "RFC 5359 hold and resume with the existing RTPengine session updated on both SDP exchanges.",
     "rfc5359-call-hold-resume-tcp": "RFC 5359 hold and resume over SIP/TCP.",
     "rfc5359-call-hold-resume-tls": "RFC 5359 hold and resume over SIP/TLS.",
+    "rfc5359-unattended-transfer": "RFC 5359 unattended transfer across both B2BUA dialogs using REFER, 202, NOTIFY sipfrag completion, and clean teardown.",
+    "rfc5359-unconditional-forwarding": "RFC 5359 unconditional forwarding retargeted by PlaySBC policy with loop and hop protection.",
+    "rfc5359-forwarding-on-busy": "RFC 5359 busy forwarding after a 486 response, with a policy-selected 302 Contact target.",
+    "rfc5359-forwarding-on-no-answer": "RFC 5359 no-answer forwarding after a bounded ring timeout, outbound CANCEL, and policy-selected 302 Contact target.",
+    "rfc5359-unattended-transfer-rtpengine": "RFC 5359 unattended REFER/NOTIFY transfer while RTPengine owns the established call media session.",
+    "rfc5359-unconditional-forwarding-rtpengine": "RFC 5359 unconditional forwarding with the resulting call offer/answer anchored by RTPengine.",
+    "rfc5359-forwarding-on-busy-rtpengine": "RFC 5359 busy forwarding after an RTPengine offer, peer 486 response, and policy-selected 302 Contact target.",
+    "rfc5359-forwarding-on-no-answer-rtpengine": "RFC 5359 no-answer forwarding after an RTPengine offer, bounded ring timeout, CANCEL, and policy-selected 302 Contact target.",
     "ha-node-draining": "Mark the local PlaySBC node as draining and verify new INVITEs are rejected with 503 while the node stays alive.",
     "ha-playsbc-precall-failover": "Delete one PlaySBC pod before call setup and verify service routing plus HA shared state still completes an RTPengine-backed call.",
     "ha-playsbc-midcall-failover": "Delete one PlaySBC pod during an active RTPengine-backed call and verify dialog/B-leg restore completes call release.",
@@ -1977,7 +2105,12 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "header_normalization": getattr(args, "header_normalization", {}),
         "transport_policies": getattr(args, "transport_policies", []),
         "call_admission": getattr(args, "call_admission", {}),
+        "business_services": render_harness_config_templates(
+            getattr(args, "business_services", {}),
+            args,
+        ),
         "b2bua_ladder_logs": args.ladder_enabled,
+        "b2bua_invite_timeout": getattr(args, "b2bua_invite_timeout", 10.0),
         "media_backend": args.media_backend,
         "rtpengine_url": args.rtpengine_url,
         "rtpengine_timeout": args.rtpengine_timeout,

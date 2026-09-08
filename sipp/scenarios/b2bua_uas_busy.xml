@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<scenario name="RFC 5359 busy forwarding peer">
+  <recv request="INVITE" crlf="true" />
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 486 Busy Here
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=busy-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[service]@[local_ip]:[local_port]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" />
+  <ResponseTimeRepartition value="10,20,50,100,150,500,1000" />
+  <CallLengthRepartition value="10,50,100,500,1000" />
+</scenario>

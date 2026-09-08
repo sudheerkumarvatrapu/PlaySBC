@@ -37,7 +37,7 @@ replicaCount: 2
 
 image:
   repository: ghcr.io/sudheerkumarvatrapu/playsbc
-  tag: "2.6.0"
+  tag: "3.0.0"
   pullPolicy: Always
 
 service:
@@ -91,7 +91,7 @@ rtpengine:
   enabled: true
   image:
     repository: ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine
-    tag: "2.6.0"
+    tag: "3.0.0"
     pullPolicy: Always
   replicas: 2
   hostNetwork: false

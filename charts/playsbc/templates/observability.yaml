@@ -223,7 +223,10 @@ data:
           },
           "targets": [
             {"expr": "sum by (realm,bot,stt,tts) (rate(playsbc_ai_voice_turns_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} {{ "{{" }}stt{{ "}}" }}/{{ "{{" }}tts{{ "}}" }} turns/s"},
-            {"expr": "sum by (realm,bot) (rate(playsbc_ai_rasa_failures_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} rasa failures/s"}
+            {"expr": "sum by (realm,bot) (rate(playsbc_ai_rasa_failures_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}realm{{ "}}" }}/{{ "{{" }}bot{{ "}}" }} rasa failures/s"},
+            {"expr": "sum by (provider) (rate(playsbc_ai_provider_timeouts_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}provider{{ "}}" }} timeouts/s"},
+            {"expr": "sum by (provider) (rate(playsbc_ai_provider_failures_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}provider{{ "}}" }} provider failures/s"},
+            {"expr": "sum by (provider) (rate(playsbc_ai_provider_interruptions_total{job=~\"${job:regex}\"}[5m]))", "legendFormat": "{{ "{{" }}provider{{ "}}" }} interruptions/s"}
           ]
         },
         {

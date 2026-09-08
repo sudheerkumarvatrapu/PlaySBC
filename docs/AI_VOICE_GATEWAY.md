@@ -2,6 +2,13 @@
 
 PlaySBC can answer a SIP call as an AI endpoint, anchor its media through RTPengine, convert speech to text, send the transcript to Rasa, synthesize the response, and preserve the evidence in one report.
 
+The public v3.0.0 foundation exposes a provider-neutral, ordered
+asynchronous response stream. Rasa is the first adapter; future bot providers
+implement the same `ConversationProvider` contract without changing SIP or
+media control. Each provider turn now has an overall deadline, a deterministic
+fallback on timeout or provider failure, and a cooperative interruption signal
+that is raised when call control finalizes the AI dialog.
+
 ```text
 SIPp caller -> PlaySBC -> RTPengine -> STT -> Rasa -> TTS -> RTP response
 ```
@@ -63,6 +70,25 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
+Run all fast source-level foundation profiles before cluster regression:
+
+```bash
+python3 tools/run_public_foundation_regression.py
+```
+
+The command validates:
+
+- `ai-provider-streaming-contract`
+- `ai-provider-interruption-fallback`
+- `rfc5359-consultation-hold`
+- `rfc5359-consultation-failure-recovery`
+- `rfc5359-music-on-hold`
+- `rfc5359-unattended-transfer`
+- `rfc5359-attended-transfer`
+- `rfc5359-call-forwarding`
+
+Any profile can be selected independently with `--profile`.
+
 Use [KUBERNETES_HELM_RUNBOOK.md](KUBERNETES_HELM_RUNBOOK.md) for installation, image, observability, and cleanup commands.
 
 ## Configuration
@@ -77,6 +103,7 @@ ai_voice_gateway:
   enabled: true
   provider: rasa
   rasa_webhook_url: http://rasa:5005/webhooks/rest/webhook
+  provider_timeout: 3.0
   input_mode: speech
   stt_provider: vosk
   tts_provider: piper
@@ -94,6 +121,20 @@ ai_voice_gateway:
   response_mode: streaming
   tts_chunk_chars: 120
 ```
+
+## Provider Deadline And Interruption Behavior
+
+`provider_timeout` bounds the complete provider response stream, rather than
+only the first chunk. A deadline or unexpected provider exception produces the
+configured `fallback_text` and records `provider_timeout` or `provider_error`.
+When SIP call control finalizes an AI call while its provider stage is still in
+flight, PlaySBC signals that turn, records `provider_cancelled`, and produces
+neither fallback speech nor TTS chunks from the interrupted provider response.
+
+The server exports dedicated provider timeout, failure, and interruption
+counters. Automatic retry/backoff is intentionally not part of this slice;
+that policy must define idempotency and duplicate-response handling before it
+is enabled for live calls.
 
 ## Evidence Contract
 

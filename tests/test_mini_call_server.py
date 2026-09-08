@@ -738,6 +738,242 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(len(transport.sent), 1)
         self.assertIn(b"ACK sip:1001@122.171.69.148:5060", transport.sent[0][0])
 
+    def test_b2bua_unattended_refer_and_notify_cross_both_dialog_legs(self):
+        logger = server.SbcLogger(None)
+        media = server.MediaServer("127.0.0.1", 12000, 12010, None, logger)
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media,
+            logger,
+            server.PCMU,
+            "playsbc",
+            {},
+            (),
+            {},
+            (),
+            False,
+            business_services={"transfer": {"enabled": True}},
+        )
+        transport = self.DummyTransport()
+        protocol.transport = transport
+        route = server.RouteResult(
+            server.parse_sip_uri("sip:1002@192.0.2.20:5060"),
+            "registered",
+            "registrar",
+            destination=("192.0.2.20", 5060),
+        )
+        call = server.B2BUACall(
+            inbound_call_id="caller-leg",
+            outbound_call_id="callee-leg",
+            outbound_target=route.target,
+            outbound_from_header="<sip:b2bua@127.0.0.1>;tag=peer-local",
+            outbound_to_header="<sip:1002@192.0.2.20>;tag=peer-remote",
+            outbound_contact_uri="sip:1002@192.0.2.20:5060",
+            target_user="1002",
+            route_policy="registered",
+            route_source="registrar",
+            flow_log=server.B2BUAFlowLog(None, "caller-leg", "1002", route, enabled=False, logger=logger),
+            route_result=route,
+            inbound_from_header="<sip:1001@192.0.2.10>;tag=core-remote",
+            inbound_to_header="<sip:1002@127.0.0.1>;tag=core-local",
+            inbound_contact_uri="sip:1001@192.0.2.10:5060",
+            inbound_destination=("192.0.2.10", 5060),
+        )
+        protocol.b2bua_calls_by_inbound[call.inbound_call_id] = call
+        protocol.b2bua_calls_by_outbound[call.outbound_call_id] = call
+        refer = server.SipMessage(
+            "REFER sip:1002@127.0.0.1 SIP/2.0",
+            {
+                "via": "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-refer",
+                "call-id": "caller-leg",
+                "cseq": "2 REFER",
+                "from": call.inbound_from_header,
+                "to": call.inbound_to_header,
+                "refer-to": "<sip:2001@example.com>",
+                "referred-by": "<sip:1001@example.com>",
+            },
+            "",
+            ("192.0.2.10", 5060),
+        )
+
+        asyncio.run(protocol.handle_message(refer))
+
+        packets = [packet for packet, _destination in transport.sent]
+        self.assertTrue(any(packet.startswith(b"SIP/2.0 202 Accepted") for packet in packets))
+        outbound_refer = next(packet for packet in packets if packet.startswith(b"REFER sip:1002@192.0.2.20:5060"))
+        self.assertIn(b"Call-ID: callee-leg", outbound_refer)
+        self.assertIn(b"Refer-To: <sip:2001@example.com>", outbound_refer)
+
+        transport.sent.clear()
+        notify_body = "SIP/2.0 200 OK\r\n"
+        notify = server.SipMessage(
+            "NOTIFY sip:b2bua@127.0.0.1 SIP/2.0",
+            {
+                "via": "SIP/2.0/UDP 192.0.2.20:5060;branch=z9hG4bK-notify",
+                "call-id": "callee-leg",
+                "cseq": "3 NOTIFY",
+                "from": call.outbound_to_header,
+                "to": call.outbound_from_header,
+                "event": "refer",
+                "subscription-state": "terminated;reason=noresource",
+                "content-type": "message/sipfrag;version=2.0",
+            },
+            notify_body,
+            ("192.0.2.20", 5060),
+        )
+
+        asyncio.run(protocol.handle_message(notify))
+
+        packets = [packet for packet, _destination in transport.sent]
+        self.assertTrue(any(packet.startswith(b"SIP/2.0 200 OK") for packet in packets))
+        inbound_notify = next(packet for packet in packets if packet.startswith(b"NOTIFY sip:1001@192.0.2.10:5060"))
+        self.assertIn(b"Call-ID: caller-leg", inbound_notify)
+        self.assertIn(b"Event: refer", inbound_notify)
+        self.assertIn(notify_body.encode(), inbound_notify)
+        self.assertEqual(call.transfer.state, server.TransferState.COMPLETED)
+
+    def test_attended_refer_translates_replaces_to_opposite_leg(self):
+        logger = server.SbcLogger(None)
+        media = server.MediaServer("127.0.0.1", 12000, 12010, None, logger)
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media,
+            logger,
+            server.PCMU,
+            "playsbc",
+            {},
+            (),
+            {},
+            (),
+            False,
+        )
+        transport = self.DummyTransport()
+        protocol.transport = transport
+        route = server.RouteResult(server.parse_sip_uri("sip:1002@192.0.2.20:5060"), "registered", "registrar")
+
+        def make_call(inbound_id, outbound_id, target):
+            return server.B2BUACall(
+                inbound_call_id=inbound_id,
+                outbound_call_id=outbound_id,
+                outbound_target=route.target,
+                outbound_from_header=f"<sip:b2bua@127.0.0.1>;tag={target}-from",
+                outbound_to_header=f"<sip:{target}@192.0.2.20>;tag={target}-to",
+                outbound_contact_uri=f"sip:{target}@192.0.2.20:5060",
+                target_user=target,
+                route_policy="registered",
+                route_source="registrar",
+                flow_log=server.B2BUAFlowLog(None, inbound_id, target, route, enabled=False, logger=logger),
+                route_result=route,
+                inbound_from_header="<sip:1001@192.0.2.10>;tag=caller",
+                inbound_to_header=f"<sip:{target}@127.0.0.1>;tag=sbc-{target}",
+                inbound_contact_uri="sip:1001@192.0.2.10:5060",
+                inbound_destination=("192.0.2.10", 5060),
+            )
+
+        original = make_call("original-in", "original-out", "1002")
+        consultation = make_call("consult-in", "consult-out", "2001")
+        for call in (original, consultation):
+            protocol.b2bua_calls_by_inbound[call.inbound_call_id] = call
+            protocol.b2bua_calls_by_outbound[call.outbound_call_id] = call
+        refer = server.SipMessage(
+            "REFER sip:1002@127.0.0.1 SIP/2.0",
+            {
+                "via": "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-attended",
+                "call-id": "original-in",
+                "cseq": "2 REFER",
+                "from": original.inbound_from_header,
+                "to": original.inbound_to_header,
+                "refer-to": (
+                    "<sip:2001@example.com?Replaces=consult-in%3Bto-tag%3Dsbc-2001"
+                    "%3Bfrom-tag%3Dcaller>"
+                ),
+            },
+            "",
+            ("192.0.2.10", 5060),
+        )
+
+        asyncio.run(protocol.handle_message(refer))
+
+        outbound_refer = next(
+            packet for packet, _destination in transport.sent if packet.startswith(b"REFER sip:1002@192.0.2.20:5060")
+        )
+        self.assertIn(b"consult-out%3Bto-tag%3D2001-to%3Bfrom-tag%3D2001-from", outbound_refer)
+
+    def test_busy_and_no_answer_forwarding_return_redirect_contact(self):
+        logger = server.SbcLogger(None)
+        media = server.MediaServer("127.0.0.1", 12000, 12010, None, logger)
+        protocol = server.SipServerProtocol(
+            "127.0.0.1",
+            25062,
+            media,
+            logger,
+            server.PCMU,
+            "playsbc",
+            {},
+            (),
+            {},
+            (),
+            False,
+            business_services={
+                "forwarding": {
+                    "rules": [
+                        {"name": "busy", "match": "1002", "target": "2002", "condition": "busy"},
+                        {"name": "no-answer", "match": "1003", "target": "sip:2003@example.com", "condition": "no-answer"},
+                    ]
+                }
+            },
+        )
+        transport = self.DummyTransport()
+        protocol.transport = transport
+
+        def invite(call_id, target):
+            return server.SipMessage(
+                f"INVITE sip:{target}@127.0.0.1 SIP/2.0",
+                {
+                    "via": f"SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-{call_id}",
+                    "call-id": call_id,
+                    "cseq": "1 INVITE",
+                    "from": "<sip:1001@example.com>;tag=caller",
+                    "to": f"<sip:{target}@example.com>",
+                },
+                "",
+                ("192.0.2.10", 5060),
+            )
+
+        self.assertTrue(
+            protocol.maybe_send_conditional_forwarding(
+                invite("busy-call", "1002"),
+                "<sip:1002@example.com>;tag=sbc",
+                "1002",
+                status=486,
+            )
+        )
+        self.assertTrue(
+            protocol.maybe_send_conditional_forwarding(
+                invite("timeout-call", "1003"),
+                "<sip:1003@example.com>;tag=sbc",
+                "1003",
+                timed_out=True,
+            )
+        )
+        packets = [packet for packet, _destination in transport.sent]
+        self.assertIn(b"Contact: <sip:2002@127.0.0.1:25062>", packets[0])
+        self.assertIn(b"Contact: <sip:2003@example.com>", packets[1])
+        samples = {
+            (name, labels.get("service"), labels.get("outcome")): value
+            for name, value, labels in protocol.prometheus_samples()
+        }
+        self.assertEqual(
+            samples[("playsbc_business_service_events_total", "forwarding-busy", "redirected")],
+            1,
+        )
+        self.assertEqual(
+            samples[("playsbc_business_service_events_total", "forwarding-no-answer", "redirected")],
+            1,
+        )
+
     def test_b2bua_inbound_reinvite_propagates_hold_and_consumes_caller_ack(self):
         logger = server.SbcLogger(None)
         media = server.MediaServer("127.0.0.1", 12000, 12010, None, logger)
@@ -2089,9 +2325,13 @@ class B2BUAFlowLogTests(unittest.TestCase):
 
                 await protocol.handle_message(ack)
                 self.assertIsNotNone(ai_call.task)
+                self.assertIsNotNone(ai_call.cancellation_event)
                 assert ai_call.task is not None
                 await ai_call.task
                 self.assertTrue(called)
+                assert ai_call.cancellation_event is not None
+                protocol.finalize_ai_voice_call(ai_call, "test-finalization")
+                self.assertTrue(ai_call.cancellation_event.is_set())
 
         asyncio.run(scenario())
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "docs" / "PRODUCT_GUIDE.md"
-DEFAULT_OUTPUT = ROOT / "output" / "html" / "PlaySBC-v2.6.0-Product-Guide.html"
+DEFAULT_OUTPUT = ROOT / "output" / "html" / "PlaySBC-v3.0.0-Product-Guide.html"
 
 
 def slug(text: str) -> str:
@@ -97,7 +97,7 @@ def render_markdown(source: str) -> tuple[str, str]:
     return "\n".join(body), "\n".join(toc)
 
 
-def build(source_path: Path, output_path: Path, version: str = "2.6.0"):
+def build(source_path: Path, output_path: Path, version: str = "3.0.0"):
     body, toc = render_markdown(source_path.read_text(encoding="utf-8"))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(f"""<!doctype html>
@@ -139,7 +139,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--version", default="2.6.0")
+    parser.add_argument("--version", default="3.0.0")
     args = parser.parse_args(); build(args.source, args.output, args.version); print(args.output); return 0
 
 

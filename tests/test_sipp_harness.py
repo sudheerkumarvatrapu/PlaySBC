@@ -1650,7 +1650,7 @@ Content-Length: 0
         values = (chart / "values.yaml").read_text(encoding="utf-8")
         azure = (chart / "templates" / "azure-services.yaml").read_text(encoding="utf-8")
         aks_values = (ROOT / "configs" / "kubernetes" / "aks-values.yaml").read_text(encoding="utf-8")
-        product_guide = (ROOT / "docs" / "PRODUCT_GUIDE.md").read_text(encoding="utf-8")
+        aks_runbook = (ROOT / "docs" / "AKS.md").read_text(encoding="utf-8")
 
         self.assertIn("cloud:", values)
         self.assertIn("azure:", values)
@@ -1666,14 +1666,15 @@ Content-Length: 0
         self.assertIn("$mediaPublicAllowedRanges", azure)
         self.assertIn("documentedPortRange", aks_values)
         self.assertIn("portRange:", aks_values)
-        self.assertIn("Azure AKS Administration", product_guide)
-        self.assertIn("AKS Regression", product_guide)
-        self.assertIn("--aks-profiles", product_guide)
-        self.assertIn("PLAYSBC_VERSION=2.6.0", product_guide)
+        self.assertIn("PlaySBC On Azure AKS", aks_runbook)
+        self.assertIn("Run AKS Regression", aks_runbook)
+        self.assertIn("--aks-profiles", aks_runbook)
+        self.assertIn("--profile basic-signalling", aks_runbook)
+        self.assertIn("PLAYSBC_VERSION=3.0.0", aks_runbook)
 
     def test_current_release_keeps_kind_regression_path(self):
         chart = ROOT / "charts" / "playsbc"
-        current_version = "2.6.0"
+        current_version = "3.0.0"
         version = (ROOT / "VERSION").read_text(encoding="utf-8")
         chart_yaml = (chart / "Chart.yaml").read_text(encoding="utf-8")
         values = (chart / "values.yaml").read_text(encoding="utf-8")
@@ -1691,16 +1692,13 @@ Content-Length: 0
         self.assertIn(f'tag: "{current_version}"', aks_values)
         self.assertIn(f"kind/minikube must track the current release (`v{current_version}`", readme)
         self.assertIn(f"export PLAYSBC_VERSION={current_version}", runbook)
-        self.assertIn(
-            "[PlaySBC v2.6.0 Product Guide](../output/pdf/PlaySBC-v2.6.0-Product-Guide.pdf)",
-            local_runbook,
-        )
+        self.assertIn("[Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md)", local_runbook)
         self.assertIn("--all-profiles", runbook)
         self.assertIn("--set-rtpengine-image", runbook)
         self.assertNotIn("playsbc-k8s-regression:1.4.2", runbook)
-        self.assertIn("Local Real-Device Lab", release_notes)
-        self.assertIn("Evidence Hardening", release_notes)
-        self.assertIn("kind-playsbc", release_notes)
+        self.assertIn("78 full Kubernetes regression profiles", release_notes)
+        self.assertIn("RFC 5359 unattended transfer", release_notes)
+        self.assertIn("RTPengine", release_notes)
         self.assertIn("AKS", release_notes)
 
         args = run_k8s_regression_job.parse_args(
@@ -2468,7 +2466,7 @@ Content-Length: 0
         self.assertIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("evidence-b2bua-two-leg-pcap", run_regression_suite.ALL_B2BUA_PROFILES)
-        self.assertEqual(len(run_k8s_regression.ALL_PROFILES), 70)
+        self.assertEqual(len(run_k8s_regression.ALL_PROFILES), 78)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -2524,6 +2522,30 @@ Content-Length: 0
         self.assertIn("ha-shared-state-rtpengine", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-options-health-recovery", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ha-node-draining", run_regression_suite.ALL_B2BUA_PROFILES)
+        for profile in (
+            "rfc5359-unattended-transfer",
+            "rfc5359-unconditional-forwarding",
+            "rfc5359-forwarding-on-busy",
+            "rfc5359-forwarding-on-no-answer",
+            "rfc5359-unattended-transfer-rtpengine",
+            "rfc5359-unconditional-forwarding-rtpengine",
+            "rfc5359-forwarding-on-busy-rtpengine",
+            "rfc5359-forwarding-on-no-answer-rtpengine",
+        ):
+            self.assertIn(profile, run_regression_suite.ALL_B2BUA_PROFILES)
+        for profile in (
+            "rfc5359-unattended-transfer-rtpengine",
+            "rfc5359-unconditional-forwarding-rtpengine",
+            "rfc5359-forwarding-on-busy-rtpengine",
+            "rfc5359-forwarding-on-no-answer-rtpengine",
+        ):
+            self.assertIn(profile, run_regression_suite.RTPENGINE_B2BUA_PROFILES)
+            values = run_k8s_regression.profile_values(profile, "unit-k8s")
+            self.assertEqual(values.media_backend, "rtpengine")
+            self.assertIn(
+                "RTPENGINE OFFER",
+                values.expected_log_markers["log.media"],
+            )
         for profile in (
             "ha-playsbc-precall-failover",
             "ha-playsbc-midcall-failover",
@@ -3334,6 +3356,26 @@ class RealTopologyTests(unittest.TestCase):
         )
         self.assertEqual(ha["failover"]["mid_call_failover"], "dialog-restore-only")
 
+    def test_kubernetes_business_service_profiles_preserve_policy_and_timeout(self):
+        args = run_k8s_regression.parse_args(["--profile", "rfc5359-forwarding-on-no-answer"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values(
+            "rfc5359-forwarding-on-no-answer",
+            "unit-k8s",
+        )
+
+        config = runner.profile_config(profile)
+
+        self.assertEqual(config["b2bua_invite_timeout"], 1.0)
+        self.assertEqual(
+            config["business_services"]["forwarding"]["rules"][0]["condition"],
+            "no-answer",
+        )
+        self.assertEqual(
+            config["business_services"]["forwarding"]["rules"][0]["target"],
+            "forward-target",
+        )
+
     def test_kubernetes_profile_auth_secret_does_not_leak_from_real_device_values(self):
         args = run_k8s_regression.parse_args(["--aks-profiles", "--aks-mode"])
         runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
@@ -3683,6 +3725,110 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("200 OK", ladder)
         self.assertNotIn("INVITE", ladder)
         self.assertNotIn("BYE", ladder)
+
+    def test_kubernetes_invalid_bye_ladder_matches_out_of_dialog_exchange(self):
+        args = run_k8s_regression.parse_args(["--aks-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        profile = run_k8s_regression.profile_values("invalid-bye", "unit-k8s")
+
+        ladder = runner.dual_realm_ladder(profile)
+
+        self.assertIn("BYE (unknown dialog)", ladder)
+        self.assertIn("481 No Matching Dialog", ladder)
+        self.assertNotIn("INVITE", ladder)
+        self.assertNotIn("Peer SIPp B", ladder)
+
+    def test_kubernetes_invalid_bye_evidence_requires_exact_exchange(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            write_test_pcap(bundle / "capture.pcap", 1.0, b"packet", linktype=1)
+            (bundle / "sipmsg.log").write_text(
+                "BYE sip:missing@example.test SIP/2.0\n"
+                "CSeq: 2 BYE\n"
+                "SIP/2.0 481 Call/Transaction Does Not Exist\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                run_k8s_regression.validate_k8s_profile_evidence("invalid-bye", bundle),
+                [],
+            )
+
+            (bundle / "sipmsg.log").write_text(
+                "INVITE sip:callee@example.test SIP/2.0\nCSeq: 1 INVITE\n",
+                encoding="utf-8",
+            )
+            failures = run_k8s_regression.validate_k8s_profile_evidence(
+                "invalid-bye", bundle
+            )
+            self.assertTrue(any("missing the out-of-dialog BYE" in item for item in failures))
+            self.assertTrue(any("unexpectedly contains an INVITE" in item for item in failures))
+
+    def test_kubernetes_rejection_ladders_use_profile_specific_statuses(self):
+        args = run_k8s_regression.parse_args(["--aks-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        expected = {
+            "unknown-route": "404 Not Found",
+            "esbc-call-admission": "503 Service Unavailable",
+            "rtpengine-control-failure": "488 Not Acceptable Here",
+            "rtpengine-port-exhaustion": "503 Media Exhausted",
+            "rtpengine-interface-failure": "488 Not Acceptable Here",
+            "tcp-connection-failure": "480 Temporary Unavailable",
+        }
+        for profile_name, response in expected.items():
+            with self.subTest(profile=profile_name):
+                profile = run_k8s_regression.profile_values(profile_name, "unit-k8s")
+                ladder = runner.dual_realm_ladder(profile)
+                self.assertIn(response, ladder)
+                self.assertNotIn("final rejection", ladder)
+                self.assertNotIn("BYE", ladder)
+
+    def test_kubernetes_rfc5359_ladders_retain_cleanup_and_endpoint_roles(self):
+        args = run_k8s_regression.parse_args(["--aks-profiles"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+
+        unconditional = runner.dual_realm_ladder(
+            run_k8s_regression.profile_values("rfc5359-unconditional-forwarding", "unit-k8s")
+        )
+        self.assertIn("Peer SIPp B", unconditional)
+        self.assertNotIn("Target SIPp C", unconditional)
+        self.assertIn("ACK", unconditional)
+        self.assertIn("BYE", unconditional)
+
+        no_answer = runner.dual_realm_ladder(
+            run_k8s_regression.profile_values("rfc5359-forwarding-on-no-answer", "unit-k8s")
+        )
+        for token in ("Peer SIPp B", "Target SIPp C", "CANCEL", "487 Request Terminated", "ACK", "BYE"):
+            self.assertIn(token, no_answer)
+
+        transfer = runner.dual_realm_ladder(
+            run_k8s_regression.profile_values("rfc5359-unattended-transfer", "unit-k8s")
+        )
+        for token in ("REFER", "NOTIFY", "Target SIPp C", "ACK", "BYE"):
+            self.assertIn(token, transfer)
+
+    def test_report_catalog_retains_ai_and_transport_evidence(self):
+        artifacts = {filename for _label, filename in run_regression_suite.REPORT_ARTIFACTS}
+        self.assertTrue({"log.ai", "log.udp", "log.tcp", "log.tls"}.issubset(artifacts))
+        execution = set(run_regression_suite.PHASE_ARTIFACTS["Test Execution"])
+        self.assertTrue({"log.ai", "log.udp", "log.tcp", "log.tls"}.issubset(execution))
+
+    def test_ladder_validation_rejects_invented_and_omitted_sip_events(self):
+        correct = "Core | BYE | PlaySBC\nCore | 481 No Matching Dialog | PlaySBC"
+        sipmsg = (
+            "BYE sip:missing@example.test SIP/2.0\nCSeq: 2 BYE\n"
+            "SIP/2.0 481 Call/Transaction Does Not Exist\nCSeq: 2 BYE\n"
+        )
+        self.assertEqual(
+            run_k8s_regression.validate_ladder_against_sipmsg(correct, sipmsg),
+            [],
+        )
+        failures = run_k8s_regression.validate_ladder_against_sipmsg(
+            "Core | INVITE | PlaySBC\nPlaySBC | 200 OK | Core",
+            sipmsg,
+        )
+        self.assertTrue(any("invented=['INVITE']" in item for item in failures))
+        self.assertTrue(any("omitted=['BYE']" in item for item in failures))
+        self.assertTrue(any("omitted=['481']" in item for item in failures))
 
     def test_kubernetes_evidence_validation_requires_srtp_two_way_verdict(self):
         with tempfile.TemporaryDirectory() as tmp:

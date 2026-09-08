@@ -64,6 +64,7 @@ ai_voice_gateway:
   bot_name: rasa-support
   rasa_webhook_url: http://rasa:5005/webhooks/rest/webhook
   rasa_timeout: 3.0
+  provider_timeout: 3.0
   input_mode: scripted
   stt_provider: lab-scripted
   stt_command: ""
