@@ -6,11 +6,11 @@ from build_product_guide_pdf import build as build_pdf
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "docs" / "PRODUCT_GUIDE.md"
-PDF = ROOT / "output/pdf/PlaySBC-v2.6.0-Product-Guide.pdf"
-HTML = ROOT / "output/html/PlaySBC-v2.6.0-Product-Guide.html"
+PDF = ROOT / "output/pdf/PlaySBC-v3.0.0-Product-Guide.pdf"
+HTML = ROOT / "output/html/PlaySBC-v3.0.0-Product-Guide.html"
 
 if __name__ == "__main__":
-    build_pdf(SOURCE, PDF, "2.6.0")
-    build_html(SOURCE, HTML, "2.6.0")
+    build_pdf(SOURCE, PDF, "3.0.0")
+    build_html(SOURCE, HTML, "3.0.0")
     print(PDF)
     print(HTML)

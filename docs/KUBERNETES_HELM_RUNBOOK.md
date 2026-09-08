@@ -1,6 +1,11 @@
 # PlaySBC Kubernetes And Helm Runbook
 
-This is the canonical local Kubernetes command guide. Use [KUBERNETES_LOCAL.md](KUBERNETES_LOCAL.md) for topology and networking concepts.
+This is the canonical local Kubernetes command guide. The three principal
+workflows below are intentionally self-contained: public v3.0.0 release,
+current public source, and current private source. Pick one workflow and run
+its complete code block in one terminal; do not combine variables between
+tracks. Use [KUBERNETES_LOCAL.md](KUBERNETES_LOCAL.md) for topology and
+networking concepts.
 
 ## Standard Lab
 
@@ -99,7 +104,7 @@ Start Docker, discover the Mac LAN address, and create the dedicated cluster onc
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
 
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 export REAL_DEVICE_CLUSTER=playsbc-real-device
 export REAL_DEVICE_CONTEXT=kind-playsbc-real-device
 export LAN_IF=$(route -n get default | awk '/interface:/{print $2; exit}')
@@ -210,7 +215,92 @@ helm --kube-context "$REAL_DEVICE_CONTEXT" -n playsbc uninstall playsbc
 kind delete cluster --name "$REAL_DEVICE_CLUSTER"
 ```
 
-## Commercial Source Build, Package, And SBC Upgrade
+## Public Source Build, Package, Upgrade, And Full Regression
+
+Use this before a public release is published. It builds the current public
+SBC and RTPengine sources, packages the chart, upgrades every product pod, and
+starts all 78 full-regression profiles. It does not publish images or a tag.
+
+```bash
+set -euo pipefail
+cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
+
+git switch main
+git pull --ff-only origin main
+test -z "$(git status --porcelain)"
+
+export KUBE_CONTEXT=kind-playsbc
+export KIND_CLUSTER=playsbc
+export SOURCE_TAG=$(git rev-parse --short=12 HEAD)
+export PLAYSBC_REPOSITORY=playsbc-public-dev
+export RTPENGINE_REPOSITORY=playsbc-rtpengine-public-dev
+export PLAYSBC_IMAGE="${PLAYSBC_REPOSITORY}:${SOURCE_TAG}"
+export RTPENGINE_IMAGE="${RTPENGINE_REPOSITORY}:${SOURCE_TAG}"
+export PACKAGE_DIR=$(mktemp -d /private/tmp/playsbc-public-package.XXXXXX)
+export CHART_VERSION=$(awk '/^version:/ {print $2; exit}' charts/playsbc/Chart.yaml)
+export PLAYSBC_CHART="${PACKAGE_DIR}/playsbc-${CHART_VERSION}.tgz"
+
+open -a Docker
+until docker info >/dev/null 2>&1; do echo "Waiting for Docker Desktop..."; sleep 5; done
+if ! kind get clusters | grep -qx "$KIND_CLUSTER"; then
+  kind create cluster --name "$KIND_CLUSTER" --wait 180s
+fi
+kubectl --context "$KUBE_CONTEXT" get --raw=/readyz
+kubectl --context "$KUBE_CONTEXT" create namespace playsbc --dry-run=client -o yaml \
+  | kubectl --context "$KUBE_CONTEXT" apply -f -
+
+docker build -f docker/playsbc.Dockerfile -t "$PLAYSBC_IMAGE" .
+docker build -f docker/rtpengine.Dockerfile -t "$RTPENGINE_IMAGE" .
+kind load docker-image "$PLAYSBC_IMAGE" "$RTPENGINE_IMAGE" --name "$KIND_CLUSTER"
+
+helm lint charts/playsbc
+helm package charts/playsbc --destination "$PACKAGE_DIR"
+test -s "$PLAYSBC_CHART"
+
+helm upgrade --install playsbc "$PLAYSBC_CHART" \
+  --kube-context "$KUBE_CONTEXT" --namespace playsbc --create-namespace \
+  --reuse-values --atomic --wait --timeout 10m \
+  -f configs/kubernetes/active-active-values.yaml \
+  --set image.repository="$PLAYSBC_REPOSITORY" \
+  --set-string image.tag="$SOURCE_TAG" --set image.pullPolicy=IfNotPresent \
+  --set rtpengine.enabled=true \
+  --set rtpengine.image.repository="$RTPENGINE_REPOSITORY" \
+  --set-string rtpengine.image.tag="$SOURCE_TAG" \
+  --set rtpengine.image.pullPolicy=IfNotPresent \
+  --set rtpengine.hostNetwork=false \
+  --set playsbc.config.media_backend=rtpengine \
+  --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223 \
+  --set observability.enabled=true \
+  --set observability.prometheus.retention=31d \
+  --set observability.prometheus.persistence.size=5Gi \
+  --set observability.grafana.persistence.size=2Gi
+
+kubectl --context "$KUBE_CONTEXT" -n playsbc rollout restart \
+  statefulset/playsbc-playsbc statefulset/playsbc-playsbc-rtpengine \
+  deployment/playsbc-playsbc-prometheus deployment/playsbc-playsbc-grafana
+for WORKLOAD in \
+  statefulset/playsbc-playsbc \
+  statefulset/playsbc-playsbc-rtpengine \
+  deployment/playsbc-playsbc-prometheus \
+  deployment/playsbc-playsbc-grafana; do
+  kubectl --context "$KUBE_CONTEXT" -n playsbc rollout status "$WORKLOAD" --timeout=240s
+done
+kubectl --context "$KUBE_CONTEXT" -n playsbc get pods -o wide
+
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --playsbc-image "$PLAYSBC_IMAGE" --rtpengine-image "$RTPENGINE_IMAGE" \
+  --set-playsbc-image --set-rtpengine-image \
+  --no-load-playsbc-image --no-load-rtpengine-image \
+  --build-runner-image --build-sipp-image --kind-load-images \
+  --kind-cluster "$KIND_CLUSTER"
+```
+
+The final command launches the 78-profile suite. The three smoke profiles are
+a separate build gate and are not included in that count.
+
+## Private Source Build, Package, Upgrade, And Full Regression
 
 Use this workflow to deploy the current private `main` branch to the existing
 `kind-playsbc` lab. It creates only local development artifacts: it does not
@@ -313,7 +403,7 @@ helm upgrade --install playsbc "$PLAYSBC_CHART" \
   --set image.pullPolicy=IfNotPresent \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=2.6.0 \
+  --set-string rtpengine.image.tag=3.0.0 \
   --set rtpengine.image.pullPolicy=IfNotPresent \
   --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
@@ -367,8 +457,24 @@ timeout/interruption fallback, consultation hold, and consultation failure/race
 recovery directly from the checked-out source:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
-python3 tools/run_commercial_foundation_regression.py
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_public_foundation_regression.py
+```
+
+### Run The Full 78-Profile Kubernetes Regression
+
+After the private upgrade and rollout checks above, use the already loaded SBC
+image and run the complete full-regression catalog:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-private-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --playsbc-image "$PLAYSBC_IMAGE" \
+  --set-playsbc-image --no-load-playsbc-image \
+  --build-runner-image --build-sipp-image --build-rtpengine-image \
+  --kind-load-images --set-rtpengine-image \
+  --kind-cluster "$KIND_CLUSTER"
 ```
 
 ### Run Only The RFC 5359 Kubernetes Profiles
@@ -378,7 +484,7 @@ only the regression runner and SIPp helper images, then run the live business
 calling profiles through both the internal and RTPengine service paths:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
 python3 tools/run_k8s_regression_job.py \
   --profile rfc5359-call-hold-resume \
   --profile rfc5359-call-hold-resume-rtpengine \
@@ -439,14 +545,16 @@ raw-file download link.
   `k8s-reports` directory, including `evidence/`, rather than `latest.html`
   alone.
 
-## Release Upgrade And Full Regression
+## Public v3.0.0 Release Upgrade And Full Regression
 
-Run from the repository on the Mac. This is the single maintained release-image workflow.
+Run this complete block from the public repository on the Mac after the
+v3.0.0 chart and all four images have been published. It upgrades PlaySBC,
+RTPengine, Prometheus, and Grafana, verifies them, and launches all 78 profiles.
 
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
 
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 
 kubectl config use-context kind-playsbc
 kubectl config set-context --current --namespace=playsbc

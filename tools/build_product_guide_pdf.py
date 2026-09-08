@@ -32,9 +32,9 @@ from reportlab.platypus.tableofcontents import TableOfContents
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "docs" / "PRODUCT_GUIDE.md"
-DEFAULT_OUTPUT = ROOT / "output" / "pdf" / "PlaySBC-v2.6.0-Product-Guide.pdf"
+DEFAULT_OUTPUT = ROOT / "output" / "pdf" / "PlaySBC-v3.0.0-Product-Guide.pdf"
 LOGO = ROOT / "docs" / "assets" / "playsbc-logo-corporate-mediaflow.png"
-GUIDE_VERSION = "2.6.0"
+GUIDE_VERSION = "3.0.0"
 
 NAVY = colors.HexColor("#16324F")
 BLUE = colors.HexColor("#2166A5")
@@ -520,7 +520,7 @@ def later_page(canvas, doc):
     canvas.restoreState()
 
 
-def build(source_path: Path, output_path: Path, version: str = "2.6.0"):
+def build(source_path: Path, output_path: Path, version: str = "3.0.0"):
     global GUIDE_VERSION
     GUIDE_VERSION = version
     style_map = styles()
@@ -586,7 +586,7 @@ def build(source_path: Path, output_path: Path, version: str = "2.6.0"):
             Paragraph("Features, architecture, deployment, operations, regression, and evidence", subtitle_style),
             Spacer(1, 27 * mm),
             Paragraph(f"Version {version}", cover_meta),
-            Paragraph("Public v2.6.0 and private commercial build tracks", cover_meta),
+            Paragraph("Public v3.0.0 and private commercial build tracks", cover_meta),
             Spacer(1, 8 * mm),
             Paragraph("Contributor", cover_meta),
             Paragraph("<b>Sudheer Kumar Vatrapu</b>", cover_meta),
@@ -615,7 +615,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--version", default="2.6.0")
+    parser.add_argument("--version", default="3.0.0")
     args = parser.parse_args()
     build(args.source, args.output, args.version)
     print(args.output)

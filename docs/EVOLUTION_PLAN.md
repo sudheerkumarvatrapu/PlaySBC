@@ -6,8 +6,8 @@ PlaySBC is an enterprise-style SIP/RTP and AI voice lab. It is not yet a product
 
 This document is ordered by dependency, not by feature visibility:
 
-1. Preserve the imported public `v2.6.0` regression and evidence baseline.
-2. Apply the private `v6.0.0` release boundary and measure current pre-v6 state.
+1. Preserve the public `v2.6.0` regression and evidence baseline.
+2. Maintain the public `v3.0.0` 78-profile release gate.
 3. Complete the production SBC protocol core; every higher-level service depends on it.
 4. Complete all network-side RFC 5359 business calling services with three-endpoint, RTPengine, AKS, and real-device evidence.
 5. Complete the production AI Voice Gateway on the proven signaling/media core.
@@ -16,7 +16,7 @@ This document is ordered by dependency, not by feature visibility:
 Workstreams may progress in parallel, but a later stage cannot declare
 production readiness while an earlier dependency remains open.
 
-## 1. Imported Public Base Gate: v2.6.0
+## 1. Historical Public Base Gate: v2.6.0
 
 - SIP UDP/TCP/TLS registration and B2BUA calls through local kind and Azure AKS
 - RTPengine anchoring, G.711 transcoding, RTP/RTCP, SRTP interworking, NAT learning, and media evidence
@@ -34,7 +34,7 @@ transaction-layer implementation or a SIP conformance claim.
 
 ### v2.6.0 Regression And Evidence Gate
 
-- The inherited public catalog plus the current private business-service slice contains 78 Kubernetes-selectable profiles, and the launcher reports live `X/78` progress for a full private-source run.
+- The v3.0.0 catalog contains 78 full-regression profiles, and the launcher reports live `X/78` progress for a complete run. Three smoke profiles remain a separate per-build gate.
 - `evidence-b2bua-two-leg-pcap` requires core and peer packet sources plus two distinct B2BUA INVITE Call-IDs.
 - Long local macOS runs use a scoped `caffeinate` process to prevent host sleep from creating false SIPp timeouts.
 - Missing or empty expected capture roles fail evidence collection before split captures are removed.
@@ -47,23 +47,20 @@ The public `v2.6.0` tag (`3c8e8072...`) and public maintenance head
 results, not blanket protocol certification or a measured production capacity
 claim.
 
-## 2. Private Commercial Target: v6.0.0
+## 2. Current Public Release Gate: v3.0.0
 
-The first private commercial release is `v6.0.0`. Until that gate, private
-`main` receives reviewed code, tests, and internal documentation only. No
-commercial tags, GitHub releases, images, charts, models, evidence bundles, or
-customer documentation are published.
+The public `v3.0.0` release carries the runtime, chart, operator configuration,
+evidence viewer, and all 78 full-regression profiles under the MIT license.
+The release gate requires matching `VERSION`, chart, image, guide, and release
+metadata plus focused unit, Helm, evidence, and profile-catalog validation.
+Private governance, credentials, generated evidence, and customer-specific
+material remain outside the public repository.
 
-Pre-v6 development is identified by commit SHA. Work proceeds in testable
-slices while product contents, third-party licensing, notices, SBOMs,
-provenance, security controls, and customer terms are segregated and reviewed.
+## 3. Current Public v3.0.0 Foundations
 
-## 3. Current Private Pre-v6 Foundations
-
-Private `main` now contains the first source foundations for the two active
-commercial tracks. These changes build on the public `v2.6.0` base gate and
-are identified by commit SHA; they are not a new public release or a claim of
-production readiness.
+Public `main` now contains the source foundations for the two active product
+tracks. These changes build on the v2.6.0 base and are part of v3.0.0; they are
+not a claim of production certification.
 
 | Track | Implemented now | Regression evidence | Still gated |
 | --- | --- | --- | --- |
@@ -74,8 +71,8 @@ Run all ten fast foundation profiles from the repository root. These are
 contract checks, not substitutes for live Kubernetes SIPp regression:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
-python3 tools/run_commercial_foundation_regression.py \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_public_foundation_regression.py \
   --profile ai-provider-streaming-contract \
   --profile ai-provider-interruption-fallback \
   --profile rfc5359-consultation-hold \
@@ -88,8 +85,9 @@ python3 tools/run_commercial_foundation_regression.py \
   --profile rfc5359-call-screening-policy
 ```
 
-For the focused Kubernetes profiles and the current-source SBC deployment,
-use the [commercial build, package, upgrade, and regression workflow](KUBERNETES_HELM_RUNBOOK.md#commercial-source-build-package-and-sbc-upgrade).
+For focused Kubernetes profiles and current-source deployment, use the
+self-contained public or private workflow in the
+[Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md).
 See the [AI Voice Gateway guide](AI_VOICE_GATEWAY.md) and the
 [RFC 5359 business-calling guide](BUSINESS_CALLING_SERVICES.md)
 for the detailed scope and acceptance gates.

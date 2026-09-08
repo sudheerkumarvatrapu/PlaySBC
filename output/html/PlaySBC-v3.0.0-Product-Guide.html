@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PlaySBC v2.6.0 Product Guide</title>
+<title>PlaySBC v3.0.0 Product Guide</title>
 <style>
 :root{--navy:#16324f;--blue:#2166a5;--line:#c9d4dd;--pale:#f5f8fa;--ink:#202b33;--muted:#5a6975}
 *{box-sizing:border-box} body{margin:0;color:var(--ink);font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#eef3f6}
@@ -16,23 +16,23 @@ pre{margin:0;padding:16px;overflow:auto;white-space:pre} .copy-status{height:0;m
 .table-wrap{overflow:auto;margin:16px 0 24px} table{border-collapse:collapse;width:100%;font-size:14px} th{background:var(--navy);color:white;text-align:left} th,td{border:1px solid var(--line);padding:8px;vertical-align:top} tr:nth-child(even) td{background:var(--pale)}
 .browser-note{background:#eaf2f8;border-left:4px solid var(--blue);padding:12px 16px;margin-bottom:24px}
 @media(max-width:850px){.layout{display:block;padding:10px}nav{position:relative;max-height:none;margin-bottom:12px}main{padding:24px 18px}}
-</style></head><body><div class="layout"><nav><h2>Contents</h2><a class="toc-1" href="#playsbc-v2-6-0-product-guide">PlaySBC v2.6.0 Product Guide</a>
+</style></head><body><div class="layout"><nav><h2>Contents</h2><a class="toc-1" href="#playsbc-v3-0-0-product-guide">PlaySBC v3.0.0 Product Guide</a>
 <a class="toc-1" href="#document-control">Document Control</a>
 <a class="toc-1" href="#common-local-preparation">Common Local Preparation</a>
-<a class="toc-1" href="#public-v2-6-0-release-upgrade">Public v2.6.0 Release Upgrade</a>
-<a class="toc-1" href="#public-source-build-and-upgrade">Public Source Build And Upgrade</a>
-<a class="toc-1" href="#private-commercial-build-and-upgrade">Private Commercial Build And Upgrade</a>
-<a class="toc-1" href="#private-commercial-rfc-5359-regression">Private Commercial RFC 5359 Regression</a>
+<a class="toc-1" href="#public-v3-0-0-release-upgrade-and-full-regression">Public v3.0.0 Release: Upgrade And Full Regression</a>
+<a class="toc-1" href="#public-source-build-package-upgrade-and-full-regression">Public Source: Build, Package, Upgrade, And Full Regression</a>
+<a class="toc-1" href="#private-commercial-build-upgrade-and-full-regression">Private Commercial Build, Upgrade, And Full Regression</a>
+<a class="toc-1" href="#focused-rfc-5359-regression">Focused RFC 5359 Regression</a>
 <a class="toc-1" href="#evidence-prometheus-and-grafana">Evidence, Prometheus, And Grafana</a>
 <a class="toc-1" href="#troubleshooting">Troubleshooting</a>
 <a class="toc-1" href="#detailed-runbooks">Detailed Runbooks</a></nav><main>
 <div class="browser-note"><strong>Browser edition:</strong> use COPY on any command block. The PDF edition keeps commands selectable but cannot access the clipboard in Preview or browser PDF viewers.</div>
-<h1 id="playsbc-v2-6-0-product-guide">PlaySBC v2.6.0 Product Guide</h1>
+<h1 id="playsbc-v3-0-0-product-guide">PlaySBC v3.0.0 Product Guide</h1>
 <p>Deployment, build, upgrade, regression, observability, and troubleshooting.</p>
 <h1 id="document-control">Document Control</h1>
 <div class=table-wrap><table>
 <tr><th>Track</th><th>Repository</th><th>Artifact identity</th></tr>
-<tr><td>Public release</td><td><code>PlaySBC</code></td><td>Published <code>2.6.0</code> images and chart</td></tr>
+<tr><td>Public release</td><td><code>PlaySBC</code></td><td>Published <code>3.0.0</code> images and chart</td></tr>
 <tr><td>Public source</td><td><code>PlaySBC</code></td><td>Local commit SHA</td></tr>
 <tr><td>Private commercial</td><td><code>PlaySBC-Commercial</code></td><td><code>playsbc-commercial-dev:&lt;commit&gt;</code></td></tr>
 </table></div>
@@ -49,9 +49,10 @@ fi
 kubectl --context &quot;$KUBE_CONTEXT&quot; get --raw=/readyz
 kubectl --context &quot;$KUBE_CONTEXT&quot; create namespace playsbc --dry-run=client -o yaml \
   | kubectl --context &quot;$KUBE_CONTEXT&quot; apply -f -</code></pre><p class="copy-status" aria-live="polite"></p></section>
-<h1 id="public-v2-6-0-release-upgrade">Public v2.6.0 Release Upgrade</h1>
+<h1 id="public-v3-0-0-release-upgrade-and-full-regression">Public v3.0.0 Release: Upgrade And Full Regression</h1>
+<p>Run this entire block after the v3.0.0 chart and four public images are published. It upgrades PlaySBC, RTPengine, Prometheus, and Grafana, verifies every rollout, and launches the 78-profile full-regression catalog.</p>
 <section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 export KUBE_CONTEXT=kind-playsbc
 helm upgrade --install playsbc \
   &quot;https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v${PLAYSBC_VERSION}/playsbc-${PLAYSBC_VERSION}.tgz&quot; \
@@ -64,26 +65,92 @@ helm upgrade --install playsbc \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
   --set-string rtpengine.image.tag=&quot;$PLAYSBC_VERSION&quot; \
   --set rtpengine.image.pullPolicy=Always --set observability.enabled=true
-kubectl --context &quot;$KUBE_CONTEXT&quot; -n playsbc get pods -o wide</code></pre><p class="copy-status" aria-live="polite"></p></section>
-<h1 id="public-source-build-and-upgrade">Public Source Build And Upgrade</h1>
-<section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
+kubectl --context &quot;$KUBE_CONTEXT&quot; -n playsbc get pods -o wide
+for WORKLOAD in \
+  statefulset/playsbc-playsbc \
+  statefulset/playsbc-playsbc-rtpengine \
+  deployment/playsbc-playsbc-prometheus \
+  deployment/playsbc-playsbc-grafana; do
+  kubectl --context &quot;$KUBE_CONTEXT&quot; -n playsbc rollout status &quot;$WORKLOAD&quot; --timeout=240s
+done
+
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --runner-image &quot;ghcr.io/sudheerkumarvatrapu/playsbc-k8s-regression:${PLAYSBC_VERSION}&quot; \
+  --sipp-image &quot;ghcr.io/sudheerkumarvatrapu/playsbc-sipp:${PLAYSBC_VERSION}&quot; \
+  --playsbc-image &quot;ghcr.io/sudheerkumarvatrapu/playsbc:${PLAYSBC_VERSION}&quot; \
+  --rtpengine-image &quot;ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine:${PLAYSBC_VERSION}&quot; \
+  --set-playsbc-image --set-rtpengine-image \
+  --no-load-playsbc-image --no-load-rtpengine-image --no-load-sipp-image \
+  --kind-cluster &quot;$KIND_CLUSTER&quot;</code></pre><p class="copy-status" aria-live="polite"></p></section>
+<h1 id="public-source-build-package-upgrade-and-full-regression">Public Source: Build, Package, Upgrade, And Full Regression</h1>
+<p>Use this complete workflow before the release artifacts exist:</p>
+<section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>set -euo pipefail
+cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
 git switch main &amp;&amp; git pull --ff-only origin main
+test -z &quot;$(git status --porcelain)&quot;
+
+export KUBE_CONTEXT=kind-playsbc
+export KIND_CLUSTER=playsbc
 export SOURCE_TAG=$(git rev-parse --short=12 HEAD)
 export PLAYSBC_REPOSITORY=playsbc-public-dev
+export RTPENGINE_REPOSITORY=playsbc-rtpengine-public-dev
 export PLAYSBC_IMAGE=&quot;${PLAYSBC_REPOSITORY}:${SOURCE_TAG}&quot;
+export RTPENGINE_IMAGE=&quot;${RTPENGINE_REPOSITORY}:${SOURCE_TAG}&quot;
+export PACKAGE_DIR=$(mktemp -d /private/tmp/playsbc-public-package.XXXXXX)
+export CHART_VERSION=$(awk &#x27;/^version:/ {print $2; exit}&#x27; charts/playsbc/Chart.yaml)
+export PLAYSBC_CHART=&quot;${PACKAGE_DIR}/playsbc-${CHART_VERSION}.tgz&quot;
+
+open -a Docker
+until docker info &gt;/dev/null 2&gt;&amp;1; do echo &quot;Waiting for Docker Desktop...&quot;; sleep 5; done
+if ! kind get clusters | grep -qx &quot;$KIND_CLUSTER&quot;; then
+  kind create cluster --name &quot;$KIND_CLUSTER&quot; --wait 180s
+fi
+kubectl --context &quot;$KUBE_CONTEXT&quot; create namespace playsbc --dry-run=client -o yaml \
+  | kubectl --context &quot;$KUBE_CONTEXT&quot; apply -f -
+
 docker build -f docker/playsbc.Dockerfile -t &quot;$PLAYSBC_IMAGE&quot; .
-kind load docker-image &quot;$PLAYSBC_IMAGE&quot; --name playsbc
-helm upgrade --install playsbc charts/playsbc --kube-context kind-playsbc \
-  --namespace playsbc --create-namespace --reuse-values --atomic --wait --timeout 10m \
-  --set image.repository=&quot;$PLAYSBC_REPOSITORY&quot; --set-string image.tag=&quot;$SOURCE_TAG&quot; \
-  --set image.pullPolicy=IfNotPresent</code></pre><p class="copy-status" aria-live="polite"></p></section>
-<p>Run the full public source catalog:</p>
-<section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_k8s_regression_job.py --all-profiles \
-  --build-playsbc-image --build-runner-image --build-sipp-image \
-  --build-rtpengine-image --kind-load-images --set-playsbc-image \
-  --set-rtpengine-image --kind-cluster playsbc</code></pre><p class="copy-status" aria-live="polite"></p></section>
-<h1 id="private-commercial-build-and-upgrade">Private Commercial Build And Upgrade</h1>
+docker build -f docker/rtpengine.Dockerfile -t &quot;$RTPENGINE_IMAGE&quot; .
+kind load docker-image &quot;$PLAYSBC_IMAGE&quot; &quot;$RTPENGINE_IMAGE&quot; --name &quot;$KIND_CLUSTER&quot;
+helm lint charts/playsbc
+helm package charts/playsbc --destination &quot;$PACKAGE_DIR&quot;
+
+helm upgrade --install playsbc &quot;$PLAYSBC_CHART&quot; \
+  --kube-context &quot;$KUBE_CONTEXT&quot; --namespace playsbc --create-namespace \
+  --reuse-values --atomic --wait --timeout 10m \
+  -f configs/kubernetes/active-active-values.yaml \
+  --set image.repository=&quot;$PLAYSBC_REPOSITORY&quot; \
+  --set-string image.tag=&quot;$SOURCE_TAG&quot; --set image.pullPolicy=IfNotPresent \
+  --set rtpengine.enabled=true \
+  --set rtpengine.image.repository=&quot;$RTPENGINE_REPOSITORY&quot; \
+  --set-string rtpengine.image.tag=&quot;$SOURCE_TAG&quot; \
+  --set rtpengine.image.pullPolicy=IfNotPresent --set rtpengine.hostNetwork=false \
+  --set playsbc.config.media_backend=rtpengine \
+  --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223 \
+  --set observability.enabled=true
+
+kubectl --context &quot;$KUBE_CONTEXT&quot; -n playsbc rollout restart \
+  statefulset/playsbc-playsbc statefulset/playsbc-playsbc-rtpengine \
+  deployment/playsbc-playsbc-prometheus deployment/playsbc-playsbc-grafana
+for WORKLOAD in \
+  statefulset/playsbc-playsbc \
+  statefulset/playsbc-playsbc-rtpengine \
+  deployment/playsbc-playsbc-prometheus \
+  deployment/playsbc-playsbc-grafana; do
+  kubectl --context &quot;$KUBE_CONTEXT&quot; -n playsbc rollout status &quot;$WORKLOAD&quot; --timeout=240s
+done
+kubectl --context &quot;$KUBE_CONTEXT&quot; -n playsbc get pods -o wide
+
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --playsbc-image &quot;$PLAYSBC_IMAGE&quot; --rtpengine-image &quot;$RTPENGINE_IMAGE&quot; \
+  --set-playsbc-image --set-rtpengine-image \
+  --no-load-playsbc-image --no-load-rtpengine-image \
+  --build-runner-image --build-sipp-image --kind-load-images \
+  --kind-cluster &quot;$KIND_CLUSTER&quot;</code></pre><p class="copy-status" aria-live="polite"></p></section>
+<h1 id="private-commercial-build-upgrade-and-full-regression">Private Commercial Build, Upgrade, And Full Regression</h1>
 <p>This track creates local development artifacts only; it does not publish a commercial release.</p>
 <section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>cd /Users/sudheerkumar/Documents/Codex/2026-05-18/PlaySBC-Commercial
 git switch main &amp;&amp; git pull --ff-only origin main
@@ -103,7 +170,7 @@ helm upgrade --install playsbc &quot;$PLAYSBC_CHART&quot; --kube-context kind-pl
   --set image.repository=&quot;$PLAYSBC_REPOSITORY&quot; --set-string image.tag=&quot;$SOURCE_TAG&quot; \
   --set image.pullPolicy=IfNotPresent --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=2.6.0 --set rtpengine.hostNetwork=false \
+  --set-string rtpengine.image.tag=3.0.0 --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223 \
   --set observability.enabled=true
@@ -118,13 +185,21 @@ kubectl --context kind-playsbc -n playsbc rollout status \
   deployment/playsbc-playsbc-prometheus --timeout=240s
 kubectl --context kind-playsbc -n playsbc rollout status \
   deployment/playsbc-playsbc-grafana --timeout=240s
-kubectl --context kind-playsbc -n playsbc get pods -o wide</code></pre><p class="copy-status" aria-live="polite"></p></section>
-<h1 id="private-commercial-rfc-5359-regression">Private Commercial RFC 5359 Regression</h1>
-<p>The RFC 5359 plan covers all sections 2.1 through 2.18. Every multi-party regression must run three independent SIPp pods (A/B/C), including internal media and RTPengine variants. SIPp is not the production acceptance gate: standard-SIP real phones and softphones must also pass signaling, media, failure recovery, and cleanup in both supported device directions. See <code>docs/BUSINESS_CALLING_SERVICES.md</code> for the per-service status matrix. The paired internal/RTPengine profile catalog and compulsory A/B/C roles are defined in <code>docs/RFC5359_REGRESSION_PLAN.md</code>.</p>
-<section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
-python3 tools/run_commercial_foundation_regression.py
+kubectl --context kind-playsbc -n playsbc get pods -o wide
 
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-private-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --all-profiles \
+  --playsbc-image &quot;$PLAYSBC_IMAGE&quot; \
+  --set-playsbc-image --no-load-playsbc-image \
+  --build-runner-image --build-sipp-image --build-rtpengine-image \
+  --kind-load-images --set-rtpengine-image --kind-cluster playsbc</code></pre><p class="copy-status" aria-live="polite"></p></section>
+<h1 id="focused-rfc-5359-regression">Focused RFC 5359 Regression</h1>
+<p>The RFC 5359 plan covers all sections 2.1 through 2.18. Every multi-party regression must run three independent SIPp pods (A/B/C), including internal media and RTPengine variants. SIPp is not the production acceptance gate: standard-SIP real phones and softphones must also pass signaling, media, failure recovery, and cleanup in both supported device directions. See <code>docs/BUSINESS_CALLING_SERVICES.md</code> for the per-service status matrix. The paired internal/RTPengine profile catalog and compulsory A/B/C roles are defined in <code>docs/RFC5359_REGRESSION_PLAN.md</code>.</p>
+<section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_public_foundation_regression.py
+
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
 python3 tools/run_k8s_regression_job.py \
   --profile rfc5359-call-hold-resume \
   --profile rfc5359-call-hold-resume-rtpengine \
@@ -165,7 +240,7 @@ helm --kube-context kind-playsbc -n playsbc history playsbc
 kubectl --context kind-playsbc -n playsbc get events --sort-by=.lastTimestamp
 kubectl --context kind-playsbc -n playsbc get pods -o wide</code></pre><p class="copy-status" aria-live="polite"></p></section>
 <h1 id="detailed-runbooks">Detailed Runbooks</h1>
-<p>These remain standalone and are not embedded in either generated guide: <code>AZURE_AKS.md</code>, <code>KUBERNETES_HELM_RUNBOOK.md</code>, <code>KUBERNETES_LOCAL.md</code>, <code>REAL_DEVICE_LAB.md</code>, <code>RTPENGINE_LOCAL.md</code>, <code>OBSERVABILITY.md</code>, <code>AI_VOICE_GATEWAY.md</code>, <code>BUSINESS_CALLING_SERVICES.md</code>, and <code>EVOLUTION_PLAN.md</code>.</p></main></div>
+<p>These remain standalone and are not embedded in either generated guide: <code>AKS.md</code>, <code>KUBERNETES_HELM_RUNBOOK.md</code>, <code>KUBERNETES_LOCAL.md</code>, <code>REAL_DEVICE_LAB.md</code>, <code>RTPENGINE_LOCAL.md</code>, <code>OBSERVABILITY.md</code>, <code>AI_VOICE_GATEWAY.md</code>, <code>BUSINESS_CALLING_SERVICES.md</code>, and <code>EVOLUTION_PLAN.md</code>.</p></main></div>
 <script>
 async function copyText(button){
   const card=button.closest('.command'), text=card.querySelector('pre code').innerText;

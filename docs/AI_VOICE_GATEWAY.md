@@ -2,7 +2,7 @@
 
 PlaySBC can answer a SIP call as an AI endpoint, anchor its media through RTPengine, convert speech to text, send the transcript to Rasa, synthesize the response, and preserve the evidence in one report.
 
-The commercial pre-v6 foundation exposes a provider-neutral, ordered
+The public v3.0.0 foundation exposes a provider-neutral, ordered
 asynchronous response stream. Rasa is the first adapter; future bot providers
 implement the same `ConversationProvider` contract without changing SIP or
 media control. Each provider turn now has an overall deadline, a deterministic
@@ -70,10 +70,10 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
-Run all eight fast commercial foundation profiles before cluster regression:
+Run all fast source-level foundation profiles before cluster regression:
 
 ```bash
-python3 tools/run_commercial_foundation_regression.py
+python3 tools/run_public_foundation_regression.py
 ```
 
 The command validates:

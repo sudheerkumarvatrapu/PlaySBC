@@ -1650,7 +1650,7 @@ Content-Length: 0
         values = (chart / "values.yaml").read_text(encoding="utf-8")
         azure = (chart / "templates" / "azure-services.yaml").read_text(encoding="utf-8")
         aks_values = (ROOT / "configs" / "kubernetes" / "aks-values.yaml").read_text(encoding="utf-8")
-        product_guide = (ROOT / "docs" / "PRODUCT_GUIDE.md").read_text(encoding="utf-8")
+        aks_runbook = (ROOT / "docs" / "AKS.md").read_text(encoding="utf-8")
 
         self.assertIn("cloud:", values)
         self.assertIn("azure:", values)
@@ -1666,14 +1666,15 @@ Content-Length: 0
         self.assertIn("$mediaPublicAllowedRanges", azure)
         self.assertIn("documentedPortRange", aks_values)
         self.assertIn("portRange:", aks_values)
-        self.assertIn("Azure AKS Administration", product_guide)
-        self.assertIn("AKS Regression", product_guide)
-        self.assertIn("--aks-profiles", product_guide)
-        self.assertIn("PLAYSBC_VERSION=2.6.0", product_guide)
+        self.assertIn("PlaySBC On Azure AKS", aks_runbook)
+        self.assertIn("Run AKS Regression", aks_runbook)
+        self.assertIn("--aks-profiles", aks_runbook)
+        self.assertIn("--profile basic-signalling", aks_runbook)
+        self.assertIn("PLAYSBC_VERSION=3.0.0", aks_runbook)
 
     def test_current_release_keeps_kind_regression_path(self):
         chart = ROOT / "charts" / "playsbc"
-        current_version = "2.6.0"
+        current_version = "3.0.0"
         version = (ROOT / "VERSION").read_text(encoding="utf-8")
         chart_yaml = (chart / "Chart.yaml").read_text(encoding="utf-8")
         values = (chart / "values.yaml").read_text(encoding="utf-8")
@@ -1691,16 +1692,13 @@ Content-Length: 0
         self.assertIn(f'tag: "{current_version}"', aks_values)
         self.assertIn(f"kind/minikube must track the current release (`v{current_version}`", readme)
         self.assertIn(f"export PLAYSBC_VERSION={current_version}", runbook)
-        self.assertIn(
-            "[PlaySBC v2.6.0 Product Guide](../output/pdf/PlaySBC-v2.6.0-Product-Guide.pdf)",
-            local_runbook,
-        )
+        self.assertIn("[Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md)", local_runbook)
         self.assertIn("--all-profiles", runbook)
         self.assertIn("--set-rtpengine-image", runbook)
         self.assertNotIn("playsbc-k8s-regression:1.4.2", runbook)
-        self.assertIn("Local Real-Device Lab", release_notes)
-        self.assertIn("Evidence Hardening", release_notes)
-        self.assertIn("kind-playsbc", release_notes)
+        self.assertIn("78 full Kubernetes regression profiles", release_notes)
+        self.assertIn("RFC 5359 unattended transfer", release_notes)
+        self.assertIn("RTPengine", release_notes)
         self.assertIn("AKS", release_notes)
 
         args = run_k8s_regression_job.parse_args(

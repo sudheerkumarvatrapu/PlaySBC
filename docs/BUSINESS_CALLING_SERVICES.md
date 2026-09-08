@@ -1,6 +1,6 @@
 # RFC 5359 Business Calling Services
 
-This guide describes the private pre-v6 PlaySBC implementation of the
+This guide describes the public PlaySBC v3.0.0 implementation of the
 network-side business calling services illustrated by RFC 5359. RFC 5359 is a
 Best Current Practice with example SIP call flows; it is not a protocol
 conformance certificate. A real deployment also depends on each phone or
@@ -121,12 +121,13 @@ B-leg routing is added.
 
 ## RFC 5359-Only Kubernetes Regression
 
-Build and upgrade the private source first with the canonical
-[commercial source workflow](KUBERNETES_HELM_RUNBOOK.md#commercial-source-build-package-and-sbc-upgrade).
+Build and upgrade the public release or current public source first with the
+self-contained workflows in
+[Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md).
 Then, in the same terminal, run only the live RFC 5359 profiles:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
 python3 tools/run_k8s_regression_job.py \
   --profile rfc5359-call-hold-resume \
   --profile rfc5359-call-hold-resume-rtpengine \

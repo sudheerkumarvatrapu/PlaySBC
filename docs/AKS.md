@@ -2,7 +2,7 @@
 
 This is the canonical Azure guide for creating a small AKS lab, deploying PlaySBC/RTPengine, running AKS regression, downloading evidence, recovering credentials, and deleting the lab. Use [REAL_DEVICE_LAB.md](REAL_DEVICE_LAB.md) only after this base deployment is healthy.
 
-The Azure exposure track was introduced in `v1.5.0`, and `v2.4.0` added strict public-media evidence validation. Every runnable command below targets the current `v2.6.0` release.
+The Azure exposure track was introduced in `v1.5.0`, and `v2.4.0` added strict public-media evidence validation. Every runnable command below targets the current `v3.0.0` release.
 
 Keep AKS test windows short. Local kind is the normal lane for full regression and HA/failover iteration.
 
@@ -32,7 +32,7 @@ export SIP_PIP_NAME=playsbc-sip-pip
 export RTP_PIP_NAME=playsbc-rtp-pip
 export DNS_LABEL=playsbc-sip-lab-$RANDOM
 export RTP_DNS_LABEL=playsbc-rtp-lab-$RANDOM
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 ```
 
 Cloud Shell variables are ephemeral. Re-export them after reconnecting. For an existing ACR, derive its name instead of generating a new one:
@@ -163,7 +163,7 @@ kubectl get nodes
 Re-export stable values in every new Cloud Shell session:
 
 ```bash
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 export AKS_RG=playsbc-aks-rg
 export NETWORK_RG=playsbc-network-rg
 export AKS_NAME=playsbc-aks
@@ -307,7 +307,7 @@ git log --oneline -1
 Run image import separately so a missing tag is obvious:
 
 ```bash
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 export AKS_RG=playsbc-aks-rg
 export ACR_NAME=$(az acr list --resource-group "$AKS_RG" --query '[0].name' -o tsv)
 export ACR_LOGIN_SERVER=$(az acr show -g "$AKS_RG" -n "$ACR_NAME" --query loginServer -o tsv)
@@ -342,7 +342,32 @@ python3 tools/run_k8s_regression_job.py \
   --job-timeout 3600
 ```
 
-Expected startup output includes the selected release/main commit from `git log`, followed by `Launching Azure AKS Regression Job for 12 profiles.` The report must show release image tag `2.6.0`; this proves the launcher and runtime image contract are aligned.
+For one short AKS demo instead of the 12-profile readiness set, run the same
+published images through `basic-signalling`. `--aks-mode` keeps the Azure
+LoadBalancer, static-IP, single-workload, and public-ingress preflight checks:
+
+```bash
+cd ~/PlaySBC-main
+
+PYTHONPYCACHEPREFIX=/tmp/playsbc-pycache \
+python3 tools/run_k8s_regression_job.py \
+  --profile basic-signalling \
+  --aks-mode \
+  --runner-image "$ACR_LOGIN_SERVER/playsbc-k8s-regression:$PLAYSBC_VERSION" \
+  --runner-image-pull-policy Always \
+  --sipp-image "$ACR_LOGIN_SERVER/playsbc-sipp:$PLAYSBC_VERSION" \
+  --sipp-image-pull-policy Always \
+  --playsbc-image "$ACR_LOGIN_SERVER/playsbc:$PLAYSBC_VERSION" \
+  --rtpengine-image "$ACR_LOGIN_SERVER/playsbc-rtpengine:$PLAYSBC_VERSION" \
+  --set-playsbc-image --set-rtpengine-image \
+  --aks-load-balancer-wait-timeout 1200 \
+  --job-timeout 1800
+```
+
+Use the `--aks-profiles` block for the complete 12-profile AKS readiness lane;
+use the one-profile block only for a controlled demonstration.
+
+Expected startup output includes the selected release/main commit from `git log`, followed by `Launching Azure AKS Regression Job for 12 profiles.` The report must show release image tag `3.0.0`; this proves the launcher and runtime image contract are aligned.
 
 The `--aks-profiles` shortcut enforces Azure services, static SIP, public SIP/RTP ingress, UDP `30000-30049`, and single-workload topology. Image references are validated before Helm or Job mutation.
 

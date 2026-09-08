@@ -10,7 +10,7 @@
   <img alt="SIPp" src="https://img.shields.io/badge/-SIPp%20Regression-16A34A?style=flat-square">
   <img alt="RTPengine" src="https://img.shields.io/badge/-RTPengine-0F766E?style=flat-square">
   <img alt="Rasa" src="https://img.shields.io/badge/-AI%20Rasa%20Gateway-BE185D?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/-v2.6.0-111827?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/-v3.0.0-111827?style=flat-square">
   <img alt="License" src="https://img.shields.io/badge/-MIT-F59E0B?style=flat-square">
 </p>
 
@@ -21,8 +21,8 @@ PlaySBC is a Python SIP/RTP lab for B2BUA routing, G.711 media, RTPengine, HA ex
 | Goal | Guide |
 | --- | --- |
 | Choose the correct workflow | [Documentation index](docs/README.md) |
-| Read the product and administration guide | [PlaySBC v2.6.0 Product Guide](output/pdf/PlaySBC-v2.6.0-Product-Guide.pdf) |
-| Copy commands in a browser | [PlaySBC v2.6.0 Browser Guide](output/html/PlaySBC-v2.6.0-Product-Guide.html) |
+| Read the product and administration guide | [PlaySBC v3.0.0 Product Guide](output/pdf/PlaySBC-v3.0.0-Product-Guide.pdf) |
+| Copy commands in a browser | [PlaySBC v3.0.0 Browser Guide](output/html/PlaySBC-v3.0.0-Product-Guide.html) |
 | Understand kind/minikube topology | [Local Kubernetes lab](docs/KUBERNETES_LOCAL.md) |
 | Run Rasa voice/chat profiles | [AI Voice Gateway](docs/AI_VOICE_GATEWAY.md) |
 | Configure and test hold, transfer, or forwarding | [RFC 5359 business calling services](docs/BUSINESS_CALLING_SERVICES.md) |
@@ -32,13 +32,13 @@ PlaySBC is a Python SIP/RTP lab for B2BUA routing, G.711 media, RTPengine, HA ex
 
 ## Current Release
 
-- Version: `2.6.0`
-- Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v2.6.0>
-- Helm: `playsbc-2.6.0.tgz`
+- Version: `3.0.0`
+- Release: <https://github.com/sudheerkumarvatrapu/PlaySBC/releases/tag/v3.0.0>
+- Helm: `playsbc-3.0.0.tgz`
 - Images: `playsbc`, `playsbc-rtpengine`, `playsbc-k8s-regression`, and `playsbc-sipp` under `ghcr.io/sudheerkumarvatrapu`
 - Security: CodeQL, Dependency Review, Trivy, and Checkov in GitHub Actions
 
-Local kind/minikube must track the current release (`v2.6.0`) unless a compatibility run intentionally pins an older version.
+Local kind/minikube must track the current release (`v3.0.0`) unless a compatibility run intentionally pins an older version.
 
 ## Architecture
 
@@ -81,7 +81,7 @@ Report:
 logs/reports/latest.html
 ```
 
-For deployment and administration, use the single maintained [PlaySBC v2.6.0 Product Guide](output/pdf/PlaySBC-v2.6.0-Product-Guide.pdf).
+For deployment and administration, use the single maintained [PlaySBC v3.0.0 Product Guide](output/pdf/PlaySBC-v3.0.0-Product-Guide.pdf).
 
 Verify the PlaySBC and RTPengine images currently configured in either Deployment or StatefulSet topology:
 
@@ -107,7 +107,7 @@ Every applicable regression profile should produce:
 
 PlaySBC has strong lab coverage, but large-scale production claims require external shared state, carrier-grade load balancing, security hardening, multi-node and multi-zone failure proof, long soak tests, and measured capacity baselines. See the [evolution plan](docs/EVOLUTION_PLAN.md).
 
-PlaySBC v2.6.0 is the final public MIT baseline. Published source, images, and releases through v2.6.0 retain their MIT terms. The exact audited v2.6.0 tag will be imported into the access-controlled `SBC-Comm` repository. This boundary does not alter rights already granted for MIT code.
+PlaySBC v3.0.0 is a public MIT release. It brings the public runtime and evidence tooling to the 78-profile regression catalog, including unattended transfer and forwarding scenarios with paired RTPengine coverage. Private repository governance, credentials, generated evidence, and customer material are not part of this release.
 
 ## Cleanup
 
