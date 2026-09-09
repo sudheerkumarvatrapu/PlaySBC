@@ -119,43 +119,6 @@ agent. Confirm that the deployed phone or upstream PBX follows SIP redirects;
 otherwise use that PBX's forwarding policy until server-originated alternate
 B-leg routing is added.
 
-## RFC 5359-Only Kubernetes Regression
-
-Build and upgrade the public release or current public source first with the
-self-contained workflows in
-[Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md).
-Then, in the same terminal, run only the live RFC 5359 profiles:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_k8s_regression_job.py \
-  --profile rfc5359-call-hold-resume \
-  --profile rfc5359-call-hold-resume-rtpengine \
-  --profile rfc5359-call-hold-resume-tcp \
-  --profile rfc5359-call-hold-resume-tls \
-  --profile rfc5359-unattended-transfer \
-  --profile rfc5359-unconditional-forwarding \
-  --profile rfc5359-forwarding-on-busy \
-  --profile rfc5359-forwarding-on-no-answer \
-  --profile rfc5359-unattended-transfer-rtpengine \
-  --profile rfc5359-unconditional-forwarding-rtpengine \
-  --profile rfc5359-forwarding-on-busy-rtpengine \
-  --profile rfc5359-forwarding-on-no-answer-rtpengine \
-  --playsbc-image "$PLAYSBC_IMAGE" \
-  --set-playsbc-image \
-  --no-load-playsbc-image \
-  --build-runner-image \
-  --build-sipp-image \
-  --kind-load-images \
-  --kind-cluster "$KIND_CLUSTER"
-```
-
-These twelve profiles are live signaling/media scenarios. The four new
-`-rtpengine` variants require a ready RTPengine service and retain its
-offer/answer or offer/cleanup control evidence. The fast foundation
-runner separately validates consultation, music-on-hold, attended-transfer,
-and recovery state contracts that do not yet have complete live call flows.
-
 ## Physical-Device Acceptance
 
 Use the isolated real-device lab described in

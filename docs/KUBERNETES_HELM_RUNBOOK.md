@@ -450,17 +450,6 @@ test "$(kubectl --context "$KUBE_CONTEXT" -n playsbc get statefulset \
 echo "Verified PlaySBC image: $ACTUAL_PLAYSBC_IMAGE"
 ```
 
-### Run The Fast Pre-v6 Foundation Gate
-
-Before the in-cluster profiles, validate provider streaming, provider
-timeout/interruption fallback, consultation hold, and consultation failure/race
-recovery directly from the checked-out source:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_public_foundation_regression.py
-```
-
 ### Run The Full 78-Profile Kubernetes Regression
 
 After the private upgrade and rollout checks above, use the already loaded SBC
@@ -476,40 +465,6 @@ python3 tools/run_k8s_regression_job.py \
   --kind-load-images --set-rtpengine-image \
   --kind-cluster "$KIND_CLUSTER"
 ```
-
-### Run Only The RFC 5359 Kubernetes Profiles
-
-The PlaySBC image is already loaded by the upgrade workflow. Build and load
-only the regression runner and SIPp helper images, then run the live business
-calling profiles through both the internal and RTPengine service paths:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_k8s_regression_job.py \
-  --profile rfc5359-call-hold-resume \
-  --profile rfc5359-call-hold-resume-rtpengine \
-  --profile rfc5359-call-hold-resume-tcp \
-  --profile rfc5359-call-hold-resume-tls \
-  --profile rfc5359-unattended-transfer \
-  --profile rfc5359-unconditional-forwarding \
-  --profile rfc5359-forwarding-on-busy \
-  --profile rfc5359-forwarding-on-no-answer \
-  --profile rfc5359-unattended-transfer-rtpengine \
-  --profile rfc5359-unconditional-forwarding-rtpengine \
-  --profile rfc5359-forwarding-on-busy-rtpengine \
-  --profile rfc5359-forwarding-on-no-answer-rtpengine \
-  --playsbc-image "$PLAYSBC_IMAGE" \
-  --set-playsbc-image \
-  --no-load-playsbc-image \
-  --build-runner-image \
-  --build-sipp-image \
-  --kind-load-images \
-  --kind-cluster "$KIND_CLUSTER"
-```
-
-See [RFC 5359 business calling services](BUSINESS_CALLING_SERVICES.md) for
-configuration, profile scope, interoperability requirements, and the
-physical-device acceptance checklist.
 
 The command prints the exact result directory. Open the newest report without
 starting a separate report server:

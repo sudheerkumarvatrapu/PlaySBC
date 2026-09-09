@@ -70,25 +70,6 @@ python3 tools/run_k8s_regression_job.py \
   --kind-cluster playsbc
 ```
 
-Run all fast source-level foundation profiles before cluster regression:
-
-```bash
-python3 tools/run_public_foundation_regression.py
-```
-
-The command validates:
-
-- `ai-provider-streaming-contract`
-- `ai-provider-interruption-fallback`
-- `rfc5359-consultation-hold`
-- `rfc5359-consultation-failure-recovery`
-- `rfc5359-music-on-hold`
-- `rfc5359-unattended-transfer`
-- `rfc5359-attended-transfer`
-- `rfc5359-call-forwarding`
-
-Any profile can be selected independently with `--profile`.
-
 Use [KUBERNETES_HELM_RUNBOOK.md](KUBERNETES_HELM_RUNBOOK.md) for installation, image, observability, and cleanup commands.
 
 ## Configuration

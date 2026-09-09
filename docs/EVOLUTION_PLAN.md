@@ -67,25 +67,7 @@ not a claim of production certification.
 | Production AI Voice Gateway | Provider-neutral `ConversationProvider` contract; immutable request/chunk types; ordered asynchronous response streaming; Rasa adapter; rejection of missing, out-of-order, or post-final chunks; overall provider deadline; deterministic timeout/error fallback; provider-stage call-finalization interruption with no fallback/TTS from the interrupted response; timeout/failure/interruption counters | Unit coverage in `tests/test_ai_gateway.py`; fast profiles `ai-provider-streaming-contract` and `ai-provider-interruption-fallback`; Kubernetes profile `ai-rasa-long-response-streaming` | Additional live providers, retry/idempotency policy, latency histograms, TTS-stage cancellation, barge-in from new caller media, and complete kind/AKS/real-device acceptance |
 | RFC 5359 business calling services | Existing live hold/resume; deterministic consultation and music-on-hold state contracts; REFER/NOTIFY relay for unattended transfer; RFC 3891 Replaces translation for attended transfer; ordered unconditional, busy, and no-answer forwarding policy with loop/hop protection; Find-Me and incoming/outgoing screening policy foundations; business-service metrics | Unit coverage; eight RFC-focused fast contract profiles; live local SIPp passes for unattended transfer and three forwarding modes; selectable RTPengine variants for all four; existing live hold/resume over UDP, TCP, TLS, and RTPengine | Wire Find-Me and screening into live routing; execute and retain RTPengine/kind/AKS profiles; live consultation and controlled music media; multi-dialog attended-transfer SIPp; physical-device acceptance |
 
-Run all ten fast foundation profiles from the repository root. These are
-contract checks, not substitutes for live Kubernetes SIPp regression:
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_public_foundation_regression.py \
-  --profile ai-provider-streaming-contract \
-  --profile ai-provider-interruption-fallback \
-  --profile rfc5359-consultation-hold \
-  --profile rfc5359-consultation-failure-recovery \
-  --profile rfc5359-music-on-hold \
-  --profile rfc5359-unattended-transfer \
-  --profile rfc5359-attended-transfer \
-  --profile rfc5359-call-forwarding \
-  --profile rfc5359-find-me-policy \
-  --profile rfc5359-call-screening-policy
-```
-
-For focused Kubernetes profiles and current-source deployment, use the
+For current-source deployment and the complete regression catalog, use the
 self-contained public or private workflow in the
 [Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md).
 See the [AI Voice Gateway guide](AI_VOICE_GATEWAY.md) and the
