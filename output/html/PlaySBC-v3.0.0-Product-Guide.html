@@ -22,7 +22,6 @@ pre{margin:0;padding:16px;overflow:auto;white-space:pre} .copy-status{height:0;m
 <a class="toc-1" href="#public-v3-0-0-release-upgrade-and-full-regression">Public v3.0.0 Release: Upgrade And Full Regression</a>
 <a class="toc-1" href="#public-source-build-package-upgrade-and-full-regression">Public Source: Build, Package, Upgrade, And Full Regression</a>
 <a class="toc-1" href="#private-commercial-build-upgrade-and-full-regression">Private Commercial Build, Upgrade, And Full Regression</a>
-<a class="toc-1" href="#focused-rfc-5359-regression">Focused RFC 5359 Regression</a>
 <a class="toc-1" href="#evidence-prometheus-and-grafana">Evidence, Prometheus, And Grafana</a>
 <a class="toc-1" href="#troubleshooting">Troubleshooting</a>
 <a class="toc-1" href="#detailed-runbooks">Detailed Runbooks</a></nav><main>
@@ -194,27 +193,6 @@ python3 tools/run_k8s_regression_job.py \
   --set-playsbc-image --no-load-playsbc-image \
   --build-runner-image --build-sipp-image --build-rtpengine-image \
   --kind-load-images --set-rtpengine-image --kind-cluster playsbc</code></pre><p class="copy-status" aria-live="polite"></p></section>
-<h1 id="focused-rfc-5359-regression">Focused RFC 5359 Regression</h1>
-<p>The RFC 5359 plan covers all sections 2.1 through 2.18. Every multi-party regression must run three independent SIPp pods (A/B/C), including internal media and RTPengine variants. SIPp is not the production acceptance gate: standard-SIP real phones and softphones must also pass signaling, media, failure recovery, and cleanup in both supported device directions. See <code>docs/BUSINESS_CALLING_SERVICES.md</code> for the per-service status matrix. The paired internal/RTPengine profile catalog and compulsory A/B/C roles are defined in <code>docs/RFC5359_REGRESSION_PLAN.md</code>.</p>
-<section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_public_foundation_regression.py
-
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_k8s_regression_job.py \
-  --profile rfc5359-call-hold-resume \
-  --profile rfc5359-call-hold-resume-rtpengine \
-  --profile rfc5359-call-hold-resume-tcp \
-  --profile rfc5359-call-hold-resume-tls \
-  --profile rfc5359-unattended-transfer \
-  --profile rfc5359-unconditional-forwarding \
-  --profile rfc5359-forwarding-on-busy \
-  --profile rfc5359-forwarding-on-no-answer \
-  --profile rfc5359-unattended-transfer-rtpengine \
-  --profile rfc5359-unconditional-forwarding-rtpengine \
-  --profile rfc5359-forwarding-on-busy-rtpengine \
-  --profile rfc5359-forwarding-on-no-answer-rtpengine \
-  --playsbc-image &quot;$PLAYSBC_IMAGE&quot; --set-playsbc-image --no-load-playsbc-image \
-  --build-runner-image --build-sipp-image --kind-load-images --kind-cluster playsbc</code></pre><p class="copy-status" aria-live="polite"></p></section>
 <h1 id="evidence-prometheus-and-grafana">Evidence, Prometheus, And Grafana</h1>
 <section class="command"><header><span>COMMAND</span><button type="button" class="copy">COPY</button></header><pre><code>LATEST_REPORT=$(find logs/k8s-job -path &#x27;*/k8s-reports/latest.html&#x27; -type f | sort | tail -1)
 : &quot;${LATEST_REPORT:?No report found}&quot;

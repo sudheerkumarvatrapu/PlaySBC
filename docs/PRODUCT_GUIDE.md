@@ -194,39 +194,6 @@ python3 tools/run_k8s_regression_job.py \
   --kind-load-images --set-rtpengine-image --kind-cluster playsbc
 ```
 
-# Focused RFC 5359 Regression
-
-The RFC 5359 plan covers all sections 2.1 through 2.18. Every multi-party
-regression must run three independent SIPp pods (A/B/C), including internal
-media and RTPengine variants. SIPp is not the production acceptance gate:
-standard-SIP real phones and softphones must also pass signaling, media,
-failure recovery, and cleanup in both supported device directions. See
-`docs/BUSINESS_CALLING_SERVICES.md` for the per-service status matrix.
-The paired internal/RTPengine profile catalog and compulsory A/B/C roles are
-defined in `docs/RFC5359_REGRESSION_PLAN.md`.
-
-```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_public_foundation_regression.py
-
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
-python3 tools/run_k8s_regression_job.py \
-  --profile rfc5359-call-hold-resume \
-  --profile rfc5359-call-hold-resume-rtpengine \
-  --profile rfc5359-call-hold-resume-tcp \
-  --profile rfc5359-call-hold-resume-tls \
-  --profile rfc5359-unattended-transfer \
-  --profile rfc5359-unconditional-forwarding \
-  --profile rfc5359-forwarding-on-busy \
-  --profile rfc5359-forwarding-on-no-answer \
-  --profile rfc5359-unattended-transfer-rtpengine \
-  --profile rfc5359-unconditional-forwarding-rtpengine \
-  --profile rfc5359-forwarding-on-busy-rtpengine \
-  --profile rfc5359-forwarding-on-no-answer-rtpengine \
-  --playsbc-image "$PLAYSBC_IMAGE" --set-playsbc-image --no-load-playsbc-image \
-  --build-runner-image --build-sipp-image --kind-load-images --kind-cluster playsbc
-```
-
 # Evidence, Prometheus, And Grafana
 
 ```bash
