@@ -34,7 +34,7 @@ transaction-layer implementation or a SIP conformance claim.
 
 ### v2.6.0 Regression And Evidence Gate
 
-- The inherited public catalog plus the current private business-service slice contains 78 Kubernetes-selectable profiles, and the launcher reports live `X/78` progress for a full private-source run.
+- The inherited public catalog plus the current public business-service slice contains 78 Kubernetes-selectable profiles, and the launcher reports live `X/78` progress for a full private-source run.
 - `evidence-b2bua-two-leg-pcap` requires core and peer packet sources plus two distinct B2BUA INVITE Call-IDs.
 - Long local macOS runs use a scoped `caffeinate` process to prevent host sleep from creating false SIPp timeouts.
 - Missing or empty expected capture roles fail evidence collection before split captures are removed.
@@ -74,8 +74,8 @@ Run all ten fast foundation profiles from the repository root. These are
 contract checks, not substitutes for live Kubernetes SIPp regression:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
-python3 tools/run_commercial_foundation_regression.py \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_public_foundation_regression.py \
   --profile ai-provider-streaming-contract \
   --profile ai-provider-interruption-fallback \
   --profile rfc5359-consultation-hold \
@@ -289,7 +289,7 @@ cleanup verdicts.
 
 PlaySBC propagates an in-dialog re-INVITE to the opposite B2BUA leg,
 preserves dialog routing and CSeq ordering, and updates an existing RTPengine
-session. The private slice also relays REFER/NOTIFY between independent B2BUA
+session. The public release also relays REFER/NOTIFY between independent B2BUA
 legs, translates attended-transfer Replaces identifiers, and applies bounded
 call-forwarding policy. Internal and RTPengine variants are cataloged for the
 live unattended-transfer and forwarding flows. Real-device acceptance remains
@@ -353,7 +353,7 @@ pods (A/B/C), never multiple logical roles in one pod. SIPp success alone does
 not close a service: standard-SIP physical-device signaling and media must pass
 in both supported device directions, including the RTPengine path.
 
-The current commercial slice adds deterministic consultation and
+The current public release adds deterministic consultation and
 music-on-hold contracts, recovery of the original dialog after failed
 consultation or transfer, live unattended REFER/NOTIFY relay, attended Replaces
 translation, and forwarding policy. The new live flows have paired internal

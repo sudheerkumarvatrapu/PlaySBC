@@ -99,7 +99,7 @@ Start Docker, discover the Mac LAN address, and create the dedicated cluster onc
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
 
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 export REAL_DEVICE_CLUSTER=playsbc-real-device
 export REAL_DEVICE_CONTEXT=kind-playsbc-real-device
 export LAN_IF=$(route -n get default | awk '/interface:/{print $2; exit}')
@@ -212,7 +212,7 @@ kind delete cluster --name "$REAL_DEVICE_CLUSTER"
 
 ## Commercial Source Build, Package, And SBC Upgrade
 
-Use this workflow to deploy the current private `main` branch to the existing
+Use this workflow to deploy the current public `main` branch to the existing
 `kind-playsbc` lab. It creates only local development artifacts: it does not
 publish a container image, chart, tag, or commercial release. The commit SHA
 identifies the PlaySBC image until the `v6.0.0` release gate is complete.
@@ -313,7 +313,7 @@ helm upgrade --install playsbc "$PLAYSBC_CHART" \
   --set image.pullPolicy=IfNotPresent \
   --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=2.6.0 \
+  --set-string rtpengine.image.tag=3.0.0 \
   --set rtpengine.image.pullPolicy=IfNotPresent \
   --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
@@ -367,8 +367,8 @@ timeout/interruption fallback, consultation hold, and consultation failure/race
 recovery directly from the checked-out source:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
-python3 tools/run_commercial_foundation_regression.py
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_public_foundation_regression.py
 ```
 
 ### Run Only The RFC 5359 Kubernetes Profiles
@@ -378,7 +378,7 @@ only the regression runner and SIPp helper images, then run the live business
 calling profiles through both the internal and RTPengine service paths:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
 python3 tools/run_k8s_regression_job.py \
   --profile rfc5359-call-hold-resume \
   --profile rfc5359-call-hold-resume-rtpengine \
@@ -446,7 +446,7 @@ Run from the repository on the Mac. This is the single maintained release-image 
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
 
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 
 kubectl config use-context kind-playsbc
 kubectl config set-context --current --namespace=playsbc

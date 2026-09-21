@@ -73,7 +73,7 @@ python3 tools/run_k8s_regression_job.py \
 Run all eight fast commercial foundation profiles before cluster regression:
 
 ```bash
-python3 tools/run_commercial_foundation_regression.py
+python3 tools/run_public_foundation_regression.py
 ```
 
 The command validates:

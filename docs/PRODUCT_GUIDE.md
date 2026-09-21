@@ -1,4 +1,4 @@
-# PlaySBC v2.6.0 Product Guide
+# PlaySBC v3.0.0 Product Guide
 
 Deployment, build, upgrade, regression, observability, and troubleshooting.
 
@@ -6,7 +6,7 @@ Deployment, build, upgrade, regression, observability, and troubleshooting.
 
 | Track | Repository | Artifact identity |
 | --- | --- | --- |
-| Public release | `PlaySBC` | Published `2.6.0` images and chart |
+| Public release | `PlaySBC` | Published `3.0.0` images and chart |
 | Public source | `PlaySBC` | Local commit SHA |
 | Private commercial | `PlaySBC-Commercial` | `playsbc-commercial-dev:<commit>` |
 
@@ -31,11 +31,11 @@ kubectl --context "$KUBE_CONTEXT" create namespace playsbc --dry-run=client -o y
   | kubectl --context "$KUBE_CONTEXT" apply -f -
 ```
 
-# Public v2.6.0 Release Upgrade
+# Public v3.0.0 Release Upgrade
 
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
-export PLAYSBC_VERSION=2.6.0
+export PLAYSBC_VERSION=3.0.0
 export KUBE_CONTEXT=kind-playsbc
 helm upgrade --install playsbc \
   "https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v${PLAYSBC_VERSION}/playsbc-${PLAYSBC_VERSION}.tgz" \
@@ -101,7 +101,7 @@ helm upgrade --install playsbc "$PLAYSBC_CHART" --kube-context kind-playsbc \
   --set image.repository="$PLAYSBC_REPOSITORY" --set-string image.tag="$SOURCE_TAG" \
   --set image.pullPolicy=IfNotPresent --set rtpengine.enabled=true \
   --set rtpengine.image.repository=ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine \
-  --set-string rtpengine.image.tag=2.6.0 --set rtpengine.hostNetwork=false \
+  --set-string rtpengine.image.tag=3.0.0 --set rtpengine.hostNetwork=false \
   --set playsbc.config.media_backend=rtpengine \
   --set-string playsbc.config.rtpengine_url=udp://playsbc-playsbc-rtpengine:2223 \
   --set observability.enabled=true
@@ -131,10 +131,10 @@ The paired internal/RTPengine profile catalog and compulsory A/B/C roles are
 defined in `docs/RFC5359_REGRESSION_PLAN.md`.
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
-python3 tools/run_commercial_foundation_regression.py
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
+python3 tools/run_public_foundation_regression.py
 
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
 python3 tools/run_k8s_regression_job.py \
   --profile rfc5359-call-hold-resume \
   --profile rfc5359-call-hold-resume-rtpengine \
@@ -198,6 +198,6 @@ kubectl --context kind-playsbc -n playsbc get pods -o wide
 # Detailed Runbooks
 
 These remain standalone and are not embedded in either generated guide:
-`AZURE_AKS.md`, `KUBERNETES_HELM_RUNBOOK.md`, `KUBERNETES_LOCAL.md`,
+`AKS.md`, `KUBERNETES_HELM_RUNBOOK.md`, `KUBERNETES_LOCAL.md`,
 `REAL_DEVICE_LAB.md`, `RTPENGINE_LOCAL.md`, `OBSERVABILITY.md`,
 `AI_VOICE_GATEWAY.md`, `BUSINESS_CALLING_SERVICES.md`, and `EVOLUTION_PLAN.md`.

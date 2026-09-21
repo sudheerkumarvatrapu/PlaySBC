@@ -1,10 +1,10 @@
-name: Rebuild public v2.6.0 container images
+name: Rebuild public v3.0.0 container images
 
 on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: Public MIT rebuild version; only 2.6.0 is permitted
+        description: Public MIT rebuild version; only 3.0.0 is permitted
         required: true
         type: string
 
@@ -21,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Reject non-v2.6.0 publication
+      - name: Reject non-v3.0.0 publication
         id: policy
         env:
           REQUESTED_VERSION: ${{ inputs.version_tag }}
@@ -30,12 +30,12 @@ jobs:
           set -euo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
           requested="${REQUESTED_VERSION#v}"
-          test "$version" = "2.6.0"
-          test "$requested" = "2.6.0"
-          test "$(awk '$1 == "version:" {print $2; exit}' charts/playsbc/Chart.yaml)" = "2.6.0"
-          test "$(awk '$1 == "appVersion:" {gsub(/\"/, "", $2); print $2; exit}' charts/playsbc/Chart.yaml)" = "2.6.0"
+          test "$version" = "3.0.0"
+          test "$requested" = "3.0.0"
+          test "$(awk '$1 == "version:" {print $2; exit}' charts/playsbc/Chart.yaml)" = "3.0.0"
+          test "$(awk '$1 == "appVersion:" {gsub(/\"/, "", $2); print $2; exit}' charts/playsbc/Chart.yaml)" = "3.0.0"
           grep -q '^MIT License$' LICENSE
-          echo "version=2.6.0" >> "$GITHUB_OUTPUT"
+          echo "version=3.0.0" >> "$GITHUB_OUTPUT"
 
   publish:
     name: Rebuild public ${{ matrix.image }}

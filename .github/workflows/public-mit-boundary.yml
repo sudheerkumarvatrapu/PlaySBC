@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   verify:
-    name: Keep public repository on v2.6.0
+    name: Keep public repository on v3.0.0
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -19,9 +19,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(tr -d '[:space:]' < VERSION)" = "2.6.0"
-          test "$(awk '$1 == "version:" {print $2; exit}' charts/playsbc/Chart.yaml)" = "2.6.0"
-          test "$(awk '$1 == "appVersion:" {gsub(/\"/, "", $2); print $2; exit}' charts/playsbc/Chart.yaml)" = "2.6.0"
+          test "$(tr -d '[:space:]' < VERSION)" = "3.0.0"
+          test "$(awk '$1 == "version:" {print $2; exit}' charts/playsbc/Chart.yaml)" = "3.0.0"
+          test "$(awk '$1 == "appVersion:" {gsub(/\"/, "", $2); print $2; exit}' charts/playsbc/Chart.yaml)" = "3.0.0"
           grep -q '^MIT License$' LICENSE
           test ! -f LICENSE-MIT
           test ! -f PROVENANCE.md

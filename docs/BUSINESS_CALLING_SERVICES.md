@@ -1,6 +1,6 @@
 # RFC 5359 Business Calling Services
 
-This guide describes the private pre-v6 PlaySBC implementation of the
+This guide describes the public v3.0.0 PlaySBC implementation of the
 network-side business calling services illustrated by RFC 5359. RFC 5359 is a
 Best Current Practice with example SIP call flows; it is not a protocol
 conformance certificate. A real deployment also depends on each phone or
@@ -126,7 +126,7 @@ Build and upgrade the private source first with the canonical
 Then, in the same terminal, run only the live RFC 5359 profiles:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/playsbc-commercial-pycache \
+PYTHONPYCACHEPREFIX=/private/tmp/playsbc-public-pycache \
 python3 tools/run_k8s_regression_job.py \
   --profile rfc5359-call-hold-resume \
   --profile rfc5359-call-hold-resume-rtpengine \
