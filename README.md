@@ -1,3 +1,4 @@
+
 <p align="center">
   <br>
   <img src="docs/assets/playsbc-logo-corporate-mediaflow.png?raw=1" alt="PlaySBC logo" width="520">
@@ -119,3 +120,13 @@ kubectl delete namespace playsbc
 ## Contributor
 
 [Sudheer Kumar Vatrapu](https://github.com/sudheerkumarvatrapu)
+
+---
+
+## Part of the PlayFabric Platform
+
+<p align="center">
+  <img src="docs/assets/playfabric-banner.png"
+       alt="PlayFabric - Building the Next Generation of Communications"
+       width="100%">
+</p>
