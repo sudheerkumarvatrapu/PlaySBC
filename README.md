@@ -1,7 +1,7 @@
-
 <p align="center">
-  <br>
-  <img src="docs/assets/playsbc-logo-corporate-mediaflow.png?raw=1" alt="PlaySBC logo" width="520">
+  <img src="docs/assets/playsbc-logo.png"
+       alt="PlaySBC - Enterprise Session Border Controller"
+       width="100%">
 </p>
 
 <p align="center"><strong>A serious SBC lab where SIP, RTP, and AI voice learn to behave before real calls do.</strong></p>
