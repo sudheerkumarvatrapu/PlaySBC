@@ -7,7 +7,7 @@ PlaySBC is an enterprise-style SIP/RTP and AI voice lab. It is not yet a product
 This document is ordered by dependency, not by feature visibility:
 
 1. Preserve the public `v2.6.0` regression and evidence baseline.
-2. Maintain the public `v3.0.0` 78-profile release gate.
+2. Maintain the public `v4.0.0` 78-profile release gate.
 3. Complete the production SBC protocol core; every higher-level service depends on it.
 4. Complete all network-side RFC 5359 business calling services with three-endpoint, RTPengine, AKS, and real-device evidence.
 5. Complete the production AI Voice Gateway on the proven signaling/media core.
@@ -34,7 +34,7 @@ transaction-layer implementation or a SIP conformance claim.
 
 ### v2.6.0 Regression And Evidence Gate
 
-- The v3.0.0 catalog contains 78 full-regression profiles, and the launcher reports live `X/78` progress for a complete run. Three smoke profiles remain a separate per-build gate.
+- The v4.0.0 catalog contains 78 full-regression profiles, and the launcher reports live `X/78` progress for a complete run. Three smoke profiles remain a separate per-build gate.
 - `evidence-b2bua-two-leg-pcap` requires core and peer packet sources plus two distinct B2BUA INVITE Call-IDs.
 - Long local macOS runs use a scoped `caffeinate` process to prevent host sleep from creating false SIPp timeouts.
 - Missing or empty expected capture roles fail evidence collection before split captures are removed.
@@ -47,19 +47,19 @@ The public `v2.6.0` tag (`3c8e8072...`) and public maintenance head
 results, not blanket protocol certification or a measured production capacity
 claim.
 
-## 2. Current Public Release Gate: v3.0.0
+## 2. Current Public Release Gate: v4.0.0
 
-The public `v3.0.0` release carries the runtime, chart, operator configuration,
+The public `v4.0.0` release carries the runtime, chart, operator configuration,
 evidence viewer, and all 78 full-regression profiles under the MIT license.
 The release gate requires matching `VERSION`, chart, image, guide, and release
 metadata plus focused unit, Helm, evidence, and profile-catalog validation.
 Private governance, credentials, generated evidence, and customer-specific
 material remain outside the public repository.
 
-## 3. Current Public v3.0.0 Foundations
+## 3. Current Public v4.0.0 Foundations
 
 Public `main` now contains the source foundations for the two active product
-tracks. These changes build on the v2.6.0 base and are part of v3.0.0; they are
+tracks. These changes build on the v2.6.0 base and are part of v4.0.0; they are
 not a claim of production certification.
 
 | Track | Implemented now | Regression evidence | Still gated |

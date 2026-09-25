@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="Layer5 multiple contacts">
+  <send retrans="500"><![CDATA[
+REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: <sip:[service]@[remote_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 REGISTER
+Contact: <sip:[service]@[local_ip]:[local_port]>;q=0.2, <sip:[service]@[local_ip]:[contact_port]>;q=0.9
+Expires: 300
+Content-Length: 0
+
+]]></send>
+  <recv response="200"/>
+</scenario>

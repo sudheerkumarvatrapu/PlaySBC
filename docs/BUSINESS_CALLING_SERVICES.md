@@ -1,6 +1,6 @@
 # RFC 5359 Business Calling Services
 
-This guide describes the public PlaySBC v3.0.0 implementation of the
+This guide describes the private pre-v6 PlaySBC implementation of the
 network-side business calling services illustrated by RFC 5359. RFC 5359 is a
 Best Current Practice with example SIP call flows; it is not a protocol
 conformance certificate. A real deployment also depends on each phone or

@@ -5,7 +5,7 @@
   <send retrans="500" start_rtd="register">
     <![CDATA[
       REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];alias
       From: <sip:[service]@[remote_ip]>;tag=[call_number]
       To: <sip:[service]@[remote_ip]>
       Call-ID: [call_id]

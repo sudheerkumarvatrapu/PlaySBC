@@ -61,7 +61,7 @@ image:
   # For direct deployments after image publishing, use:
   # repository: ghcr.io/sudheerkumarvatrapu/playsbc
   repository: playsbc
-  tag: "3.0.0"
+  tag: "4.0.0"
   pullPolicy: IfNotPresent
 
 service:
@@ -464,6 +464,7 @@ playsbc:
     header_normalization: {}
     transport_policies: []
     call_admission: {}
+    overload: {}
     business_services:
       transfer:
         enabled: true
@@ -475,6 +476,21 @@ playsbc:
       find_me:
         max_targets: 8
         rules: []
+    sip_stream:
+      idle_timeout: 120.0
+      max_connections: 1024
+    sip_transactions:
+      t1: 0.5
+      t2: 4.0
+      t4: 5.0
+      timer_c: 180.0
+    server_location:
+      enabled: true
+      naptr: true
+      srv: true
+      cache_ttl: 60.0
+      negative_ttl: 5.0
+      max_targets: 8
     b2bua_ladder_logs: true
     b2bua_invite_timeout: 10.0
     media_backend: internal
@@ -494,6 +510,9 @@ playsbc:
     rtpengine_pierce_nat: false
     rtpengine_sdes: []
     rtpengine_dtls: ""
+    tls_server_names: []
+    tls_require_sni: false
+    tls_reload_interval: 30.0
     media_quality: {}
     ha:
       enabled: false

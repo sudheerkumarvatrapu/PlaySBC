@@ -36,7 +36,7 @@ import time
 from urllib.parse import quote
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from ai_gateway import AiTurnResult, AiVoiceConfig, AiVoiceGateway, BotAction
 from ai_gateway.speech import decode_rtp_pcap_to_wav
@@ -54,8 +54,22 @@ from sip.business_services import (
     TransferState,
     parse_refer_to,
 )
-from sip.dialog import CallState, DialogError, DialogManager, SipDialog
-from sip.transaction import TransactionManager
+from sip.dialog import CallState, DialogError, DialogManager, SipDialog, extract_branch, in_dialog_route, parse_session_expires, split_header_values
+from sip.transaction import MergedRequestError, TransactionManager, extract_via_sent_by
+from sip.client_transaction import ClientTransaction, ClientTransactionManager
+from sip.parser import SipParseError, SipParseLimits, parse_sip_bytes
+from sip.server_location import ServerLocator, ServerTarget
+from sip.registrar import (
+    ContactBinding,
+    DEFAULT_DIGEST_ALGORITHMS,
+    DigestNonceStore,
+    LocationService,
+    SUPPORTED_DIGEST_ALGORITHMS,
+    digest_response,
+    parse_contact_bindings,
+    privacy_filter,
+)
+from sip.overload import OverloadController
 
 try:
     import audioop  # type: ignore
@@ -64,7 +78,7 @@ except Exception:  # pragma: no cover - audioop is unavailable in newer Python b
 
 
 CRLF = "\r\n"
-PLAYSBC_VERSION = "3.0.0"
+PLAYSBC_VERSION = "4.0.0"
 PCMU = 0
 PCMA = 8
 SUPPORTED_CODECS = (PCMU, PCMA)
@@ -122,6 +136,12 @@ class ServerConfig:
     transport_policies: Tuple[Dict[str, Any], ...] = field(default_factory=tuple)
     call_admission: Dict[str, Any] = field(default_factory=dict)
     business_services: Dict[str, Any] = field(default_factory=dict)
+    sip_parser: Dict[str, Any] = field(default_factory=dict)
+    sip_stream: Dict[str, Any] = field(default_factory=dict)
+    sip_transactions: Dict[str, Any] = field(default_factory=dict)
+    server_location: Dict[str, Any] = field(default_factory=dict)
+    registrar: Dict[str, Any] = field(default_factory=dict)
+    overload: Dict[str, Any] = field(default_factory=dict)
     b2bua_ladder_logs: bool = True
     b2bua_invite_timeout: float = 10.0
     media_backend: str = "internal"
@@ -149,6 +169,9 @@ class ServerConfig:
     tls_keyfile: str = ""
     tls_cafile: str = ""
     tls_verify_peer: bool = False
+    tls_server_names: Tuple[str, ...] = field(default_factory=tuple)
+    tls_require_sni: bool = False
+    tls_reload_interval: float = 30.0
     health_ip: str = "0.0.0.0"
     health_port: int = 8080
     users_file: str = ""
@@ -182,6 +205,12 @@ SERVER_CONFIG_KEYS = {
     "transport_policies",
     "call_admission",
     "business_services",
+    "sip_parser",
+    "sip_stream",
+    "sip_transactions",
+    "server_location",
+    "registrar",
+    "overload",
     "b2bua_ladder_logs",
     "b2bua_invite_timeout",
     "media_backend",
@@ -209,6 +238,9 @@ SERVER_CONFIG_KEYS = {
     "tls_keyfile",
     "tls_cafile",
     "tls_verify_peer",
+    "tls_server_names",
+    "tls_require_sni",
+    "tls_reload_interval",
     "health_ip",
     "health_port",
     "users_file",
@@ -246,6 +278,7 @@ class SipMessage:
     source: Tuple[str, int]
     transport: str = "udp"
     connection: Any = None
+    body_bytes: bytes = b""
 
     @property
     def method(self) -> str:
@@ -312,6 +345,11 @@ class Registration:
     source: Tuple[str, int]
     expires_at: float
     registered_at: float = field(default_factory=time.time)
+    q: float = 1.0
+    path: Tuple[str, ...] = ()
+    instance_id: str = ""
+    reg_id: str = ""
+    flow_token: str = ""
 
     def is_expired(self, now: Optional[float] = None) -> bool:
         timestamp = time.time() if now is None else now
@@ -351,11 +389,37 @@ def response_via_header(via_header: str, source: Tuple[str, int]) -> str:
     if not via_header:
         return via_header
     via = via_header
-    if "received=" not in via.lower():
+    sent_by = via_sent_by(via_header)
+    if sent_by and sent_by[0].strip("[]").lower() != source[0].strip("[]").lower() and "received=" not in via.lower():
         via += f";received={source[0]}"
     if re.search(r"(?i)(^|;)rport($|;)", via):
         via = re.sub(r"(?i)(^|;)rport($|;)", rf"\1rport={source[1]}\2", via, count=1)
     return via
+
+
+def via_sent_by(via_header: str) -> Optional[Tuple[str, int]]:
+    match = re.match(
+        r"(?i)^\s*SIP/2\.0/[A-Z]+\s+(\[[^]]+\]|[^\s:;]+)(?::(\d+))?",
+        via_header or "",
+    )
+    if not match:
+        return None
+    port = int(match.group(2) or 5060)
+    return match.group(1).strip("[]"), port
+
+
+def response_destination(request: SipMessage) -> Tuple[str, int]:
+    """Return the RFC 3581 response target for the top Via hop."""
+    if request.transport in {"tcp", "tls"}:
+        return request.source
+    via = request.header("via")
+    if re.search(r"(?i)(?:^|;)\s*rport(?:=\d+)?(?:;|$)", via):
+        return request.source
+    sent_by = via_sent_by(via)
+    if not sent_by:
+        return request.source
+    host = request.source[0] if sent_by[0].lower() != request.source[0].lower() else sent_by[0]
+    return host, sent_by[1]
 
 
 @dataclass
@@ -390,6 +454,7 @@ class RouteResult:
     trunk_name: str = ""
     group_name: str = ""
     destination: Optional[Tuple[str, int]] = None
+    route_set: Tuple[str, ...] = ()
 
 
 def infer_realm_label(*values: object, default: str = "peer") -> str:
@@ -589,6 +654,7 @@ class RoutingEngine:
                         original_user,
                         user,
                         destination=registration_received_destination(registration),
+                        route_set=registration.path,
                     )
                 continue
 
@@ -727,6 +793,7 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_admission_rejections_total": ("counter", "Total calls rejected by call admission control."),
     "playsbc_sip_requests_total": ("counter", "Total SIP requests observed by PlaySBC."),
     "playsbc_sip_responses_total": ("counter", "Total SIP responses observed by PlaySBC."),
+    "playsbc_client_transactions_total": ("counter", "Total outbound SIP client transaction events."),
     "playsbc_b2bua_calls_total": ("counter", "Total B2BUA calls attempted by PlaySBC."),
     "playsbc_b2bua_calls_answered_total": ("counter", "Total B2BUA calls answered by PlaySBC."),
     "playsbc_b2bua_calls_completed_total": ("counter", "Total B2BUA calls completed by PlaySBC."),
@@ -738,6 +805,7 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_media_negotiations_total": ("counter", "Total answered calls with negotiated media codecs."),
     "playsbc_transcoding_sessions_total": ("counter", "Total answered calls where PlaySBC negotiated different inbound and outbound audio codecs."),
     "playsbc_registrations_total": ("counter", "Total successful SIP registrations accepted by PlaySBC."),
+    "playsbc_overload_decisions_total": ("counter", "SIP overload admission decisions by outcome and dimension."),
     "playsbc_trunk_healthy": ("gauge", "Trunk health state, 1 for healthy and 0 for unhealthy."),
     "playsbc_trunk_active_calls": ("gauge", "Current active calls on a trunk."),
     "playsbc_trunk_attempts_total": ("counter", "Total attempted calls on a trunk."),
@@ -750,6 +818,9 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_stream_connects_total": ("counter", "Total outbound SIP stream connection attempts."),
     "playsbc_stream_reuses_total": ("counter", "Total outbound SIP stream connection reuses."),
     "playsbc_stream_failures_total": ("counter", "Total outbound SIP stream connection failures."),
+    "playsbc_stream_connections_active": ("gauge", "Current accepted SIP TCP/TLS connections."),
+    "playsbc_stream_connections_rejected_total": ("counter", "Total SIP TCP/TLS connections rejected by the pool limit."),
+    "playsbc_stream_idle_timeouts_total": ("counter", "Total idle SIP TCP/TLS connections closed."),
     "playsbc_ha_enabled": ("gauge", "Whether HA shared state is enabled."),
     "playsbc_ha_configured_nodes": ("gauge", "Number of configured HA nodes."),
     "playsbc_ha_node_draining": ("gauge", "Whether this PlaySBC node is draining new calls."),
@@ -913,6 +984,7 @@ class SharedStateStore:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA busy_timeout=2000")
+        self.owned_dialog_epochs: Dict[str, int] = {}
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -927,6 +999,21 @@ class SharedStateStore:
                 registered_at REAL NOT NULL,
                 owner_node TEXT NOT NULL,
                 updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS registration_bindings (
+                user TEXT NOT NULL,
+                contact_uri TEXT NOT NULL,
+                source_host TEXT NOT NULL,
+                source_port INTEGER NOT NULL,
+                expires_at REAL NOT NULL,
+                q REAL NOT NULL,
+                path_json TEXT NOT NULL,
+                instance_id TEXT NOT NULL,
+                reg_id TEXT NOT NULL,
+                flow_token TEXT NOT NULL,
+                owner_node TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (user, contact_uri)
             );
             CREATE TABLE IF NOT EXISTS dialogs (
                 call_id TEXT PRIMARY KEY,
@@ -943,6 +1030,12 @@ class SharedStateStore:
                 terminated_at REAL,
                 owner_node TEXT NOT NULL,
                 updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dialog_ownership (
+                call_id TEXT PRIMARY KEY,
+                owner_node TEXT NOT NULL,
+                epoch INTEGER NOT NULL,
+                expires_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS b2bua_calls (
                 inbound_call_id TEXT PRIMARY KEY,
@@ -965,6 +1058,15 @@ class SharedStateStore:
             );
             """
         )
+        for table, column in (("dialogs", "dialog_state_json"), ("b2bua_calls", "leg_state_json")):
+            existing = {str(row["name"]) for row in self.connection.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                try:
+                    self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT '{{}}'")
+                except sqlite3.OperationalError as exc:
+                    # Another active node may have completed the migration.
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
 
     def load_registrations(self, now: Optional[float] = None) -> Dict[str, Registration]:
         timestamp = time.time() if now is None else now
@@ -999,6 +1101,7 @@ class SharedStateStore:
                 registered_at=excluded.registered_at,
                 owner_node=excluded.owner_node,
                 updated_at=excluded.updated_at
+            WHERE excluded.registered_at >= registrations.registered_at
             """,
             (
                 registration.user,
@@ -1015,18 +1118,56 @@ class SharedStateStore:
             "HA REGISTRATION SYNC",
             f"node={self.node_id} user={registration.user} contact={registration.contact_uri}",
         )
+        self.save_registration_binding(ContactBinding(
+            registration.user, registration.contact_uri, registration.source,
+            registration.expires_at, registration.q, registration.path,
+            registration.instance_id, registration.reg_id, registration.flow_token,
+        ))
+
+    def load_registration_bindings(self, now: Optional[float] = None) -> Tuple[ContactBinding, ...]:
+        timestamp = time.time() if now is None else now
+        rows = self.connection.execute("SELECT * FROM registration_bindings WHERE expires_at > ?", (timestamp,)).fetchall()
+        return tuple(
+            ContactBinding(
+                str(row["user"]), str(row["contact_uri"]),
+                (str(row["source_host"]), int(row["source_port"])), float(row["expires_at"]),
+                float(row["q"]), tuple(json.loads(str(row["path_json"]))),
+                str(row["instance_id"]), str(row["reg_id"]), str(row["flow_token"]),
+            )
+            for row in rows
+        )
+
+    def save_registration_binding(self, binding: ContactBinding) -> None:
+        self.connection.execute(
+            """INSERT INTO registration_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user, contact_uri) DO UPDATE SET source_host=excluded.source_host,
+            source_port=excluded.source_port, expires_at=excluded.expires_at, q=excluded.q,
+            path_json=excluded.path_json, instance_id=excluded.instance_id, reg_id=excluded.reg_id,
+            flow_token=excluded.flow_token, owner_node=excluded.owner_node, updated_at=excluded.updated_at""",
+            (binding.aor, binding.contact_uri, binding.source[0], binding.source[1], binding.expires_at,
+             binding.q, json.dumps(binding.path), binding.instance_id, binding.reg_id, binding.flow_token,
+             self.node_id, time.time()),
+        )
+
+    def delete_registration_binding(self, user: str, contact_uri: str = "") -> None:
+        if contact_uri:
+            self.connection.execute("DELETE FROM registration_bindings WHERE user = ? AND contact_uri = ?", (user, contact_uri))
+        else:
+            self.connection.execute("DELETE FROM registration_bindings WHERE user = ?", (user,))
 
     def delete_registration(self, user: str) -> None:
         self.connection.execute("DELETE FROM registrations WHERE user = ?", (user,))
+        self.delete_registration_binding(user)
         self.logger.platform("HA REGISTRATION DELETE", f"node={self.node_id} user={user}")
 
     def delete_expired_registrations(self, now: Optional[float] = None) -> int:
         timestamp = time.time() if now is None else now
         cursor = self.connection.execute("DELETE FROM registrations WHERE expires_at <= ?", (timestamp,))
+        self.connection.execute("DELETE FROM registration_bindings WHERE expires_at <= ?", (timestamp,))
         return int(cursor.rowcount or 0)
 
     def counts(self) -> Dict[str, int]:
-        registrations = self.connection.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
+        registrations = self.connection.execute("SELECT COUNT(*) FROM registration_bindings").fetchone()[0]
         dialogs = self.connection.execute("SELECT COUNT(*) FROM dialogs").fetchone()[0]
         answered_dialogs = self.connection.execute("SELECT COUNT(*) FROM dialogs WHERE state = 'ANSWERED'").fetchone()[0]
         b2bua_calls = self.connection.execute("SELECT COUNT(*) FROM b2bua_calls").fetchone()[0]
@@ -1038,17 +1179,77 @@ class SharedStateStore:
         }
 
     def dialog_owner(self, call_id: str) -> str:
-        row = self.connection.execute("SELECT owner_node FROM dialogs WHERE call_id = ?", (call_id,)).fetchone()
+        row = self.connection.execute("SELECT owner_node FROM dialog_ownership WHERE call_id = ?", (call_id,)).fetchone()
         return str(row["owner_node"]) if row else ""
 
+    def claim_dialog(self, call_id: str, *, takeover: bool = False, lease_seconds: float = 60.0) -> int:
+        now = time.time()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT owner_node, epoch, expires_at FROM dialog_ownership WHERE call_id = ?", (call_id,)
+            ).fetchone()
+            if row is None:
+                epoch = 1
+                self.connection.execute(
+                    "INSERT INTO dialog_ownership VALUES (?, ?, ?, ?)",
+                    (call_id, self.node_id, epoch, now + lease_seconds),
+                )
+            elif row["owner_node"] == self.node_id and self.owned_dialog_epochs.get(call_id) == int(row["epoch"]):
+                epoch = int(row["epoch"])
+                self.connection.execute(
+                    "UPDATE dialog_ownership SET expires_at = ? WHERE call_id = ?",
+                    (now + lease_seconds, call_id),
+                )
+            elif takeover or float(row["expires_at"]) <= now:
+                epoch = int(row["epoch"]) + 1
+                self.connection.execute(
+                    "UPDATE dialog_ownership SET owner_node = ?, epoch = ?, expires_at = ? WHERE call_id = ?",
+                    (self.node_id, epoch, now + lease_seconds, call_id),
+                )
+            else:
+                raise DialogError(f"Dialog {call_id} is fenced by ownership epoch {row['epoch']}")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        self.owned_dialog_epochs[call_id] = epoch
+        return epoch
+
+    def owns_dialog(self, call_id: str) -> bool:
+        expected = self.owned_dialog_epochs.get(call_id)
+        if expected is None:
+            return False
+        row = self.connection.execute(
+            "SELECT owner_node, epoch, expires_at FROM dialog_ownership WHERE call_id = ?", (call_id,)
+        ).fetchone()
+        if not row or row["owner_node"] != self.node_id or int(row["epoch"]) != expected:
+            return False
+        if float(row["expires_at"]) <= time.time() + 5.0:
+            updated = self.connection.execute(
+                "UPDATE dialog_ownership SET expires_at = ? WHERE call_id = ? AND owner_node = ? AND epoch = ?",
+                (time.time() + 60.0, call_id, self.node_id, expected),
+            )
+            return updated.rowcount == 1
+        return True
+
     def save_dialog(self, dialog: SipDialog) -> None:
+        self.claim_dialog(dialog.call_id)
+        state_json = json.dumps({
+            "route_set": dialog.route_set,
+            "remote_target": dialog.remote_target,
+            "session_interval": dialog.session_interval,
+            "session_refresher": dialog.session_refresher,
+            "session_expires_at": dialog.session_expires_at,
+            "reliable_provisionals": dialog.reliable_provisionals,
+        })
         self.connection.execute(
             """
             INSERT INTO dialogs (
                 call_id, local_tag, remote_tag, invite_branch, remote_cseq, local_cseq, state,
-                created_at, ringing_at, answered_at, acknowledged_at, terminated_at, owner_node, updated_at
+                created_at, ringing_at, answered_at, acknowledged_at, terminated_at, owner_node, updated_at, dialog_state_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(call_id) DO UPDATE SET
                 local_tag=excluded.local_tag,
                 remote_tag=excluded.remote_tag,
@@ -1061,7 +1262,8 @@ class SharedStateStore:
                 acknowledged_at=excluded.acknowledged_at,
                 terminated_at=excluded.terminated_at,
                 owner_node=excluded.owner_node,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                dialog_state_json=excluded.dialog_state_json
             """,
             (
                 dialog.call_id,
@@ -1078,6 +1280,7 @@ class SharedStateStore:
                 dialog.terminated_at,
                 self.node_id,
                 time.time(),
+                state_json,
             ),
         )
         self.logger.platform(
@@ -1093,6 +1296,7 @@ class SharedStateStore:
             state = CallState[str(row["state"])]
         except KeyError:
             state = CallState.INIT
+        state_data = json.loads(str(row["dialog_state_json"] or "{}"))
         return SipDialog(
             call_id=str(row["call_id"]),
             local_tag=str(row["local_tag"]),
@@ -1106,18 +1310,36 @@ class SharedStateStore:
             answered_at=float(row["answered_at"]) if row["answered_at"] is not None else None,
             acknowledged_at=float(row["acknowledged_at"]) if row["acknowledged_at"] is not None else None,
             terminated_at=float(row["terminated_at"]) if row["terminated_at"] is not None else None,
+            route_set=tuple(state_data.get("route_set", ())),
+            remote_target=str(state_data.get("remote_target", "")),
+            session_interval=int(state_data.get("session_interval", 0)),
+            session_refresher=str(state_data.get("session_refresher", "")),
+            session_expires_at=state_data.get("session_expires_at"),
+            reliable_provisionals={int(key): tuple(value) for key, value in state_data.get("reliable_provisionals", {}).items()},
         )
 
     def save_b2bua_call(self, call: "B2BUACall") -> None:
+        self.claim_dialog(call.inbound_call_id)
+        leg_state_json = json.dumps({
+            "outbound_route_set": call.outbound_route_set,
+            "inbound_route_set": call.inbound_route_set,
+            "inbound_from_header": call.inbound_from_header,
+            "inbound_to_header": call.inbound_to_header,
+            "inbound_contact_uri": call.inbound_contact_uri,
+            "inbound_destination": call.inbound_destination,
+            "inbound_cseq": call.inbound_cseq,
+            "outbound_invite_cseq": call.outbound_invite_cseq,
+            "winning_to_tag": call.winning_to_tag,
+        })
         self.connection.execute(
             """
             INSERT INTO b2bua_calls (
                 inbound_call_id, outbound_call_id, outbound_target_uri, outbound_from_header,
                 target_user, route_policy, route_source, media_backend, rtpengine_call_id,
                 rtpengine_from_tag, rtpengine_to_tag, outbound_to_header, outbound_contact_uri,
-                outbound_invite_via_header, outbound_cseq, owner_node, updated_at
+                outbound_invite_via_header, outbound_cseq, owner_node, updated_at, leg_state_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(inbound_call_id) DO UPDATE SET
                 outbound_call_id=excluded.outbound_call_id,
                 outbound_target_uri=excluded.outbound_target_uri,
@@ -1134,7 +1356,8 @@ class SharedStateStore:
                 outbound_invite_via_header=excluded.outbound_invite_via_header,
                 outbound_cseq=excluded.outbound_cseq,
                 owner_node=excluded.owner_node,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                leg_state_json=excluded.leg_state_json
             """,
             (
                 call.inbound_call_id,
@@ -1154,6 +1377,7 @@ class SharedStateStore:
                 call.outbound_cseq,
                 self.node_id,
                 time.time(),
+                leg_state_json,
             ),
         )
         self.logger.platform(
@@ -1171,6 +1395,8 @@ class SharedStateStore:
         ).fetchone()
 
     def delete_b2bua_call(self, inbound_call_id: str) -> None:
+        if not self.owns_dialog(inbound_call_id):
+            return
         self.connection.execute("DELETE FROM b2bua_calls WHERE inbound_call_id = ?", (inbound_call_id,))
         self.logger.platform("HA B2BUA CALL DELETE", f"node={self.node_id} inbound_call_id={inbound_call_id}")
 
@@ -1455,6 +1681,12 @@ class AIVoiceFlowLog:
                 row[position] = character
 
 
+class OutboundInviteTransactionFailure(asyncio.TimeoutError):
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason = reason
+
+
 @dataclass
 class B2BUACall:
     inbound_call_id: str
@@ -1473,22 +1705,37 @@ class B2BUACall:
     rtpengine_to_tag: str = ""
     outbound_to_header: str = ""
     outbound_contact_uri: str = ""
+    outbound_route_set: Tuple[str, ...] = ()
     outbound_invite_via_header: str = ""
+    outbound_invite_request_uri: str = ""
     outbound_cseq: int = 1
+    outbound_invite_cseq: int = 1
     outbound_bye_sent: bool = False
     outbound_cancel_sent: bool = False
+    outbound_final_status: int = 0
     inbound_from_header: str = ""
+    inbound_invite_via_header: str = ""
     inbound_to_header: str = ""
     inbound_contact_uri: str = ""
+    inbound_route_set: Tuple[str, ...] = ()
     inbound_destination: Optional[Tuple[str, int]] = None
     inbound_cseq: int = 1
     inbound_answer_sdp: str = ""
     local_reinvite_cseqs: set[int] = field(default_factory=set)
     reinvite_pending: bool = False
+    reliable_rseq: int = 0
+    reliable_invite_cseq: int = 0
+    pending_prack: Optional[SipMessage] = None
+    pending_update: Optional[SipMessage] = None
+    pending_update_queue: Optional[asyncio.Queue] = None
+    update_retry_count: int = 0
+    winning_to_tag: str = ""
+    losing_forks: set[str] = field(default_factory=set)
     inbound_bye_sent: bool = False
     transfer: Optional[CallTransfer] = None
     transfer_origin_inbound: bool = True
     finalized: bool = False
+    identity_headers: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -2066,20 +2313,32 @@ class MediaServer:
 
 
 class SipTcpConnectionProtocol(asyncio.Protocol):
-    def __init__(self, server: "SipServerProtocol", transport_name: str = "tcp"):
+    def __init__(self, server: "SipServerProtocol", transport_name: str = "tcp", outbound: bool = False):
         self.server = server
         self.transport_name = normalize_sip_transport(transport_name)
         self.transport: Optional[asyncio.Transport] = None
         self.peer: Tuple[str, int] = ("0.0.0.0", 0)
         self.buffer = bytearray()
         self.closed = False
+        self.write_paused = False
+        self.outbound = outbound
+        self.reuse_authorized = outbound
+        self.idle_handle: Optional[asyncio.TimerHandle] = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
         peer = transport.get_extra_info("peername")
         if isinstance(peer, tuple) and len(peer) >= 2:
             self.peer = (str(peer[0]), int(peer[1]))
-        self.server.register_stream_connection(self.transport_name, self.peer, self)
+        set_write_buffer_limits = getattr(transport, "set_write_buffer_limits", None)
+        if callable(set_write_buffer_limits):
+            limit = getattr(self.server, "sip_parse_limits", SipParseLimits()).max_message_bytes
+            set_write_buffer_limits(high=limit, low=max(1, limit // 2))
+        if self.server.register_stream_connection(self.transport_name, self.peer, self) is False:
+            self.closed = True
+            transport.close()
+            return
+        self._refresh_idle_timeout()
         self.server.logger.write(
             self.transport_name,
             f"{self.transport_name.upper()} CONNECTED",
@@ -2087,17 +2346,92 @@ class SipTcpConnectionProtocol(asyncio.Protocol):
         )
 
     def data_received(self, data: bytes) -> None:
+        self._refresh_idle_timeout()
         self.buffer.extend(data)
         self.server.logger.write(
             self.transport_name,
             f"{self.transport_name.upper()} RX BYTES",
             f"protocol=sip source={self.peer[0]}:{self.peer[1]} bytes={len(data)}",
         )
-        for message in self._pop_complete_messages():
+        try:
+            messages = self._pop_complete_messages()
+        except SipParseError as exc:
+            self.server.logger.networking(
+                "SIP STREAM FRAME REJECTED",
+                f"transport={self.transport_name} source={self.peer[0]}:{self.peer[1]} bytes={len(self.buffer)} detail={exc}",
+            )
+            self.buffer.clear()
+            if self.transport:
+                self.transport.close()
+            return
+        for message in messages:
+            if re.search(br"(?im)^Via\s*:[^\r\n]*;\s*alias(?:=|;|\r?$)", message):
+                self.reuse_authorized = True
+                self.server.logger.write(
+                    self.transport_name,
+                    f"{self.transport_name.upper()} CONNECTION ALIAS AUTHORIZED",
+                    f"peer={self.peer[0]}:{self.peer[1]}",
+                )
             self.server.receive_sip_data(message, self.peer, transport_name=self.transport_name, connection=self)
+
+    def eof_received(self) -> bool:
+        if self.buffer:
+            self.server.logger.networking(
+                "SIP STREAM INCOMPLETE EOF",
+                f"transport={self.transport_name} source={self.peer[0]}:{self.peer[1]} bytes={len(self.buffer)}",
+            )
+            self.buffer.clear()
+        self.server.logger.networking(
+            "SIP STREAM HALF CLOSED",
+            f"transport={self.transport_name} source={self.peer[0]}:{self.peer[1]}",
+        )
+        return False
+
+    def _refresh_idle_timeout(self) -> None:
+        if self.idle_handle:
+            self.idle_handle.cancel()
+            self.idle_handle = None
+        timeout = float(getattr(self.server, "stream_idle_timeout", 0.0))
+        if timeout <= 0 or self.closed:
+            return
+        try:
+            self.idle_handle = asyncio.get_running_loop().call_later(timeout, self._idle_expired)
+        except RuntimeError:
+            pass
+
+    def _idle_expired(self) -> None:
+        self.idle_handle = None
+        if self.closed:
+            return
+        self.server.stream_idle_timeouts += 1
+        self.server.logger.networking(
+            "SIP STREAM IDLE TIMEOUT",
+            f"transport={self.transport_name} peer={self.peer[0]}:{self.peer[1]} timeout={self.server.stream_idle_timeout}",
+        )
+        self.closed = True
+        self.server.unregister_stream_connection(self.transport_name, self.peer, self)
+        if self.transport:
+            self.transport.close()
+
+    def pause_writing(self) -> None:
+        self.write_paused = True
+        self.server.logger.networking(
+            "SIP STREAM BACKPRESSURE",
+            f"transport={self.transport_name} peer={self.peer[0]}:{self.peer[1]} state=paused",
+        )
+
+    def resume_writing(self) -> None:
+        self.write_paused = False
+        self.server.logger.networking(
+            "SIP STREAM BACKPRESSURE",
+            f"transport={self.transport_name} peer={self.peer[0]}:{self.peer[1]} state=resumed",
+        )
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.closed = True
+        if self.idle_handle:
+            self.idle_handle.cancel()
+            self.idle_handle = None
         self.server.unregister_stream_connection(self.transport_name, self.peer, self)
         detail = f"protocol=sip peer={self.peer[0]}:{self.peer[1]}"
         if exc:
@@ -2108,18 +2442,26 @@ class SipTcpConnectionProtocol(asyncio.Protocol):
         if not self.transport or self.closed:
             raise ConnectionError(f"{self.transport_name.upper()} connection to {self.peer[0]}:{self.peer[1]} is closed")
         self.transport.write(packet)
+        self._refresh_idle_timeout()
 
     def _pop_complete_messages(self) -> List[bytes]:
         messages: List[bytes] = []
         separator = b"\r\n\r\n"
+        limits = getattr(self.server, "sip_parse_limits", SipParseLimits())
         while True:
             header_end = self.buffer.find(separator)
             if header_end < 0:
+                if len(self.buffer) > min(limits.max_header_bytes, limits.max_message_bytes):
+                    raise SipParseError("SIP stream header exceeds configured limit", status=513, reason="Message Too Large")
                 break
 
             header_bytes = bytes(self.buffer[:header_end])
-            content_length = tcp_content_length(header_bytes)
+            if header_end + len(separator) > limits.max_header_bytes:
+                raise SipParseError("SIP stream header exceeds configured limit", status=513, reason="Message Too Large")
+            content_length = tcp_content_length(header_bytes, strict=True)
             message_end = header_end + len(separator) + content_length
+            if message_end > limits.max_message_bytes:
+                raise SipParseError("SIP stream message exceeds configured limit", status=513, reason="Message Too Large")
             if len(self.buffer) < message_end:
                 break
 
@@ -2149,6 +2491,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         transport_policies: Tuple[Dict[str, Any], ...] = (),
         call_admission: Optional[Dict[str, Any]] = None,
         business_services: Optional[Dict[str, Any]] = None,
+        sip_parser: Optional[Dict[str, Any]] = None,
+        sip_stream: Optional[Dict[str, Any]] = None,
+        sip_transactions: Optional[Dict[str, Any]] = None,
+        server_location: Optional[Dict[str, Any]] = None,
         media_backend: str = "internal",
         rtpengine_client: Optional[RtpengineClient] = None,
         reject_unknown_routes: bool = False,
@@ -2174,6 +2520,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         ha: Optional[Dict[str, Any]] = None,
         tls_client_context: Optional[ssl.SSLContext] = None,
         tls_port: int = 5061,
+        registrar: Optional[Dict[str, Any]] = None,
+        overload: Optional[Dict[str, Any]] = None,
     ):
         self.local_ip = local_ip
         self.sip_advertised_ip = sip_advertised_ip or local_ip
@@ -2194,9 +2542,19 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.rtpengine_interfaces = frozenset(rtpengine_interfaces)
         self.reject_unknown_routes = reject_unknown_routes
         self.b2bua_invite_timeout = max(1.0, float(b2bua_invite_timeout))
-        self.nonces: Dict[str, float] = {}
+        self.registrar_config = dict(registrar or {})
+        self.digest_algorithms = tuple(
+            value for value in (str(item).upper() for item in self.registrar_config.get("digest_algorithms", DEFAULT_DIGEST_ALGORITHMS))
+            if value in SUPPORTED_DIGEST_ALGORITHMS
+        ) or DEFAULT_DIGEST_ALGORITHMS
+        self.nonce_store = DigestNonceStore(float(self.registrar_config.get("nonce_lifetime", 300)))
+        # Compatibility for callers which inspect the old nonce collection.
+        self.nonces = self.nonce_store.records
         self.transport: Optional[asyncio.DatagramTransport] = None
         self.registrations: Dict[str, Registration] = {}
+        self.location_service = LocationService(int(self.registrar_config.get("max_bindings_per_aor", 8)))
+        self.overload_config = dict(overload or {})
+        self.overload = OverloadController(self.overload_config)
         self.routing_engine = RoutingEngine(
             route_policies,
             b2bua_routes,
@@ -2208,6 +2566,23 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             call_admission,
         )
         self.business_services_config = dict(business_services or {})
+        parser_config = dict(sip_parser or {})
+        self.sip_parse_limits = SipParseLimits(
+            max_message_bytes=int(parser_config.get("max_message_bytes", 65_535)),
+            max_header_bytes=int(parser_config.get("max_header_bytes", 16_384)),
+            max_header_count=int(parser_config.get("max_header_count", 100)),
+            max_line_bytes=int(parser_config.get("max_line_bytes", 4_096)),
+        )
+        self.sip_allowed_content_types = tuple(
+            str(value).lower() for value in parser_config.get(
+                "allowed_content_types", ("application/sdp", "message/sipfrag", "multipart/mixed")
+            )
+        )
+        stream_config = dict(sip_stream or {})
+        self.stream_idle_timeout = float(stream_config.get("idle_timeout", 120.0))
+        self.stream_max_connections = int(stream_config.get("max_connections", 1024))
+        self.server_locator = ServerLocator(server_location)
+
         forwarding_config = self.business_services_config.get("forwarding", {})
         if not isinstance(forwarding_config, dict):
             forwarding_config = {}
@@ -2234,17 +2609,41 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             transfer_config.get("enabled", True) if isinstance(transfer_config, dict) else True
         )
         self.dialogs = DialogManager()
-        self.transactions = TransactionManager(self._send_packet)
+        self.session_timer_tasks: Dict[str, asyncio.Task] = {}
+        transaction_config = dict(sip_transactions or {})
+        transaction_t1 = float(transaction_config.get("t1", 0.5))
+        transaction_t2 = float(transaction_config.get("t2", 4.0))
+        transaction_t4 = float(transaction_config.get("t4", 5.0))
+        self.transactions = TransactionManager(self._send_packet, t1=transaction_t1, t2=transaction_t2, t4=transaction_t4)
+        self.client_transactions = {
+            transport: ClientTransactionManager(
+                lambda packet, destination, selected=transport: self._send_packet(
+                    packet, destination, transport_name=selected
+                ),
+                t1=transaction_t1,
+                t2=transaction_t2,
+                t4=transaction_t4,
+                timer_c=float(transaction_config.get("timer_c", 180.0)),
+                on_timeout=self._on_client_transaction_timeout,
+                on_non_2xx_final=self._on_client_transaction_non_2xx,
+                on_transport_error=self._on_client_transaction_transport_error,
+            )
+            for transport in ("udp", "tcp", "tls")
+        }
         self.pending_outbound_responses: Dict[str, asyncio.Queue] = {}
         self.pending_options_probes: Dict[str, asyncio.Future] = {}
         self.b2bua_calls_by_inbound: Dict[str, B2BUACall] = {}
+        self.late_invite_calls: Dict[str, Tuple[B2BUACall, float]] = {}
         self.b2bua_calls_by_outbound: Dict[str, B2BUACall] = {}
         self.recently_finalized_b2bua_call_ids: Dict[str, float] = {}
         self.recently_finalized_b2bua_ttl = 30.0
         self.stream_connections: Dict[Tuple[str, str, int], SipTcpConnectionProtocol] = {}
+        self.stream_connection_set: set[SipTcpConnectionProtocol] = set()
         self.stream_connects = 0
         self.stream_reuses = 0
         self.stream_failures = 0
+        self.stream_rejections = 0
+        self.stream_idle_timeouts = 0
         self.rtpengine_max_sessions = rtpengine_max_sessions
         self.rtpengine_offer_transport_protocol = rtpengine_offer_transport_protocol
         self.rtpengine_answer_transport_protocol = rtpengine_answer_transport_protocol
@@ -2276,6 +2675,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.rtpengine_control_failures_total = 0
         self.sip_requests_total: Dict[Tuple[str, str, str, str], int] = {}
         self.sip_responses_total: Dict[Tuple[str, str, str, str], int] = {}
+        self.client_transaction_events: Dict[Tuple[str, str, str], int] = {}
         self.b2bua_calls_total = 0
         self.b2bua_calls_answered_total = 0
         self.b2bua_calls_completed_total = 0
@@ -2297,6 +2697,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.background_tasks: List[asyncio.Task] = []
         if self.shared_state:
             self.registrations.update(self.shared_state.load_registrations())
+            for binding in self.shared_state.load_registration_bindings():
+                self.location_service.upsert(binding)
             self.logger.platform(
                 "HA NODE STARTED",
                 (
@@ -2317,6 +2719,23 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 self.logger.platform("HA NODE DRAINING", f"node={self.node_id} action=reject_new_invites")
         self.tls_client_context = tls_client_context
         self.tls_port = tls_port
+
+    def outbound_identity_headers(self, message: SipMessage) -> Dict[str, str]:
+        selected = {
+            name: message.header(name)
+            for name in ("p-asserted-identity", "p-preferred-identity", "privacy", "history-info", "diversion")
+            if message.header(name)
+        }
+        trusted = {str(value).lower() for value in self.registrar_config.get("trusted_sources", ())}
+        trusted_source = message.source[0].lower() in trusted
+        filtered = privacy_filter(selected, trusted_source)
+        if selected != filtered:
+            self.logger.sip(
+                "IDENTITY PRIVACY FILTER",
+                f"source={message.source[0]} trusted={str(trusted_source).lower()} removed={','.join(sorted(set(selected) - set(filtered)))}",
+                call_id=message.header("call-id"),
+            )
+        return filtered
 
     def observe_sip_request(self, method: str, transport: str, direction: str, realm: str) -> None:
         key = (method.upper() or "UNKNOWN", normalize_sip_transport(transport), direction, realm)
@@ -2361,6 +2780,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 "playsbc_stream_connects_total": self.stream_connects,
                 "playsbc_stream_reuses_total": self.stream_reuses,
                 "playsbc_stream_failures_total": self.stream_failures,
+                "playsbc_stream_connections_active": len(self.stream_connection_set),
+                "playsbc_stream_connections_rejected_total": self.stream_rejections,
+                "playsbc_stream_idle_timeouts_total": self.stream_idle_timeouts,
                 "playsbc_ha_enabled": int(self.shared_state is not None),
                 "playsbc_ha_configured_nodes": len(self.ha_nodes),
                 "playsbc_ha_node_draining": int(self.ha_node_draining),
@@ -2389,6 +2811,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ("playsbc_stream_connects_total", self.stream_connects, {**base_labels, "transport": "stream"}),
                 ("playsbc_stream_reuses_total", self.stream_reuses, {**base_labels, "transport": "stream"}),
                 ("playsbc_stream_failures_total", self.stream_failures, {**base_labels, "transport": "stream"}),
+                ("playsbc_stream_connections_active", len(self.stream_connection_set), {**base_labels, "transport": "stream"}),
+                ("playsbc_stream_connections_rejected_total", self.stream_rejections, {**base_labels, "transport": "stream"}),
+                ("playsbc_stream_idle_timeouts_total", self.stream_idle_timeouts, {**base_labels, "transport": "stream"}),
                 ("playsbc_ha_enabled", int(self.shared_state is not None), base_labels),
                 ("playsbc_ha_configured_nodes", len(self.ha_nodes), base_labels),
                 ("playsbc_ha_node_draining", int(self.ha_node_draining), base_labels),
@@ -2396,6 +2821,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ("playsbc_ha_b2bua_restores_total", self.ha_b2bua_restores, base_labels),
             ]
         )
+        samples.append(("playsbc_overload_decisions_total", self.overload.allowed, {**base_labels, "outcome": "allowed", "dimension": "none"}))
+        for dimension, value in sorted(self.overload.rejects.items()):
+            samples.append(("playsbc_overload_decisions_total", value, {**base_labels, "outcome": "rejected", "dimension": dimension}))
         for (service, outcome), value in sorted(self.business_service_events_total.items()):
             samples.append(
                 (
@@ -2433,6 +2861,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                     },
                 )
             )
+        for (method, transport, outcome), value in sorted(self.client_transaction_events.items()):
+            samples.append(("playsbc_client_transactions_total", value, {**base_labels, "method": method, "transport": transport, "outcome": outcome}))
         b2bua_labels = {**base_labels, **self.b2bua_metric_labels()}
         samples.extend(
             [
@@ -2624,7 +3054,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"node={self.node_id} trunk={trunk.name} target={target.uri} timeout={trunk.options_probe_timeout:.3f}",
             call_id=call_id,
         )
-        self._send_packet(packet, target.address, transport_name=transport_name)
+        self.send_client_transaction("OPTIONS", headers, packet, target.address, transport_name)
         try:
             response = await asyncio.wait_for(future, timeout=trunk.options_probe_timeout)
             status = int(getattr(response, "status_code", 0))
@@ -2664,8 +3094,17 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         transport_name: str,
         peer: Tuple[str, int],
         connection: SipTcpConnectionProtocol,
-    ) -> None:
+    ) -> bool:
+        if connection not in self.stream_connection_set and len(self.stream_connection_set) >= self.stream_max_connections:
+            self.stream_rejections += 1
+            self.logger.networking(
+                "SIP STREAM POOL REJECTED",
+                f"transport={transport_name} peer={peer[0]}:{peer[1]} limit={self.stream_max_connections}",
+            )
+            return False
+        self.stream_connection_set.add(connection)
         self.stream_connections[(transport_name, peer[0], peer[1])] = connection
+        return True
 
     def unregister_stream_connection(
         self,
@@ -2673,9 +3112,10 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         peer: Tuple[str, int],
         connection: SipTcpConnectionProtocol,
     ) -> None:
-        key = (transport_name, peer[0], peer[1])
-        if self.stream_connections.get(key) is connection:
-            self.stream_connections.pop(key, None)
+        for key, registered in list(self.stream_connections.items()):
+            if registered is connection:
+                self.stream_connections.pop(key, None)
+        self.stream_connection_set.discard(connection)
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
         self.receive_sip_data(data, addr, transport_name="udp")
@@ -2692,8 +3132,21 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         try:
-            text = data.decode("utf-8", errors="replace")
-            message = parse_sip_message(text, addr, transport_name=transport_name, connection=connection)
+            message = parse_sip_message(
+                data, addr, transport_name=transport_name, connection=connection,
+                limits=self.sip_parse_limits, allowed_content_types=self.sip_allowed_content_types,
+            )
+        except SipParseError as exc:
+            logging.warning("Rejected SIP message from %s:%s over %s: %s", addr[0], addr[1], transport_name, exc)
+            self.logger.networking(
+                "SIP PARSE REJECTED",
+                f"transport={transport_name} source={addr[0]}:{addr[1]} bytes={len(data)} status={exc.status} detail={exc}",
+            )
+            request = best_effort_error_request(data, addr, transport_name, connection)
+            if request:
+                self.send_response(request, exc.status, exc.reason, to_header=request.header("to"))
+            return
+
         except Exception:
             logging.exception("Could not parse SIP message from %s:%s over %s", addr[0], addr[1], transport_name)
             self.logger.networking("SIP PARSE FAILED", f"transport={transport_name} source={addr[0]}:{addr[1]} bytes={len(data)}")
@@ -2723,6 +3176,20 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.handle_response(message)
             return
 
+        priority_sources = {str(value).lower() for value in self.overload_config.get("priority_sources", ())}
+        priority = bool(message.header("resource-priority")) and addr[0].lower() in priority_sources
+        subscriber = extract_user(message.header("from"))
+        realm_match = re.search(r"@([^>;:]+)", message.header("from"))
+        realm = realm_match.group(1).lower() if realm_match else ""
+        overload = self.overload.decide(addr[0], message.method, realm=realm, subscriber=subscriber, priority=priority)
+        if not overload.allowed:
+            self.logger.networking(
+                "SIP OVERLOAD REJECTED",
+                f"method={message.method} source={addr[0]}:{addr[1]} dimension={overload.dimension} retry_after={overload.retry_after}",
+            )
+            self.send_response(message, 503, "Service Unavailable", extra_headers={"Retry-After": str(overload.retry_after)})
+            return
+
         logging.info(
             "SIP %s from %s:%s target=%s to=%s from=%s cseq=%s call_id=%s",
             message.method,
@@ -2740,7 +3207,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             f"transport={transport_name} method={message.method} source={addr[0]}:{addr[1]} target={message.start_line} cseq={message.header('cseq')}",
             call_id=message.header("call-id"),
         )
-        asyncio.create_task(self.handle_message(message))
+        task = asyncio.create_task(self.handle_message(message))
+        if not priority:
+            task.add_done_callback(lambda _task: self.overload.release())
 
     def handle_sip_keepalive(self, data: bytes, addr: Tuple[str, int], transport_name: str) -> None:
         self.logger.write(
@@ -2757,10 +3226,95 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     def handle_response(self, message: SipMessage) -> None:
         call_id = message.header("call-id")
         cseq_method = parse_cseq_method(message.header("cseq"))
+        client_transaction = self.client_transactions.get(message.transport)
+        matched_transaction = client_transaction.receive_response(
+            message.status_code or 0,
+            message.header("via"),
+            message.header("cseq"),
+            call_id,
+        ) if client_transaction else None
+        if matched_transaction:
+            metric_key = (cseq_method, message.transport, "response")
+            self.client_transaction_events[metric_key] = self.client_transaction_events.get(metric_key, 0) + 1
+        self.logger.sip(
+            "CLIENT TRANSACTION RESPONSE",
+            f"method={cseq_method} status={message.status_code} matched={matched_transaction is not None} transport={message.transport}",
+            call_id=call_id,
+        )
+        if cseq_method == "INVITE" and 200 <= (message.status_code or 0) < 300:
+            now = time.time()
+            for stale_id, (_call, expires_at) in list(self.late_invite_calls.items()):
+                if expires_at <= now:
+                    self.late_invite_calls.pop(stale_id, None)
+            fork_call = self.b2bua_calls_by_outbound.get(call_id)
+            if not fork_call:
+                tombstone = self.late_invite_calls.get(call_id)
+                fork_call = tombstone[0] if tombstone else None
+            if fork_call and not fork_call.reinvite_pending:
+                remote_tag = extract_header_tag(message.header("to"))
+                if remote_tag and fork_call.winning_to_tag == remote_tag and fork_call.outbound_final_status == 200:
+                    self.send_outbound_ack(fork_call)
+                    return
+                if remote_tag and (fork_call.finalized or fork_call.outbound_final_status >= 300 or (fork_call.winning_to_tag and remote_tag != fork_call.winning_to_tag)):
+                    self.cleanup_losing_invite_fork(fork_call, message)
+                    return
+                if remote_tag and not fork_call.winning_to_tag:
+                    fork_call.winning_to_tag = remote_tag
+        if matched_transaction and cseq_method == "INVITE" and (message.status_code or 0) >= 300:
+            failed_call = self.b2bua_calls_by_outbound.get(call_id)
+            if failed_call:
+                failed_call.outbound_to_header = message.header("to")
+                failed_call.outbound_contact_uri = extract_sip_uri(message.header("contact")) or failed_call.outbound_target.uri
+                self.send_outbound_ack(failed_call, invite_transaction=True)
+        if cseq_method == "INVITE" and (message.status_code or 0) >= 200:
+            active_call = self.b2bua_calls_by_outbound.get(call_id)
+            if active_call:
+                active_call.outbound_final_status = message.status_code or 0
+                if (message.status_code or 0) < 300 and not active_call.reinvite_pending:
+                    active_call.outbound_route_set = tuple(reversed(split_header_values(message.header("record-route"))))
+                    self.logger.sip(
+                        "B2BUA OUTBOUND ROUTE SET",
+                        f"routes={len(active_call.outbound_route_set)} target={extract_sip_uri(message.header('contact')) or active_call.outbound_target.uri}",
+                        call_id=active_call.inbound_call_id,
+                    )
         if cseq_method == "OPTIONS":
             future = self.pending_options_probes.get(call_id)
             if future and not future.done():
                 future.set_result(message)
+                return
+        if cseq_method == "PRACK":
+            prack_call = self.b2bua_calls_by_outbound.get(call_id)
+            if prack_call and prack_call.pending_prack and (message.status_code or 0) >= 200:
+                self.send_response(
+                    prack_call.pending_prack,
+                    message.status_code or 500,
+                    message.reason_phrase or "PRACK Response",
+                    to_header=prack_call.inbound_to_header,
+                )
+                prack_call.pending_prack = None
+                prack_call.reliable_rseq = 0
+                return
+        if cseq_method == "UPDATE":
+            update_call = self.b2bua_calls_by_outbound.get(call_id)
+            if update_call and update_call.pending_update and (message.status_code or 0) >= 200:
+                if update_call.pending_update_queue:
+                    update_call.pending_update_queue.put_nowait(message)
+                    return
+                if message.status_code == 491 and update_call.update_retry_count == 0:
+                    update_call.update_retry_count = 1
+                    asyncio.create_task(self.retry_outbound_update(update_call))
+                    return
+                if (message.status_code or 0) < 300:
+                    update_call.outbound_contact_uri = extract_sip_uri(message.header("contact")) or update_call.outbound_contact_uri
+                    update_call.inbound_contact_uri = extract_sip_uri(update_call.pending_update.header("contact")) or update_call.inbound_contact_uri
+                    self.save_b2bua_call_state(update_call)
+                self.send_response(
+                    update_call.pending_update,
+                    message.status_code or 500,
+                    message.reason_phrase or "UPDATE Response",
+                    to_header=update_call.inbound_to_header,
+                )
+                update_call.pending_update = None
                 return
         queue = self.pending_outbound_responses.get(call_id)
         if queue and cseq_method == "INVITE":
@@ -2815,13 +3369,26 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         method = message.method
 
         if message.transport == "udp" and method != "ACK":
-            _, duplicate = self.transactions.receive_request(
+            merge_id = "|".join((
                 method,
-                message.header("via"),
-                message.header("cseq"),
+                message.start_line.split(" ", 2)[1] if " " in message.start_line else "",
+                message.header("from"),
                 message.header("call-id"),
-                message.source,
-            )
+                message.header("cseq"),
+            ))
+            try:
+                _, duplicate = self.transactions.receive_request(
+                    method,
+                    message.header("via"),
+                    message.header("cseq"),
+                    message.header("call-id"),
+                    message.source,
+                    merge_id=merge_id,
+                )
+            except MergedRequestError:
+                self.send_response(message, 482, "Loop Detected")
+                self.logger.sip("MERGED REQUEST REJECTED", f"method={method} merge_id={merge_id}", call_id=message.header("call-id"))
+                return
             if duplicate:
                 logging.info("Replayed cached response for retransmitted %s", method)
                 return
@@ -2830,12 +3397,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.cleanup_registrations()
             user = extract_user(message.header("to")) or extract_user(message.header("from")) or "unknown"
             auth_result = self.authenticate_register(message, user)
-            if auth_result == "challenge":
+            if auth_result in {"challenge", "stale"}:
                 self.send_response(
                     message,
                     401,
                     "Unauthorized",
-                    extra_headers={"WWW-Authenticate": self.make_authenticate_header()},
+                    extra_headers={"WWW-Authenticate": self.make_authenticate_header(stale=auth_result == "stale")},
                 )
                 logging.info("Challenged REGISTER for %s", user)
                 return
@@ -2844,31 +3411,78 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 logging.info("Rejected REGISTER for unknown user %s", user)
                 return
 
-            expires = parse_register_expires(message.header("expires"), message.header("contact"))
-            if expires <= 0:
+            contact_header = message.header("contact")
+            try:
+                contacts = parse_contact_bindings(contact_header)
+            except ValueError:
+                self.send_response(message, 400, "Bad Contact")
+                return
+            expires = parse_register_expires(message.header("expires"), contact_header)
+            if contacts == (("*", {}),) and expires != 0:
+                self.send_response(message, 400, "Wildcard Contact Requires Expires 0")
+                return
+            if contacts == (("*", {}),):
+                self.location_service.remove(user)
                 self.delete_registration_state(user)
                 self.send_response(message, 200, "OK")
                 logging.info("Unregistered %s", user)
                 return
-
-            contact_uri = extract_sip_uri(message.header("contact")) or f"sip:{user}@{message.source[0]}:{message.source[1]}"
-            try:
-                parse_sip_uri(contact_uri)
-            except ValueError:
-                self.send_response(message, 400, "Bad Contact")
-                logging.info("Rejected REGISTER for %s with invalid contact %s", user, contact_uri)
-                return
-
-            registration = Registration(
-                user=user,
-                contact_uri=contact_uri,
-                source=message.source,
-                expires_at=time.time() + expires,
+            now = time.time()
+            path = split_header_values(message.header("path"))
+            accepted_bindings: list[ContactBinding] = []
+            for contact_uri, params in contacts:
+                contact_expires = int(params.get("expires", expires))
+                if contact_expires <= 0:
+                    self.location_service.remove(user, contact_uri)
+                    if self.shared_state:
+                        self.shared_state.delete_registration_binding(user, contact_uri)
+                    continue
+                try:
+                    parse_sip_uri(contact_uri)
+                    q = float(params.get("q", "1"))
+                    if not 0 <= q <= 1:
+                        raise ValueError("q out of range")
+                    binding = ContactBinding(
+                        user, contact_uri, message.source, now + contact_expires, q, path,
+                        params.get("+sip.instance", ""), params.get("reg-id", ""),
+                        secrets.token_urlsafe(12) if params.get("reg-id") else "",
+                    )
+                    self.location_service.upsert(binding)
+                    accepted_bindings.append(binding)
+                    if self.shared_state:
+                        self.shared_state.save_registration_binding(binding)
+                except (TypeError, ValueError):
+                    self.send_response(message, 400, "Bad Contact")
+                    return
+            # Route a successful REGISTER to the best contact accepted in this
+            # request. Historical equal-q contacts may remain valid bindings,
+            # but must not replace the freshly registered endpoint merely due
+            # to lexicographic URI ordering after a pod/IP change.
+            best = (
+                min(accepted_bindings, key=lambda item: (-item.q, item.contact_uri))
+                if accepted_bindings
+                else self.location_service.best(user)
             )
-            self.save_registration_state(registration)
+            if best:
+                registration = Registration(
+                    user, best.contact_uri, best.source, best.expires_at,
+                    q=best.q, path=best.path, instance_id=best.instance_id,
+                    reg_id=best.reg_id, flow_token=best.flow_token,
+                )
+                self.save_registration_state(registration)
+            else:
+                self.delete_registration_state(user)
             self.registrations_total += 1
-            self.send_response(message, 200, "OK")
-            logging.info("Registered %s -> %s expires=%s", user, contact_uri, expires)
+            extra = {"Contact": ", ".join(f"<{item.contact_uri}>;q={item.q:g}" for item in self.location_service.bindings(user))}
+            service_route = str(self.registrar_config.get("service_route", "")).strip()
+            if service_route:
+                extra["Service-Route"] = service_route
+            if path:
+                extra["Path"] = ", ".join(path)
+            if any(item.reg_id for item in self.location_service.bindings(user)):
+                extra["Require"] = "outbound"
+            self.send_response(message, 200, "OK", extra_headers=extra)
+            logging.info("Registered %s bindings=%s expires=%s", user, len(self.location_service.bindings(user)), expires)
             return
 
         if method == "OPTIONS":
@@ -2884,8 +3498,65 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             )
             return
 
+        if method == "PRACK":
+            call = self.b2bua_calls_by_inbound.get(message.header("call-id"))
+            if not call or not call.reliable_rseq:
+                self.send_response(message, 481, "Call/Transaction Does Not Exist")
+                return
+            rack = message.header("rack").split()
+            expected = [str(call.reliable_rseq), str(call.inbound_cseq), "INVITE"]
+            if rack != expected:
+                self.send_response(message, 481, "Call/Transaction Does Not Exist")
+                return
+            if call.pending_prack:
+                self.send_response(message, 491, "Request Pending")
+                return
+            if message.body:
+                self.send_response(message, 488, "Not Acceptable Here")
+                return
+            call.pending_prack = message
+            self.send_b2bua_in_dialog_request(
+                call,
+                "PRACK",
+                to_inbound=False,
+                extra_headers={"RAck": f"{call.reliable_rseq} {call.reliable_invite_cseq} INVITE"},
+            )
+            return
+
+        if method == "UPDATE":
+            call = self.b2bua_calls_by_inbound.get(message.header("call-id")) or self.restore_b2bua_call_state(message.header("call-id"))
+            if not call or not extract_header_tag(message.header("to")):
+                self.send_response(message, 481, "Call/Transaction Does Not Exist")
+                return
+            if call.reinvite_pending or call.pending_update:
+                self.send_response(message, 491, "Request Pending", to_header=call.inbound_to_header)
+                return
+            sequence = parse_cseq_number(message.header("cseq"))
+            if sequence <= call.inbound_cseq:
+                self.send_response(message, 500, "Server Internal Error", to_header=call.inbound_to_header)
+                return
+            if message.body:
+                await self.handle_b2bua_inbound_update_offer(message, call, sequence)
+                return
+            call.inbound_cseq = sequence
+            call.pending_update = message
+            call.update_retry_count = 0
+            self.send_b2bua_in_dialog_request(call, "UPDATE", to_inbound=False)
+            return
+
         if method == "INVITE":
             call_id = message.header("call-id", make_call_id())
+            if message.header("session-expires"):
+                requested_min_se = 90
+                try:
+                    requested_min_se = int(message.header("min-se") or "90")
+                    parse_session_expires(message.header("session-expires"), requested_min_se)
+                except (DialogError, ValueError) as exc:
+                    if "too small" in str(exc):
+                        self.send_response(message, 422, "Session Interval Too Small", extra_headers={"Min-SE": str(max(90, requested_min_se))})
+                    else:
+                        self.send_response(message, 400, "Bad Session-Expires")
+                    return
             existing_b2bua_call = self.b2bua_calls_by_inbound.get(call_id) or self.restore_b2bua_call_state(call_id)
             if existing_b2bua_call and extract_header_tag(message.header("to")):
                 await self.handle_b2bua_inbound_reinvite(message, existing_b2bua_call)
@@ -3081,7 +3752,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                         call_id=call_id,
                     )
                 if message.transport == "udp" and dialog:
-                    self.transactions.acknowledge_invite(call_id, message.header("cseq"))
+                    self.transactions.acknowledge_invite(
+                        call_id,
+                        message.header("cseq"),
+                        message.header("via"),
+                    )
                 if session and dialog:
                     session.mark_ack()
                     session.log("DIALOG STATE", f"state={dialog.state.name} acknowledged=true")
@@ -3117,8 +3792,26 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if method == "CANCEL":
             call_id = message.header("call-id")
             b2bua_call = self.b2bua_calls_by_inbound.get(call_id)
-            if not b2bua_call:
+            invite_transaction = self.transactions.cancellable_invite(
+                call_id, message.header("cseq"), message.header("via")
+            ) if message.transport == "udp" else None
+            reliable_match = bool(
+                b2bua_call
+                and b2bua_call.inbound_invite_via_header
+                and parse_cseq_number(message.header("cseq")) == b2bua_call.inbound_cseq
+                and extract_branch(message.header("via")) == extract_branch(b2bua_call.inbound_invite_via_header)
+                and extract_via_sent_by(message.header("via")) == extract_via_sent_by(b2bua_call.inbound_invite_via_header)
+            )
+            if not b2bua_call or (message.transport == "udp" and not invite_transaction) or (message.transport != "udp" and not reliable_match):
                 self.send_response(message, 481, "Call/Transaction Does Not Exist")
+                return
+            if b2bua_call.outbound_final_status >= 200:
+                self.send_response(message, 481, "Call/Transaction Does Not Exist")
+                self.logger.sip(
+                    "B2BUA CANCEL RACE REJECTED",
+                    f"invite_final_status={b2bua_call.outbound_final_status}",
+                    call_id=call_id,
+                )
                 return
             b2bua_call.flow_log.sip("SIPp A", "B2BUA", "CANCEL")
             self.send_response(message, 200, "OK", to_header=message.header("to"))
@@ -3667,10 +4360,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             flow_log=flow_log,
             route_result=route,
             inbound_from_header=message.header("from"),
+            inbound_invite_via_header=message.header("via"),
             inbound_to_header=to_header,
             inbound_contact_uri=extract_sip_uri(message.header("contact")),
+            inbound_route_set=split_header_values(message.header("record-route")),
             inbound_destination=message.source,
             inbound_cseq=parse_cseq_number(message.header("cseq")) or 1,
+            identity_headers=self.outbound_identity_headers(message),
         )
         self.b2bua_calls_total += 1
         self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
@@ -3705,11 +4401,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 b2bua_call,
                 timeout=self.b2bua_invite_timeout,
             )
-        except asyncio.TimeoutError:
-            detail = f"route={target.uri} reason=outbound_invite_timeout timeout_seconds={self.b2bua_invite_timeout:g}"
+        except asyncio.TimeoutError as exc:
+            failure_reason = getattr(exc, "reason", "outbound_invite_timeout")
+            detail = f"route={target.uri} reason={failure_reason}"
+            if failure_reason == "outbound_invite_timeout":
+                detail += f" timeout_seconds={self.b2bua_invite_timeout:g}"
             inbound_rtp.log("B2BUA FAILURE", detail)
             flow_log.write("B2BUA FAILURE", detail)
-            self.send_outbound_cancel(b2bua_call)
+            if failure_reason != "outbound_invite_transport_error":
+                self.send_outbound_cancel(b2bua_call)
             if not self.maybe_send_conditional_forwarding(
                 message,
                 to_header,
@@ -3732,7 +4432,6 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             b2bua_call.outbound_contact_uri = extract_sip_uri(final_response.header("contact")) or target.uri
             inbound_rtp.log("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
             flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
-            self.send_outbound_ack(b2bua_call, invite_transaction=True)
             if not self.maybe_send_conditional_forwarding(
                 message,
                 to_header,
@@ -4127,10 +4826,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             rtpengine_call_id=inbound_call_id,
             rtpengine_from_tag=from_tag,
             inbound_from_header=message.header("from"),
+            inbound_invite_via_header=message.header("via"),
             inbound_to_header=to_header,
             inbound_contact_uri=extract_sip_uri(message.header("contact")),
+            inbound_route_set=split_header_values(message.header("record-route")),
             inbound_destination=message.source,
             inbound_cseq=parse_cseq_number(message.header("cseq")) or 1,
+            identity_headers=self.outbound_identity_headers(message),
         )
         self.b2bua_calls_total += 1
         self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
@@ -4153,12 +4855,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 b2bua_call,
                 timeout=self.b2bua_invite_timeout,
             )
-        except asyncio.TimeoutError:
-            flow_log.write(
-                "B2BUA FAILURE",
-                f"route={target.uri} reason=outbound_invite_timeout timeout_seconds={self.b2bua_invite_timeout:g}",
-            )
-            self.send_outbound_cancel(b2bua_call)
+        except asyncio.TimeoutError as exc:
+            failure_reason = getattr(exc, "reason", "outbound_invite_timeout")
+            detail = f"route={target.uri} reason={failure_reason}"
+            if failure_reason == "outbound_invite_timeout":
+                detail += f" timeout_seconds={self.b2bua_invite_timeout:g}"
+            flow_log.write("B2BUA FAILURE", detail)
+            if failure_reason != "outbound_invite_transport_error":
+                self.send_outbound_cancel(b2bua_call)
             if not self.maybe_send_conditional_forwarding(
                 message,
                 to_header,
@@ -4180,7 +4884,6 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.routing_engine.record_outcome(route, False)
             self.log_policy_metrics("TRUNK FAILURE", route, inbound_call_id)
             flow_log.write("B2BUA FAILURE", f"route={target.uri} status={status} reason={reason}")
-            self.send_outbound_ack(b2bua_call, invite_transaction=True)
             if not self.maybe_send_conditional_forwarding(
                 message,
                 to_header,
@@ -4502,30 +5205,20 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> None:
         if to_inbound:
-            request_uri = b2bua_call.inbound_contact_uri or (
-                f"sip:{extract_user(b2bua_call.inbound_from_header) or 'caller'}@"
-                f"{self.b2bua_advertised_ip}:{self.local_port}"
-            )
+            request_uri, route_headers, destination, transport_name = self.b2bua_dialog_route(b2bua_call, to_inbound=True)
             b2bua_call.inbound_cseq += 1
             call_id = b2bua_call.inbound_call_id
             cseq = b2bua_call.inbound_cseq
             from_header = b2bua_call.inbound_to_header
             to_header = b2bua_call.inbound_from_header
-            destination = self.inbound_destination(b2bua_call)
-            try:
-                transport_name = parse_sip_uri(request_uri).transport
-            except ValueError:
-                transport_name = "udp"
             peer = "core"
         else:
-            request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+            request_uri, route_headers, destination, transport_name = self.b2bua_dialog_route(b2bua_call, to_inbound=False)
             b2bua_call.outbound_cseq += 1
             call_id = b2bua_call.outbound_call_id
             cseq = b2bua_call.outbound_cseq
             from_header = b2bua_call.outbound_from_header
             to_header = b2bua_call.outbound_to_header
-            destination = self.outbound_destination(b2bua_call)
-            transport_name = self.outbound_transport(b2bua_call)
             peer = "peer"
         headers = {
             "Via": self.make_via_header(transport_name),
@@ -4536,13 +5229,124 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
+        if route_headers:
+            headers["Route"] = ", ".join(route_headers)
+        if body:
+            headers["Content-Type"] = "application/sdp"
         headers.update(extra_headers or {})
-        self._send_packet(
-            build_sip_request(method, request_uri, headers, body),
-            destination,
-            transport_name=transport_name,
-        )
+        self.send_client_transaction(method, headers, build_sip_request(method, request_uri, headers, body), destination, transport_name)
         self.observe_sip_request(method, transport_name, "tx", peer)
+
+    async def retry_outbound_update(self, call: B2BUACall) -> None:
+        # A B2BUA UAC must not immediately replay a glare response.
+        await asyncio.sleep(2.0)
+        if call.pending_update and not call.finalized:
+            self.logger.sip(
+                "B2BUA UPDATE GLARE RETRY",
+                f"outbound_call_id={call.outbound_call_id} retry=1 delay_seconds=2",
+                call_id=call.inbound_call_id,
+            )
+            self.send_b2bua_in_dialog_request(call, "UPDATE", to_inbound=False)
+
+    async def handle_b2bua_inbound_update_offer(
+        self, message: SipMessage, call: B2BUACall, sequence: int,
+    ) -> None:
+        if "m=audio" not in message.body:
+            self.send_response(message, 488, "Not Acceptable Here", to_header=call.inbound_to_header)
+            return
+        call.pending_update = message
+        call.pending_update_queue = asyncio.Queue()
+        try:
+            outbound_offer = message.body
+            if call.media_backend == "rtpengine":
+                if not self.rtpengine_client:
+                    raise RtpengineError("RTPengine is not configured for UPDATE")
+                payloads = parse_sdp_payloads(message.body)
+                offer_sdp = normalize_plain_rtp_sdp(message.body, payloads) if self.rtpengine_plain_rtp_sdp else message.body
+                result = await retry_rtpengine_control(
+                    "UPDATE OFFER",
+                    lambda: self.rtpengine_client.offer(
+                        call_id=call.rtpengine_call_id or call.inbound_call_id,
+                        from_tag=call.rtpengine_from_tag,
+                        sdp=offer_sdp,
+                        codec=rtpengine_codec_policy(payloads, self.default_payload),
+                        direction=self.rtpengine_directions,
+                        transport_protocol=self.rtpengine_offer_transport_protocol or ("RTP/AVP" if self.rtpengine_plain_rtp_sdp else ""),
+                        sdes=self.rtpengine_sdes,
+                        dtls=self.rtpengine_dtls,
+                        ice="remove" if self.rtpengine_plain_rtp_sdp else "",
+                        sip_source_address=self.rtpengine_sip_source_address,
+                        received_from=message.source[0] if self.rtpengine_sip_source_address else "",
+                        media_handover=self.rtpengine_media_handover,
+                        nat_wait=self.rtpengine_nat_wait,
+                        pierce_nat=self.rtpengine_pierce_nat,
+                    ),
+                    call.flow_log,
+                )
+                outbound_offer = str(result.get("sdp") or "")
+                if not outbound_offer:
+                    raise RtpengineError("RTPengine UPDATE offer did not include SDP")
+            for attempt in range(2):
+                self.send_b2bua_in_dialog_request(call, "UPDATE", to_inbound=False, body=outbound_offer)
+                response = await asyncio.wait_for(call.pending_update_queue.get(), timeout=self.b2bua_invite_timeout)
+                if response.status_code != 491 or attempt:
+                    break
+                self.logger.sip("B2BUA UPDATE GLARE RETRY", "retry=1 delay_seconds=2 offer=true", call_id=call.inbound_call_id)
+                await asyncio.sleep(2.0)
+            status = response.status_code or 500
+            if status >= 300:
+                self.send_response(message, status, response.reason_phrase or "UPDATE Failed", to_header=call.inbound_to_header)
+                return
+            answer_sdp = response.body
+            if call.media_backend == "rtpengine":
+                payloads = parse_sdp_payloads(answer_sdp)
+                answer_body = normalize_plain_rtp_sdp(answer_sdp, payloads) if self.rtpengine_plain_rtp_sdp else answer_sdp
+                result = await retry_rtpengine_control(
+                    "UPDATE ANSWER",
+                    lambda: self.rtpengine_client.answer(
+                        call_id=call.rtpengine_call_id or call.inbound_call_id,
+                        from_tag=call.rtpengine_from_tag,
+                        to_tag=call.rtpengine_to_tag,
+                        sdp=answer_body,
+                        codec=rtpengine_codec_policy(payloads, self.default_payload),
+                        transport_protocol=self.rtpengine_answer_transport_protocol or ("RTP/AVP" if self.rtpengine_plain_rtp_sdp else ""),
+                        sdes=self.rtpengine_sdes,
+                        dtls=self.rtpengine_dtls,
+                        ice="remove" if self.rtpengine_plain_rtp_sdp else "",
+                        sip_source_address=self.rtpengine_sip_source_address,
+                        received_from=response.source[0] if self.rtpengine_sip_source_address else "",
+                        media_handover=self.rtpengine_media_handover,
+                        nat_wait=self.rtpengine_nat_wait,
+                        pierce_nat=self.rtpengine_pierce_nat,
+                    ),
+                    call.flow_log,
+                )
+                answer_sdp = str(result.get("sdp") or "")
+                if self.rtpengine_plain_rtp_sdp and answer_sdp:
+                    answer_sdp = normalize_plain_rtp_sdp(answer_sdp, parse_sdp_payloads(message.body))
+            elif call.inbound_answer_sdp:
+                answer_sdp = replace_sdp_session_state(
+                    call.inbound_answer_sdp, sdp_session_state(response.body, answer=True)
+                )
+            if not answer_sdp:
+                raise RtpengineError("UPDATE answer did not include SDP")
+            call.outbound_contact_uri = extract_sip_uri(response.header("contact")) or call.outbound_contact_uri
+            call.inbound_contact_uri = extract_sip_uri(message.header("contact")) or call.inbound_contact_uri
+            call.inbound_cseq = sequence
+            call.inbound_answer_sdp = answer_sdp
+            self.save_b2bua_call_state(call)
+            self.send_response(
+                message, 200, "OK", body=answer_sdp, to_header=call.inbound_to_header,
+                extra_headers={"Contact": f"<{self.inbound_contact_uri(call.target_user, message.transport)}>", "Content-Type": "application/sdp"},
+            )
+        except asyncio.TimeoutError:
+            self.send_response(message, 504, "Server Time-out", to_header=call.inbound_to_header)
+        except (OSError, RtpengineError) as exc:
+            self.logger.sip("B2BUA UPDATE OFFER FAILED", f"reason={exc}", call_id=call.inbound_call_id)
+            self.send_response(message, 488, "Not Acceptable Here", to_header=call.inbound_to_header)
+        finally:
+            call.pending_update = None
+            call.pending_update_queue = None
 
     async def handle_b2bua_inbound_reinvite(self, message: SipMessage, b2bua_call: B2BUACall) -> None:
         """Propagate a caller-leg dialog refresh and update the existing media session."""
@@ -4569,7 +5373,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             self.send_response(message, 500, "Server Internal Error", to_header=message.header("to"))
             b2bua_call.flow_log.sip("B2BUA", "SIPp A", "500 Server Internal Error", "re-INVITE")
             return
-        if b2bua_call.reinvite_pending:
+        if b2bua_call.reinvite_pending or b2bua_call.pending_update:
             self.send_response(message, 491, "Request Pending", to_header=message.header("to"))
             b2bua_call.flow_log.sip("B2BUA", "SIPp A", "491 Request Pending", "re-INVITE")
             return
@@ -4632,17 +5436,39 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 b2bua_call,
                 timeout=self.b2bua_invite_timeout,
             )
+            if final_response.status_code == 491:
+                self.logger.sip(
+                    "B2BUA REINVITE GLARE RETRY",
+                    "retry=1 delay_seconds=2",
+                    call_id=call_id,
+                )
+                await asyncio.sleep(2.0)
+                b2bua_call.outbound_cseq += 1
+                self.send_outbound_invite(b2bua_call, outbound_offer, in_dialog=True)
+                final_response = await self.wait_for_outbound_invite(
+                    response_queue,
+                    message,
+                    message.header("to"),
+                    None,
+                    b2bua_call,
+                    timeout=self.b2bua_invite_timeout,
+                )
             status = final_response.status_code
             reason = final_response.reason_phrase or "Upstream Response"
             b2bua_call.outbound_to_header = final_response.header("to") or b2bua_call.outbound_to_header
-            b2bua_call.outbound_contact_uri = (
-                extract_sip_uri(final_response.header("contact")) or b2bua_call.outbound_contact_uri
-            )
             if status < 200 or status >= 300:
-                self.send_outbound_ack(b2bua_call, invite_transaction=True)
                 self.send_response(message, status, reason, to_header=message.header("to"))
                 b2bua_call.flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}", "re-INVITE")
                 return
+
+            # A successful target refresh changes Contact, not the dialog's
+            # established Record-Route set. Failed refreshes change neither.
+            b2bua_call.outbound_contact_uri = (
+                extract_sip_uri(final_response.header("contact")) or b2bua_call.outbound_contact_uri
+            )
+            b2bua_call.inbound_contact_uri = (
+                extract_sip_uri(message.header("contact")) or b2bua_call.inbound_contact_uri
+            )
 
             answer_sdp = final_response.body
             if b2bua_call.media_backend == "rtpengine":
@@ -4730,15 +5556,28 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     ) -> SipMessage:
         while True:
             response = await asyncio.wait_for(response_queue.get(), timeout=timeout)
+            if isinstance(response, BaseException):
+                raise response
             status = response.status_code
             reason = response.reason_phrase or "Upstream Response"
             b2bua_call.flow_log.sip("SIPp B", "B2BUA", f"{status} {reason}")
             if status < 200:
                 if status != 100:
+                    if "100rel" in response.header("require").lower():
+                        rseq = response.header("rseq").strip()
+                        if not rseq.isdigit() or int(rseq) <= 0:
+                            raise ValueError("Reliable provisional response is missing a valid RSeq")
+                        b2bua_call.reliable_rseq = int(rseq)
+                        b2bua_call.reliable_invite_cseq = parse_cseq_number(response.header("cseq"))
+                        b2bua_call.outbound_to_header = response.header("to")
+                        b2bua_call.outbound_contact_uri = extract_sip_uri(response.header("contact")) or b2bua_call.outbound_target.uri
+                        b2bua_call.outbound_route_set = tuple(reversed(split_header_values(response.header("record-route"))))
                     body = ""
                     if b2bua_call.media_backend != "rtpengine" and response.body:
                         body = response.body
-                    extra_headers = {"Content-Type": response.header("content-type")} if body else None
+                    extra_headers = {"Content-Type": response.header("content-type")} if body else {}
+                    if b2bua_call.reliable_rseq:
+                        extra_headers.update({"Require": "100rel", "RSeq": str(b2bua_call.reliable_rseq)})
                     b2bua_call.flow_log.sip("B2BUA", "SIPp A", f"{status} {reason}")
                     self.send_response(
                         inbound_request,
@@ -4754,14 +5593,16 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return response
 
     def send_outbound_invite(self, b2bua_call: B2BUACall, body: str, in_dialog: bool = False) -> None:
-        transport_name = b2bua_call.outbound_target.transport
+        b2bua_call.outbound_invite_cseq = b2bua_call.outbound_cseq
+        if in_dialog:
+            request_uri, route_headers, destination, transport_name = self.b2bua_dialog_route(b2bua_call, to_inbound=False)
+        else:
+            request_uri = b2bua_call.outbound_target.uri
+            route_headers = b2bua_call.route_result.route_set if b2bua_call.route_result else ()
+            destination = self.outbound_destination(b2bua_call)
+            transport_name = b2bua_call.outbound_target.transport
         via_header = self.make_via_header(transport_name)
         b2bua_call.outbound_invite_via_header = via_header
-        request_uri = (
-            b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
-            if in_dialog
-            else b2bua_call.outbound_target.uri
-        )
         headers = {
             "Via": via_header,
             "From": b2bua_call.outbound_from_header,
@@ -4784,10 +5625,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 ),
                 call_id=b2bua_call.inbound_call_id,
             )
+        for name, value in b2bua_call.identity_headers.items():
+            headers["-".join(part.capitalize() for part in name.split("-"))] = value
+        if route_headers:
+            headers["Route"] = ", ".join(route_headers)
         packet = build_sip_request("INVITE", request_uri, headers, body)
+        b2bua_call.outbound_invite_request_uri = request_uri
         self.observe_sip_request("INVITE", transport_name, "tx", "peer")
-        destination = self.outbound_destination(b2bua_call)
-        self._send_packet(packet, destination, transport_name=transport_name)
+        self.send_client_transaction("INVITE", headers, packet, destination, transport_name)
         logging.info(
             "B2BUA outbound INVITE sent inbound_call_id=%s outbound_call_id=%s target=%s destination=%s:%s transport=%s",
             b2bua_call.inbound_call_id,
@@ -4807,20 +5652,87 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         if session:
             session.log("B2BUA OUTBOUND INVITE", f"target={b2bua_call.outbound_target.uri}")
 
+    def send_client_transaction(
+        self,
+        method: str,
+        headers: Dict[str, str],
+        packet: bytes,
+        destination: Tuple[str, int],
+        transport_name: str,
+    ) -> ClientTransaction:
+        """Start every outbound non-ACK request through the RFC 3261 UAC engine."""
+        normalized = normalize_sip_transport(transport_name)
+        manager = self.client_transactions[normalized]
+        transaction = manager.start_request(
+            method,
+            headers["Via"],
+            headers["CSeq"],
+            headers["Call-ID"],
+            packet,
+            destination,
+            reliable_transport=normalized in {"tcp", "tls"},
+        )
+        metric_key = (method.upper(), normalized, "started")
+        self.client_transaction_events[metric_key] = self.client_transaction_events.get(metric_key, 0) + 1
+        self.logger.sip(
+            "CLIENT TRANSACTION STARTED",
+            f"method={method} state={transaction.state.value} transport={normalized} destination={destination[0]}:{destination[1]}",
+            call_id=headers["Call-ID"],
+        )
+        return transaction
+
+    def _on_client_transaction_timeout(self, transaction: ClientTransaction) -> None:
+        metric_key = (transaction.method, "reliable" if transaction.reliable_transport else "udp", "timeout")
+        self.client_transaction_events[metric_key] = self.client_transaction_events.get(metric_key, 0) + 1
+        self.logger.sip(
+            "CLIENT TRANSACTION TIMEOUT",
+            f"method={transaction.method} transport={'reliable' if transaction.reliable_transport else 'unreliable'} destination={transaction.destination[0]}:{transaction.destination[1]}",
+            call_id=transaction.call_id,
+        )
+        if transaction.method == "INVITE":
+            queue = self.pending_outbound_responses.get(transaction.call_id)
+            if queue:
+                queue.put_nowait(OutboundInviteTransactionFailure("outbound_invite_timeout"))
+
+    def _on_client_transaction_transport_error(self, transaction: ClientTransaction, error: Exception) -> None:
+        metric_key = (transaction.method, "reliable" if transaction.reliable_transport else "udp", "transport_error")
+        self.client_transaction_events[metric_key] = self.client_transaction_events.get(metric_key, 0) + 1
+        self.logger.networking(
+            "CLIENT TRANSACTION TRANSPORT ERROR",
+            f"method={transaction.method} call_id={transaction.call_id} destination={transaction.destination[0]}:{transaction.destination[1]} error={error}",
+        )
+        if transaction.method == "INVITE":
+            queue = self.pending_outbound_responses.get(transaction.call_id)
+            if queue:
+                queue.put_nowait(OutboundInviteTransactionFailure("outbound_invite_transport_error", str(error)))
+
+    def _on_client_transaction_non_2xx(self, transaction: ClientTransaction, status: int) -> None:
+        self.logger.sip(
+            "CLIENT TRANSACTION NON-2XX FINAL",
+            f"status={status} cseq={transaction.cseq_header} ack_required={transaction.method == 'INVITE'}",
+            call_id=transaction.call_id,
+        )
+
     def send_outbound_ack(self, b2bua_call: B2BUACall, invite_transaction: bool = False) -> None:
-        request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
-        transport_name = self.outbound_transport(b2bua_call)
+        if invite_transaction:
+            request_uri = b2bua_call.outbound_invite_request_uri
+            route_headers = ()
+            destination = self.outbound_destination(b2bua_call)
+            transport_name = self.outbound_transport(b2bua_call)
+        else:
+            request_uri, route_headers, destination, transport_name = self.b2bua_dialog_route(b2bua_call, to_inbound=False)
         via_header = b2bua_call.outbound_invite_via_header if invite_transaction else self.make_via_header(transport_name)
         headers = {
             "Via": via_header,
             "From": b2bua_call.outbound_from_header,
             "To": b2bua_call.outbound_to_header,
             "Call-ID": b2bua_call.outbound_call_id,
-            "CSeq": f"{b2bua_call.outbound_cseq} ACK",
+            "CSeq": f"{b2bua_call.outbound_invite_cseq} ACK",
             "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
-        destination = self.outbound_destination(b2bua_call)
+        if route_headers:
+            headers["Route"] = ", ".join(route_headers)
         self._send_packet(
             build_sip_request("ACK", request_uri, headers),
             destination,
@@ -4842,8 +5754,45 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             session.mark_ack()
             session.log("B2BUA OUTBOUND ACK")
 
+    def cleanup_losing_invite_fork(self, call: B2BUACall, response: SipMessage) -> None:
+        remote_tag = extract_header_tag(response.header("to"))
+        target = extract_sip_uri(response.header("contact")) or call.outbound_target.uri
+        route_set = tuple(reversed(split_header_values(response.header("record-route"))))
+        request_uri, routes, next_hop = in_dialog_route(target, route_set)
+        transport_name = response.transport
+        if routes:
+            destination = parse_sip_uri(next_hop).address
+        else:
+            try:
+                destination = parse_sip_uri(target).address
+            except ValueError:
+                destination = response.source
+        base_headers = {
+            "From": call.outbound_from_header,
+            "To": response.header("to"),
+            "Call-ID": call.outbound_call_id,
+            "Contact": f"<{self.local_contact_uri(transport_name)}>",
+            "Max-Forwards": "69",
+        }
+        if routes:
+            base_headers["Route"] = ", ".join(routes)
+        ack_headers = dict(base_headers, Via=self.make_via_header(transport_name), CSeq=f"{call.outbound_invite_cseq} ACK")
+        self._send_packet(build_sip_request("ACK", request_uri, ack_headers), destination, transport_name=transport_name)
+        if remote_tag not in call.losing_forks:
+            call.losing_forks.add(remote_tag)
+            call.outbound_cseq += 1
+            bye_headers = dict(base_headers, Via=self.make_via_header(transport_name), CSeq=f"{call.outbound_cseq} BYE")
+            self.send_client_transaction(
+                "BYE", bye_headers, build_sip_request("BYE", request_uri, bye_headers), destination, transport_name
+            )
+        self.logger.sip(
+            "B2BUA LOSING FORK CLEANUP",
+            f"remote_tag={remote_tag} target={target} ack=true bye={remote_tag in call.losing_forks}",
+            call_id=call.inbound_call_id,
+        )
+
     def send_outbound_cancel(self, b2bua_call: B2BUACall) -> None:
-        request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+        request_uri = b2bua_call.outbound_invite_request_uri or b2bua_call.outbound_target.uri
         b2bua_call.outbound_cancel_sent = True
         transport_name = self.outbound_transport(b2bua_call)
         via_header = b2bua_call.outbound_invite_via_header or self.make_via_header(transport_name)
@@ -4852,16 +5801,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "From": b2bua_call.outbound_from_header,
             "To": b2bua_call.outbound_to_header or f"<{b2bua_call.outbound_target.uri}>",
             "Call-ID": b2bua_call.outbound_call_id,
-            "CSeq": f"{b2bua_call.outbound_cseq} CANCEL",
+            "CSeq": f"{b2bua_call.outbound_invite_cseq} CANCEL",
             "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
         destination = self.outbound_destination(b2bua_call)
-        self._send_packet(
-            build_sip_request("CANCEL", request_uri, headers),
-            destination,
-            transport_name=transport_name,
-        )
+        self.send_client_transaction("CANCEL", headers, build_sip_request("CANCEL", request_uri, headers), destination, transport_name)
         logging.info(
             "B2BUA outbound CANCEL sent inbound_call_id=%s outbound_call_id=%s target=%s destination=%s:%s transport=%s",
             b2bua_call.inbound_call_id,
@@ -4875,10 +5820,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "CANCEL")
 
     def send_outbound_bye(self, b2bua_call: B2BUACall) -> None:
-        request_uri = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+        request_uri, route_headers, destination, transport_name = self.b2bua_dialog_route(b2bua_call, to_inbound=False)
         b2bua_call.outbound_cseq += 1
         b2bua_call.outbound_bye_sent = True
-        transport_name = self.outbound_transport(b2bua_call)
         headers = {
             "Via": self.make_via_header(transport_name),
             "From": b2bua_call.outbound_from_header,
@@ -4888,12 +5832,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
-        destination = self.outbound_destination(b2bua_call)
-        self._send_packet(
-            build_sip_request("BYE", request_uri, headers),
-            destination,
-            transport_name=transport_name,
-        )
+        if route_headers:
+            headers["Route"] = ", ".join(route_headers)
+        self.send_client_transaction("BYE", headers, build_sip_request("BYE", request_uri, headers), destination, transport_name)
         self.observe_sip_request("BYE", transport_name, "tx", "peer")
         b2bua_call.flow_log.sip("B2BUA", "SIPp B", "BYE")
         session = self.media.get_session(b2bua_call.outbound_call_id)
@@ -4909,16 +5850,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         )
 
     def send_inbound_bye(self, b2bua_call: B2BUACall) -> None:
-        caller = extract_user(b2bua_call.inbound_from_header) or "caller"
-        request_uri = b2bua_call.inbound_contact_uri or f"sip:{caller}@{self.b2bua_advertised_ip}:{self.local_port}"
+        request_uri, route_headers, destination, transport_name = self.b2bua_dialog_route(b2bua_call, to_inbound=True)
         b2bua_call.inbound_cseq += 1
         b2bua_call.inbound_bye_sent = True
-        transport_name = "udp"
-        try:
-            if b2bua_call.inbound_contact_uri:
-                transport_name = parse_sip_uri(b2bua_call.inbound_contact_uri).transport
-        except ValueError:
-            transport_name = "udp"
         headers = {
             "Via": self.make_via_header(transport_name),
             "From": b2bua_call.inbound_to_header,
@@ -4928,12 +5862,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "Contact": f"<{self.local_contact_uri(transport_name)}>",
             "Max-Forwards": "69",
         }
-        destination = self.inbound_destination(b2bua_call)
-        self._send_packet(
-            build_sip_request("BYE", request_uri, headers),
-            destination,
-            transport_name=transport_name,
-        )
+        if route_headers:
+            headers["Route"] = ", ".join(route_headers)
+        self.send_client_transaction("BYE", headers, build_sip_request("BYE", request_uri, headers), destination, transport_name)
         self.observe_sip_request("BYE", transport_name, "tx", "core")
         b2bua_call.flow_log.sip("B2BUA", "SIPp A", "BYE")
         b2bua_call.flow_log.write(
@@ -4961,6 +5892,35 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 pass
         return fallback
 
+    def b2bua_dialog_route(
+        self, b2bua_call: B2BUACall, *, to_inbound: bool
+    ) -> Tuple[str, Tuple[str, ...], Tuple[str, int], str]:
+        if to_inbound:
+            caller = extract_user(b2bua_call.inbound_from_header) or "caller"
+            target = b2bua_call.inbound_contact_uri or f"sip:{caller}@{self.b2bua_advertised_ip}:{self.local_port}"
+            route_set = b2bua_call.inbound_route_set
+            fallback = self.inbound_destination(b2bua_call)
+            default_transport = parse_sip_uri(target).transport if b2bua_call.inbound_contact_uri else "udp"
+        else:
+            target = b2bua_call.outbound_contact_uri or b2bua_call.outbound_target.uri
+            route_set = b2bua_call.outbound_route_set
+            fallback = self.outbound_destination(b2bua_call)
+            default_transport = self.outbound_transport(b2bua_call)
+        request_uri, routes, next_hop = in_dialog_route(target, route_set)
+        if not routes:
+            if not to_inbound and b2bua_call.outbound_contact_uri:
+                try:
+                    refreshed = parse_sip_uri(b2bua_call.outbound_contact_uri)
+                    if not sip_host_needs_received_route(refreshed.host):
+                        transport = refreshed.transport if ";transport=" in target.lower() else default_transport
+                        return request_uri, routes, refreshed.address, transport
+                except ValueError:
+                    pass
+            return request_uri, routes, fallback, default_transport
+        parsed_hop = parse_sip_uri(next_hop)
+        transport = parsed_hop.transport if ";transport=" in next_hop.lower() else default_transport
+        return request_uri, routes, parsed_hop.address, transport
+
     def outbound_destination(self, b2bua_call: B2BUACall) -> Tuple[str, int]:
         if b2bua_call.route_result and b2bua_call.route_result.destination:
             return b2bua_call.route_result.destination
@@ -4985,6 +5945,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         return b2bua_call.outbound_target.transport
 
     def cleanup_b2bua_call(self, b2bua_call: B2BUACall) -> None:
+        timer = self.session_timer_tasks.pop(b2bua_call.inbound_call_id, None)
+        if timer:
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if timer is not current:
+                timer.cancel()
         self.finalize_b2bua_call(b2bua_call, "cleanup")
         self.b2bua_calls_by_inbound.pop(b2bua_call.inbound_call_id, None)
         self.b2bua_calls_by_outbound.pop(b2bua_call.outbound_call_id, None)
@@ -5435,7 +6403,18 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     def finalize_b2bua_call(self, b2bua_call: B2BUACall, reason: str) -> None:
         if b2bua_call.finalized:
             return
+        if self.shared_state and not self.shared_state.owns_dialog(b2bua_call.inbound_call_id):
+            self.logger.platform(
+                "HA DIALOG FENCED FINALIZER",
+                f"node={self.node_id} call_id={b2bua_call.inbound_call_id}",
+            )
+            return
         b2bua_call.finalized = True
+        now = time.time()
+        for stale_id, (_call, expires_at) in list(self.late_invite_calls.items()):
+            if expires_at <= now:
+                self.late_invite_calls.pop(stale_id, None)
+        self.late_invite_calls[b2bua_call.outbound_call_id] = (b2bua_call, now + 32.0)
         if reason == "cleanup":
             self.b2bua_calls_failed_total += 1
         else:
@@ -5551,6 +6530,9 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             if expired:
                 self.logger.platform("HA REGISTRATION EXPIRE", f"node={self.node_id} expired={expired}")
             self.registrations = self.shared_state.load_registrations(now)
+            self.location_service = LocationService(int(self.registrar_config.get("max_bindings_per_aor", 8)))
+            for binding in self.shared_state.load_registration_bindings(now):
+                self.location_service.upsert(binding)
             return
         expired = [user for user, registration in self.registrations.items() if registration.is_expired(now)]
         for user in expired:
@@ -5585,11 +6567,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         dialog = self.shared_state.load_dialog(call_id)
         if not dialog:
             return None
+        epoch = self.shared_state.claim_dialog(call_id, takeover=True)
         self.dialogs.dialogs[call_id] = dialog
         self.ha_dialog_restores += 1
         self.logger.platform(
             "HA DIALOG RESTORED",
-            f"node={self.node_id} call_id={call_id} state={dialog.state.name} restore_count={self.ha_dialog_restores}",
+            f"node={self.node_id} call_id={call_id} state={dialog.state.name} epoch={epoch} restore_count={self.ha_dialog_restores}",
         )
         return dialog
 
@@ -5599,6 +6582,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         row = self.shared_state.load_b2bua_call(inbound_call_id)
         if not row:
             return None
+        epoch = self.shared_state.claim_dialog(inbound_call_id, takeover=True)
         try:
             outbound_target = parse_sip_uri(str(row["outbound_target_uri"]))
         except ValueError as exc:
@@ -5623,6 +6607,8 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             enabled=self.b2bua_ladder_logs,
             logger=self.logger,
         )
+        leg_state = json.loads(str(row["leg_state_json"] or "{}"))
+        inbound_destination = leg_state.get("inbound_destination")
         b2bua_call = B2BUACall(
             inbound_call_id=inbound_call_id,
             outbound_call_id=str(row["outbound_call_id"]),
@@ -5641,6 +6627,15 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             outbound_contact_uri=str(row["outbound_contact_uri"]),
             outbound_invite_via_header=str(row["outbound_invite_via_header"]),
             outbound_cseq=int(row["outbound_cseq"]),
+            outbound_invite_cseq=int(leg_state.get("outbound_invite_cseq", row["outbound_cseq"])),
+            outbound_route_set=tuple(leg_state.get("outbound_route_set", ())),
+            inbound_route_set=tuple(leg_state.get("inbound_route_set", ())),
+            inbound_from_header=str(leg_state.get("inbound_from_header", "")),
+            inbound_to_header=str(leg_state.get("inbound_to_header", "")),
+            inbound_contact_uri=str(leg_state.get("inbound_contact_uri", "")),
+            inbound_destination=tuple(inbound_destination) if inbound_destination else None,
+            inbound_cseq=int(leg_state.get("inbound_cseq", 1)),
+            winning_to_tag=str(leg_state.get("winning_to_tag", "")),
         )
         self.b2bua_calls_by_inbound[inbound_call_id] = b2bua_call
         self.b2bua_calls_by_outbound[b2bua_call.outbound_call_id] = b2bua_call
@@ -5649,7 +6644,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "HA B2BUA CALL RESTORED",
             (
                 f"node={self.node_id} inbound_call_id={inbound_call_id} "
-                f"outbound_call_id={b2bua_call.outbound_call_id} restore_count={self.ha_b2bua_restores}"
+                f"outbound_call_id={b2bua_call.outbound_call_id} epoch={epoch} restore_count={self.ha_b2bua_restores}"
             ),
         )
         b2bua_call.flow_log.write(
@@ -5712,15 +6707,19 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
         digest = parse_digest_header(authorization)
         nonce = digest.get("nonce", "")
+        algorithm = digest.get("algorithm", "MD5").upper()
         if (
             digest.get("username") != user
             or digest.get("realm") != self.auth_realm
-            or nonce not in self.nonces
-            or time.time() - self.nonces[nonce] > 300
+            or algorithm not in self.digest_algorithms
         ):
             return "challenge"
 
-        expected = make_digest_response(
+        nonce_result = self.nonce_store.validate(nonce, user, digest.get("nc", ""), commit=False)
+        if nonce_result != "ok":
+            return "stale" if nonce_result == "stale" else "challenge"
+
+        expected = digest_response(
             username=user,
             realm=self.auth_realm,
             password=self.users[user],
@@ -5730,13 +6729,16 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             nc=digest.get("nc"),
             cnonce=digest.get("cnonce"),
             qop=digest.get("qop"),
+            algorithm=algorithm,
         )
-        return "ok" if secrets.compare_digest(expected, digest.get("response", "")) else "challenge"
+        if not secrets.compare_digest(expected, digest.get("response", "")):
+            return "challenge"
+        return self.nonce_store.validate(nonce, user, digest.get("nc", ""))
 
-    def make_authenticate_header(self) -> str:
-        nonce = secrets.token_hex(16)
-        self.nonces[nonce] = time.time()
-        return f'Digest realm="{self.auth_realm}", nonce="{nonce}", algorithm=MD5, qop="auth"'
+    def make_authenticate_header(self, *, stale: bool = False) -> str:
+        nonce = self.nonce_store.issue()
+        stale_parameter = ", stale=true" if stale else ""
+        return f'Digest realm="{self.auth_realm}", nonce="{nonce}", algorithm={self.digest_algorithms[0]}, qop="auth"{stale_parameter}'
 
     def send_response(
         self,
@@ -5756,28 +6758,57 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             "Server": f"PlaySBC/{PLAYSBC_VERSION}",
             "Content-Length": str(len(body.encode("utf-8"))),
         }
+        if request.method in {"INVITE", "UPDATE"} and status == 200 and request.header("session-expires"):
+            try:
+                interval, _requested_refresher = parse_session_expires(request.header("session-expires"))
+            except DialogError:
+                pass
+            else:
+                headers["Session-Expires"] = f"{interval};refresher=uac"
+                headers["Supported"] = "timer"
+                self.logger.sip(
+                    "DIALOG SESSION TIMER",
+                    f"Session-Expires={interval} refresher=uac action=negotiated",
+                    call_id=request.header("call-id"),
+                )
+                dialog = self.dialogs.get(request.header("call-id"))
+                if dialog:
+                    dialog.set_session_timer(interval, "uac")
+                    self.save_dialog_state(dialog)
+                    prior = self.session_timer_tasks.pop(dialog.call_id, None)
+                    if prior:
+                        prior.cancel()
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        pass
+                    else:
+                        self.session_timer_tasks[dialog.call_id] = loop.create_task(
+                            self.expire_dialog_session(dialog.call_id, interval)
+                        )
         if extra_headers:
             headers.update(extra_headers)
 
         lines = [f"SIP/2.0 {status} {reason}"]
         lines.extend(f"{name}: {value}" for name, value in headers.items() if value)
         packet = (CRLF.join(lines) + CRLF + CRLF + body).encode("utf-8")
+        destination = response_destination(request)
         self.logger.sip(
             "SIP TX RESPONSE",
-            f"transport={request.transport} status={status} reason={reason} destination={request.source[0]}:{request.source[1]} cseq={request.header('cseq')}",
+            f"transport={request.transport} status={status} reason={reason} destination={destination[0]}:{destination[1]} cseq={request.header('cseq')}",
             call_id=request.header("call-id"),
         )
         logging.info(
             "SIP TX response %s %s to %s:%s cseq=%s call_id=%s",
             status,
             reason,
-            request.source[0],
-            request.source[1],
+            destination[0],
+            destination[1],
             request.header("cseq"),
             request.header("call-id"),
         )
         self.observe_sip_response(status, request.transport, "tx", "core")
-        self._send_packet(packet, request.source, transport_name=request.transport, connection=request.connection)
+        self._send_packet(packet, destination, transport_name=request.transport, connection=request.connection)
         if request.transport == "udp":
             self.transactions.cache_response(
                 request.method,
@@ -5785,9 +6816,30 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 request.header("cseq"),
                 request.header("call-id"),
                 packet,
-                request.source,
+                destination,
                 status,
             )
+
+    async def expire_dialog_session(self, call_id: str, interval: int) -> None:
+        await asyncio.sleep(interval)
+        dialog = self.dialogs.get(call_id)
+        if not dialog or dialog.state is CallState.TERMINATED:
+            return
+        if dialog.session_expires_at and time.time() < dialog.session_expires_at:
+            return
+        self.logger.sip("DIALOG SESSION EXPIRED", f"interval={interval} action=bye", call_id=call_id)
+        call = self.b2bua_calls_by_inbound.get(call_id)
+        if call:
+            if not call.inbound_bye_sent:
+                self.send_inbound_bye(call)
+            if not call.outbound_bye_sent:
+                self.send_outbound_bye(call)
+            self.schedule_b2bua_finalizer(call)
+        else:
+            dialog.state = CallState.TERMINATED
+            dialog.terminated_at = time.time()
+            self.save_dialog_state(dialog)
+            self.media.close_session(call_id)
 
     def _send_packet(
         self,
@@ -5796,6 +6848,20 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         transport_name: str = "udp",
         connection: Optional[SipTcpConnectionProtocol] = None,
     ) -> None:
+        if self.shared_state:
+            match = re.search(rb"(?:^|\r\n)Call-ID:\s*([^\r\n\s]+)", packet, re.IGNORECASE)
+            if match:
+                packet_call_id = match.group(1).decode("utf-8", "replace")
+                call = self.b2bua_calls_by_outbound.get(packet_call_id)
+                if not call and packet_call_id in self.late_invite_calls:
+                    call = self.late_invite_calls[packet_call_id][0]
+                owner_call_id = call.inbound_call_id if call else packet_call_id
+                if (call or owner_call_id in self.dialogs.dialogs or owner_call_id in self.b2bua_calls_by_inbound) and not self.shared_state.owns_dialog(owner_call_id):
+                    self.logger.platform(
+                        "HA DIALOG FENCED SEND",
+                        f"node={self.node_id} call_id={owner_call_id} packet_call_id={packet_call_id}",
+                    )
+                    return
         transport_name = normalize_sip_transport(transport_name)
         if transport_name in {"tcp", "tls"}:
             if connection:
@@ -5816,8 +6882,41 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             return
 
         if self.transport:
-            self.logger.udp("UDP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
-            self.transport.sendto(packet, destination)
+            try:
+                ipaddress.ip_address(destination[0].strip("[]"))
+                self.logger.udp("UDP TX", f"protocol=sip destination={destination[0]}:{destination[1]} bytes={len(packet)}")
+                self.transport.sendto(packet, destination)
+            except ValueError:
+                asyncio.create_task(self._send_udp_packet(packet, destination))
+
+    async def _resolve_server_targets(
+        self, destination: Tuple[str, int], transport_name: str
+    ) -> list[ServerTarget]:
+        targets = await asyncio.to_thread(
+            self.server_locator.resolve, destination[0], destination[1], transport_name
+        )
+        self.logger.networking(
+            "SIP DNS CANDIDATES",
+            (
+                f"transport={transport_name} domain={destination[0]} requested_port={destination[1]} "
+                f"targets={','.join(f'{item.host}:{item.port}' for item in targets) or 'none'}"
+            ),
+        )
+        return targets
+
+    async def _send_udp_packet(self, packet: bytes, destination: Tuple[str, int]) -> None:
+        targets = await self._resolve_server_targets(destination, "udp")
+        if not targets or not self.transport:
+            self.stream_failures += 1
+            self.logger.networking("UDP DNS FAILED", f"destination={destination[0]}:{destination[1]}")
+            return
+        selected = targets[0]
+        self.logger.networking(
+            "SIP DNS TARGET SELECTED",
+            f"transport=udp domain={destination[0]} target={selected.host}:{selected.port}",
+        )
+        self.logger.udp("UDP TX", f"protocol=sip destination={selected.host}:{selected.port} bytes={len(packet)}")
+        self.transport.sendto(packet, (selected.host, selected.port))
 
     async def _send_stream_packet(
         self,
@@ -5827,6 +6926,12 @@ class SipServerProtocol(asyncio.DatagramProtocol):
     ) -> None:
         key = (transport_name, destination[0], destination[1])
         connection = self.stream_connections.get(key)
+        if connection and not connection.reuse_authorized:
+            self.logger.networking(
+                "SIP STREAM REUSE DENIED",
+                f"transport={transport_name} destination={destination[0]}:{destination[1]} reason=missing-rfc5923-alias",
+            )
+            connection = None
         try:
             if connection and not connection.closed:
                 self.stream_reuses += 1
@@ -5838,15 +6943,39 @@ class SipServerProtocol(asyncio.DatagramProtocol):
             else:
                 loop = asyncio.get_running_loop()
                 ssl_context = self.tls_client_context if transport_name == "tls" else None
-                _transport, protocol = await loop.create_connection(
-                    lambda: SipTcpConnectionProtocol(self, transport_name),
-                    destination[0],
-                    destination[1],
-                    ssl=ssl_context,
-                    server_hostname=destination[0] if ssl_context else None,
-                )
-                connection = protocol  # type: ignore[assignment]
-                self.stream_connects += 1
+                targets = await self._resolve_server_targets(destination, transport_name)
+                last_error: Optional[Exception] = None
+                for attempt, target in enumerate(targets, start=1):
+                    try:
+                        self.logger.networking(
+                            "SIP DNS TARGET ATTEMPT",
+                            f"transport={transport_name} domain={destination[0]} target={target.host}:{target.port} attempt={attempt}",
+                        )
+                        _transport, protocol = await loop.create_connection(
+                            lambda: SipTcpConnectionProtocol(self, transport_name, outbound=True),
+                            target.host,
+                            target.port,
+                            ssl=ssl_context,
+                            server_hostname=destination[0] if ssl_context else None,
+                        )
+                        connection = protocol  # type: ignore[assignment]
+                        if connection.closed:
+                            raise ConnectionError("connection rejected by bounded stream pool")
+                        self.stream_connections[key] = connection
+                        self.stream_connects += 1
+                        self.logger.networking(
+                            "SIP DNS TARGET SELECTED",
+                            f"transport={transport_name} domain={destination[0]} target={target.host}:{target.port} attempt={attempt}",
+                        )
+                        break
+                    except (OSError, ConnectionError, ssl.SSLError) as exc:
+                        last_error = exc
+                        self.logger.networking(
+                            "SIP DNS TARGET FAILED",
+                            f"transport={transport_name} domain={destination[0]} target={target.host}:{target.port} attempt={attempt} error={exc}",
+                        )
+                if connection is None or connection.closed:
+                    raise ConnectionError(last_error or f"no DNS targets for {destination[0]}")
             connection.send(packet)
             self.logger.write(
                 transport_name,
@@ -5860,9 +6989,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 f"{transport_name.upper()} TX FAILED",
                 f"destination={destination[0]}:{destination[1]} failures={self.stream_failures} error={exc}",
             )
+            manager = self.client_transactions.get(transport_name)
+            if manager:
+                manager.transport_error(destination, exc)
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         self.transactions.close()
+        for manager in self.client_transactions.values():
+            manager.close()
         for task in self.background_tasks:
             task.cancel()
         if self.shared_state:
@@ -5870,30 +7004,53 @@ class SipServerProtocol(asyncio.DatagramProtocol):
 
 
 def parse_sip_message(
-    text: str,
+    text: Union[str, bytes],
     source: Tuple[str, int],
     transport_name: str = "udp",
     connection: Optional[SipTcpConnectionProtocol] = None,
+    limits: SipParseLimits = SipParseLimits(),
+    allowed_content_types: Optional[Tuple[str, ...]] = None,
 ) -> SipMessage:
-    head, _, body = text.partition(CRLF + CRLF)
-    lines = head.splitlines()
-    start_line = lines[0].strip()
+    data = text.encode("utf-8") if isinstance(text, str) else text
+    parsed = parse_sip_bytes(data, limits=limits, allowed_content_types=allowed_content_types)
+
+    return SipMessage(
+        start_line=parsed.start_line,
+        headers={name: ", ".join(values) for name, values in parsed.headers.items()},
+        body=parsed.body.decode("utf-8", errors="replace"),
+        body_bytes=parsed.body,
+        source=source,
+        transport=normalize_sip_transport(transport_name),
+        connection=connection,
+    )
+
+
+def best_effort_error_request(
+    data: bytes,
+    source: Tuple[str, int],
+    transport_name: str,
+    connection: Optional[SipTcpConnectionProtocol],
+) -> Optional[SipMessage]:
+    """Recover response-routing fields from a rejected request without accepting it."""
+    head = data.split(b"\r\n\r\n", 1)[0]
+    lines = head.split(b"\r\n")
+    if not lines or lines[0].startswith(b"SIP/2.0 "):
+        return None
+    start_line = lines[0].decode("ascii", errors="replace")[:4096]
+    if len(start_line.split(" ")) < 3:
+        return None
     headers: Dict[str, str] = {}
-
-    current_name = ""
-    for line in lines[1:]:
-        if line.startswith((" ", "\t")) and current_name:
-            headers[current_name] += " " + line.strip()
-            continue
-
-        name, _, value = line.partition(":")
-        current_name = normalize_header_name(name.strip())
-        headers[current_name] = value.strip()
-
+    for line in lines[1:101]:
+        name, separator, value = line.partition(b":")
+        if separator:
+            normalized = normalize_header_name(name.decode("ascii", errors="ignore").strip())
+            if normalized and normalized not in headers:
+                headers[normalized] = value.decode("utf-8", errors="replace").strip()[:4096]
     return SipMessage(
         start_line=start_line,
         headers=headers,
-        body=body,
+        body="",
+        body_bytes=b"",
         source=source,
         transport=normalize_sip_transport(transport_name),
         connection=connection,
@@ -6067,13 +7224,21 @@ def parse_sip_transport_set(value: str) -> Tuple[str, ...]:
     return transports or ("udp",)
 
 
-def tcp_content_length(headers: bytes) -> int:
+def tcp_content_length(headers: bytes, *, strict: bool = False) -> int:
+    values: List[str] = []
     for line in headers.decode("utf-8", errors="replace").splitlines():
         name, _, value = line.partition(":")
         if normalize_header_name(name.strip()) == "content-length":
-            stripped = value.strip()
-            return int(stripped) if stripped.isdigit() else 0
-    return 0
+            values.append(value.strip())
+    if not values:
+        return 0
+    if strict and len(values) != 1:
+        raise SipParseError("SIP stream has multiple Content-Length headers")
+    if not values[0].isdigit():
+        if strict:
+            raise SipParseError("SIP stream Content-Length is invalid")
+        return 0
+    return int(values[0])
 
 
 def format_route_target(target: str, user: str) -> str:
@@ -6884,13 +8049,14 @@ def coerce_config_value(key: str, value: Any) -> Any:
         return "off" if not value else "active"
     if key in {"sip_port", "tls_port", "rtp_min", "rtp_max", "health_port", "rtpengine_max_sessions"}:
         return int(value)
-    if key in {"rtpengine_timeout", "b2bua_invite_timeout"}:
+    if key in {"rtpengine_timeout", "b2bua_invite_timeout", "tls_reload_interval"}:
         return float(value)
     if key in {
         "debug",
         "b2bua_ladder_logs",
         "reject_unknown_routes",
         "tls_verify_peer",
+        "tls_require_sni",
         "rtpengine_g711_only",
         "rtpengine_plain_rtp_sdp",
         "rtpengine_explicit_rtcp",
@@ -6925,6 +8091,12 @@ def coerce_config_value(key: str, value: Any) -> Any:
         "header_normalization",
         "call_admission",
         "business_services",
+        "sip_parser",
+        "sip_stream",
+        "sip_transactions",
+        "server_location",
+        "registrar",
+        "overload",
         "media_quality",
         "ai_voice_gateway",
         "ha",
@@ -6932,7 +8104,7 @@ def coerce_config_value(key: str, value: Any) -> Any:
         if not isinstance(value, dict):
             raise ValueError(f"{key} must be a JSON object")
         return dict(value)
-    if key in {"rtpengine_directions", "rtpengine_interfaces", "rtpengine_sdes"}:
+    if key in {"rtpengine_directions", "rtpengine_interfaces", "rtpengine_sdes", "tls_server_names"}:
         if isinstance(value, str):
             return tuple(item.strip() for item in value.split(",") if item.strip())
         if isinstance(value, list):
@@ -7110,6 +8282,8 @@ def validate_config(config: ServerConfig) -> None:
         raise ValueError(f"media_backend must be one of {', '.join(sorted(MEDIA_BACKENDS))}")
     if config.rtpengine_timeout <= 0:
         raise ValueError("rtpengine_timeout must be greater than 0")
+    if config.tls_reload_interval <= 0:
+        raise ValueError("tls_reload_interval must be greater than zero")
     if config.media_backend == "rtpengine":
         parse_rtpengine_url(config.rtpengine_url)
     ai_config = AiVoiceConfig.from_dict(config.ai_voice_gateway)
@@ -7137,6 +8311,47 @@ def validate_config(config: ServerConfig) -> None:
         config.ha = dict(config.ha)
     if not isinstance(config.business_services, dict):
         raise ValueError("business_services must be an object")
+    if not isinstance(config.sip_parser, dict):
+        raise ValueError("sip_parser must be an object")
+    if not isinstance(config.sip_stream, dict):
+        raise ValueError("sip_stream must be an object")
+    if not isinstance(config.server_location, dict):
+        raise ValueError("server_location must be an object")
+    if not isinstance(config.registrar, dict):
+        raise ValueError("registrar must be an object")
+    if not isinstance(config.overload, dict):
+        raise ValueError("overload must be an object")
+    algorithms = [str(value).upper() for value in config.registrar.get("digest_algorithms", SUPPORTED_DIGEST_ALGORITHMS)]
+    if not algorithms or any(value not in SUPPORTED_DIGEST_ALGORITHMS for value in algorithms):
+        raise ValueError("registrar.digest_algorithms supports SHA-256 and MD5")
+    if not isinstance(config.sip_transactions, dict):
+        raise ValueError("sip_transactions must be an object")
+    for timer_name, default in (("t1", 0.5), ("t2", 4.0), ("t4", 5.0), ("timer_c", 180.0)):
+        if float(config.sip_transactions.get(timer_name, default)) <= 0:
+            raise ValueError(f"sip_transactions.{timer_name} must be greater than zero")
+    stream_idle_timeout = float(config.sip_stream.get("idle_timeout", 120.0))
+    stream_max_connections = int(config.sip_stream.get("max_connections", 1024))
+    if stream_idle_timeout <= 0:
+        raise ValueError("sip_stream.idle_timeout must be greater than zero")
+    if stream_max_connections <= 0:
+        raise ValueError("sip_stream.max_connections must be greater than zero")
+    location_cache_ttl = float(config.server_location.get("cache_ttl", 60.0))
+    location_negative_ttl = float(config.server_location.get("negative_ttl", 5.0))
+    location_max_targets = int(config.server_location.get("max_targets", 8))
+    if location_cache_ttl <= 0 or location_negative_ttl <= 0:
+        raise ValueError("server_location cache TTL values must be greater than zero")
+    if location_max_targets <= 0:
+        raise ValueError("server_location.max_targets must be greater than zero")
+    parser_values = {
+        "max_message_bytes": int(config.sip_parser.get("max_message_bytes", 65_535)),
+        "max_header_bytes": int(config.sip_parser.get("max_header_bytes", 16_384)),
+        "max_header_count": int(config.sip_parser.get("max_header_count", 100)),
+        "max_line_bytes": int(config.sip_parser.get("max_line_bytes", 4_096)),
+    }
+    if any(value <= 0 for value in parser_values.values()):
+        raise ValueError("sip_parser limits must be positive integers")
+    if parser_values["max_header_bytes"] > parser_values["max_message_bytes"]:
+        raise ValueError("sip_parser.max_header_bytes must not exceed max_message_bytes")
     transfer_config = config.business_services.get("transfer", {})
     if transfer_config and not isinstance(transfer_config, dict):
         raise ValueError("business_services.transfer must be an object")
@@ -7265,6 +8480,15 @@ def create_tls_contexts(config: ServerConfig) -> Tuple[Optional[ssl.SSLContext],
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_context.minimum_version = ssl.TLSVersion.TLSv1_2
     server_context.load_cert_chain(config.tls_certfile, config.tls_keyfile)
+    allowed_server_names = {name.lower().rstrip(".") for name in config.tls_server_names}
+    if allowed_server_names or config.tls_require_sni:
+        def enforce_sni(_socket: ssl.SSLSocket, server_name: Optional[str], _context: ssl.SSLContext) -> None:
+            normalized = (server_name or "").lower().rstrip(".")
+            if (not normalized and config.tls_require_sni) or (
+                normalized and allowed_server_names and normalized not in allowed_server_names
+            ):
+                raise ssl.SSLError(f"unrecognized SIP TLS server name {server_name or 'missing'}")
+        server_context.set_servername_callback(enforce_sni)
     if config.tls_verify_peer:
         server_context.verify_mode = ssl.CERT_REQUIRED
         if config.tls_cafile:
@@ -7277,6 +8501,31 @@ def create_tls_contexts(config: ServerConfig) -> Tuple[Optional[ssl.SSLContext],
         client_context.check_hostname = False
         client_context.verify_mode = ssl.CERT_NONE
     return server_context, client_context
+
+
+async def reload_tls_certificate_loop(
+    context: ssl.SSLContext,
+    certfile: str,
+    keyfile: str,
+    interval: float,
+    logger: SbcLogger,
+) -> None:
+    """Reload certificate material in place so new TLS handshakes see rotations."""
+    last_signature: Optional[Tuple[int, int]] = None
+    while True:
+        try:
+            signature = (Path(certfile).stat().st_mtime_ns, Path(keyfile).stat().st_mtime_ns)
+            if last_signature is None:
+                last_signature = signature
+            elif signature != last_signature:
+                context.load_cert_chain(certfile, keyfile)
+                last_signature = signature
+                logger.tls("TLS CERTIFICATE RELOADED", f"certfile={certfile} keyfile={keyfile}")
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ssl.SSLError) as exc:
+            logger.tls("TLS CERTIFICATE RELOAD FAILED", f"certfile={certfile} error={exc}")
+        await asyncio.sleep(interval)
 
 
 async def handle_health_request(
@@ -7421,6 +8670,12 @@ async def main() -> None:
         transport_policies=config.transport_policies,
         call_admission=config.call_admission,
         business_services=config.business_services,
+        sip_parser=config.sip_parser,
+        sip_stream=config.sip_stream,
+        sip_transactions=config.sip_transactions,
+        server_location=config.server_location,
+        registrar=config.registrar,
+        overload=config.overload,
         media_backend=config.media_backend,
         rtpengine_client=rtpengine_client,
         reject_unknown_routes=config.reject_unknown_routes,
@@ -7483,6 +8738,18 @@ async def main() -> None:
     sip_listeners.append(health_server)
     sbc_logger.platform("HEALTH SERVER STARTED", f"local={config.health_ip}:{config.health_port}")
     sip_protocol.start_background_tasks()
+    if tls_server_context is not None:
+        sip_protocol.background_tasks.append(
+            asyncio.create_task(
+                reload_tls_certificate_loop(
+                    tls_server_context,
+                    config.tls_certfile,
+                    config.tls_keyfile,
+                    config.tls_reload_interval,
+                    sbc_logger,
+                )
+            )
+        )
 
     await asyncio.Future()
 

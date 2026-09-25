@@ -1,4 +1,4 @@
-name: Rebuild public v3.0.0 container images
+name: Publish public v4.0.0 container images
 
 on:
   workflow_dispatch:
@@ -30,12 +30,12 @@ jobs:
           set -euo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
           requested="${REQUESTED_VERSION#v}"
-          test "$version" = "3.0.0"
-          test "$requested" = "3.0.0"
-          test "$(awk '$1 == "version:" {print $2; exit}' charts/playsbc/Chart.yaml)" = "3.0.0"
-          test "$(awk '$1 == "appVersion:" {gsub(/\"/, "", $2); print $2; exit}' charts/playsbc/Chart.yaml)" = "3.0.0"
+          test "$version" = "4.0.0"
+          test "$requested" = "4.0.0"
+          test "$(awk '$1 == "version:" {print $2; exit}' charts/playsbc/Chart.yaml)" = "4.0.0"
+          test "$(awk '$1 == "appVersion:" {gsub(/\"/, "", $2); print $2; exit}' charts/playsbc/Chart.yaml)" = "4.0.0"
           grep -q '^MIT License$' LICENSE
-          echo "version=3.0.0" >> "$GITHUB_OUTPUT"
+          echo "version=4.0.0" >> "$GITHUB_OUTPUT"
 
   publish:
     name: Rebuild public ${{ matrix.image }}
@@ -75,7 +75,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           tags: |
             type=raw,value=${{ needs.policy.outputs.version }}
-            type=raw,value=3.0
+            type=raw,value=4.0
 
       - name: Build and push
         uses: docker/build-push-action@v6

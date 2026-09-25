@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="Protocol Core Layer 4 short session interval">
+  <send retrans="500"><![CDATA[
+    INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+    Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+    From: <sip:[caller]@[local_ip]:[local_port]>;tag=[call_number]
+    To: <sip:[service]@[remote_ip]:[remote_port]>
+    Call-ID: [call_id]
+    CSeq: 1 INVITE
+    Contact: <sip:[caller]@[local_ip]:[local_port]>
+    Supported: timer
+    Session-Expires: 30;refresher=uac
+    Max-Forwards: 70
+    Content-Length: 0
+
+  ]]></send>
+  <recv response="422">
+    <action><ereg regexp="Min-SE: 90" search_in="msg" check_it="true" assign_to="1" /></action>
+  </recv>
+  <nop><action><log message="min-se-rejected=[$1]" /></action></nop>
+  <send><![CDATA[
+    ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+    Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+    [last_From:]
+    [last_To:]
+    [last_Call-ID:]
+    CSeq: 1 ACK
+    Max-Forwards: 70
+    Content-Length: 0
+
+  ]]></send>
+</scenario>
