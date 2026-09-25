@@ -1,6 +1,6 @@
 # PlaySBC Real-Device Lab
 
-This guide covers the validated OBi1022 `1001` and Zoiper `1002` call flow in AKS and the local LAN lane. Build the AKS base with [AKS.md](AKS.md), or use the separate [kind real-device procedure](KUBERNETES_HELM_RUNBOOK.md#dedicated-local-real-device-lab).
+This guide covers the validated OBi1022 `1001` and Zoiper `1002` call flow in AKS and the local LAN lane. Build the AKS base with [AZURE_AKS.md](AZURE_AKS.md), or use the separate [kind real-device procedure](KUBERNETES_HELM_RUNBOOK.md#dedicated-local-real-device-lab).
 
 ```text
 OBi1022 1001
@@ -22,7 +22,7 @@ Do not reuse the local values file in AKS or the AKS values file locally. The ca
 Run in Cloud Shell after the base AKS services have public IPs:
 
 ```bash
-export PLAYSBC_VERSION=3.0.0
+export PLAYSBC_VERSION=4.0.0
 export AKS_RG=playsbc-aks-rg
 export NETWORK_RG=playsbc-network-rg
 export AKS_NAME=playsbc-aks
@@ -169,7 +169,7 @@ Pass criteria:
 Use the released capture tool and one temporary host-network `netshoot` pod:
 
 ```bash
-export PLAYSBC_VERSION=3.0.0
+export PLAYSBC_VERSION=4.0.0
 
 export AKS_CONTEXT=$(kubectl config current-context)
 

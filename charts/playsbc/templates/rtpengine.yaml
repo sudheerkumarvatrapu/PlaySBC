@@ -66,8 +66,12 @@ spec:
               exec rtpengine --foreground --log-stderr
 {{- if .Values.rtpengine.hostNetwork }}
               --interface=default/${NODE_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
+              --interface=core/${NODE_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
+              --interface=peer/${NODE_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
 {{- else }}
               --interface=default/${POD_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
+              --interface=core/${POD_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
+              --interface=peer/${POD_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
 {{- end }}
               --listen-ng=0.0.0.0:{{ .Values.rtpengine.controlPort }}
               --port-min={{ .Values.rtpengine.rtpMin }}

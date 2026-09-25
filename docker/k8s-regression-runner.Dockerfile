@@ -37,6 +37,14 @@ COPY rtp /workspace/rtp
 COPY sip /workspace/sip
 COPY sipp /workspace/sipp
 COPY tests/rasa /workspace/tests/rasa
+COPY tests/test_sip_transaction.py /workspace/tests/test_sip_transaction.py
+COPY tests/test_sip_client_transaction.py /workspace/tests/test_sip_client_transaction.py
+COPY tests/test_sip_parser.py /workspace/tests/test_sip_parser.py
+COPY tests/test_sip_uri.py /workspace/tests/test_sip_uri.py
+COPY tests/test_mini_call_server.py /workspace/tests/test_mini_call_server.py
+COPY tests/test_sip_stream.py /workspace/tests/test_sip_stream.py
+COPY tests/test_sip_rfc4475.py /workspace/tests/test_sip_rfc4475.py
+COPY tests/test_sip_parser_fuzz.py /workspace/tests/test_sip_parser_fuzz.py
 COPY tools /workspace/tools
 COPY mini_call_server.py /workspace/mini_call_server.py
 COPY VERSION /workspace/VERSION

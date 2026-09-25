@@ -1,11 +1,18 @@
 # PlaySBC AI Voice Gateway
 
+> [!IMPORTANT]
+> This page documents inherited PlaySBC AI/Rasa behavior retained for baseline
+> compatibility and regression. New AI Voice Gateway development has moved to
+> [PlayConverse](https://github.com/sudheerkumarvatrapu/PlayConverse). PlaySBC
+> will evolve only the SBC-side signaling, media, security, observability, and
+> failure-handling contract needed to interconnect with PlayConverse.
+
 PlaySBC can answer a SIP call as an AI endpoint, anchor its media through RTPengine, convert speech to text, send the transcript to Rasa, synthesize the response, and preserve the evidence in one report.
 
-The public v3.0.0 foundation exposes a provider-neutral, ordered
-asynchronous response stream. Rasa is the first adapter; future bot providers
-implement the same `ConversationProvider` contract without changing SIP or
-media control. Each provider turn now has an overall deadline, a deterministic
+The inherited implementation exposes a provider-neutral, ordered asynchronous
+response stream with a Rasa adapter. This code is retained for compatibility
+and regression; it is not an active PlaySBC product-development track. Each
+provider turn has an overall deadline, a deterministic
 fallback on timeout or provider failure, and a cooperative interruption signal
 that is raised when call control finalizes the AI dialog.
 
@@ -121,11 +128,11 @@ is enabled for live calls.
 
 Each voice profile should provide `sipmsg.log`, one merged `capture.pcap`, SIP/media/AI logs, an aligned ladder, and playable WAV evidence when speech is involved. Chat profiles provide an initially collapsed chat window, NLU verdict JSON, and an NLP ladder; old voice audio is not shown on chat-only reports.
 
-## v3.0.0 Production Target
+## Product Boundary
 
-- Support multiple bot integrations through a stable provider adapter instead of coupling call control to one bot.
-- Feed generated TTS RTP into live calls for every provider path and prove both media directions.
-- Package production model images and explicit health/readiness contracts for STT and TTS providers.
-- Add stateful multi-turn workflows, RFC 4733 DTMF, transfer, conference, fallback, and bot-driven release.
-- Export per-provider STT, bot, TTS, streaming, fallback, and action latency/error metrics.
-- Preserve canonical SIP/RTP/RTCP/AI evidence and all existing Docker, kind, AKS, and real-device gates.
+No new bot adapters, prompts, agents, STT/TTS providers, conversation flows,
+or AI runtime packaging will be developed in PlaySBC. Those capabilities are
+owned by PlayConverse. PlaySBC work is limited to the versioned SIP/media
+interconnect, routing and admission policy, health and failure mapping,
+security, correlation, observability, and end-to-end evidence required to
+connect calls to PlayConverse.

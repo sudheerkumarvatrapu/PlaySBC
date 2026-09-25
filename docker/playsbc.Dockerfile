@@ -7,7 +7,7 @@ RUN apt-get update \
         libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir piper-tts vosk \
+RUN python3 -m pip install --no-cache-dir piper-tts vosk dnspython==2.7.0 \
     && mkdir -p /opt/playsbc/models/piper /opt/playsbc/models/vosk \
     && for attempt in 1 2 3 4 5; do \
         python3 -m piper.download_voices en_US-lessac-low --data-dir /opt/playsbc/models/piper \

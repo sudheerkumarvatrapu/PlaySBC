@@ -8,3 +8,6 @@ recordings/
 artifacts/
 config.local.json
 .models/
+
+# Local Python virtual environment
+.venv/

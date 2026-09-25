@@ -10,10 +10,16 @@ Use one canonical page for each task. Supporting pages explain design and eviden
 | Local source-image compatibility gate | [Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md#build-current-source) | kind |
 | Local topology and networking | [Local Kubernetes lab](KUBERNETES_LOCAL.md) | kind/minikube |
 | OBi1022/Zoiper local LAN calls | [Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md#dedicated-local-real-device-lab) | dedicated kind |
-| Azure creation, deployment, regression, and cleanup | [Azure AKS runbook](AKS.md) | AKS/Cloud Shell |
+| Azure creation, deployment, regression, and cleanup | [Azure AKS runbook](AZURE_AKS.md) | AKS/Cloud Shell |
 | OBi1022 and Zoiper calls | [Real-device lab](REAL_DEVICE_LAB.md) | AKS or dedicated kind |
 | RTPengine design and focused checks | [RTPengine](RTPENGINE_LOCAL.md) | local/Kubernetes |
-| Rasa voice and chat regression | [AI Voice Gateway](AI_VOICE_GATEWAY.md) | Docker/Kubernetes |
+| Historical inherited AI/Rasa regression | [AI Voice Gateway](AI_VOICE_GATEWAY.md) | Compatibility |
+| PlayFabric and PlayConverse integration | [PlayFabric and PlayConverse architecture](PLAYFABRIC_PLAYCONVERSE_ARCHITECTURE.md) | Kubernetes |
+| Protocol transport, DNS, connection reuse, and TLS | [Protocol Core Layer 2](PROTOCOL_CORE_LAYER2.md) | Kubernetes |
+| SIP transactions, timers, CANCEL, and retransmissions | [Protocol Core Layer 3](PROTOCOL_CORE_LAYER3.md) | Kubernetes |
+| SIP dialogs, PRACK, session timers, UPDATE, forks, and HA fencing | [Protocol Core Layer 4](PROTOCOL_CORE_LAYER4.md) | Kubernetes |
+| Registrar, routing, identity, and privacy policy | [Protocol Core Layer 5](PROTOCOL_CORE_LAYER5.md) | Kubernetes |
+| Overload, security, recovery, and operations | [Protocol Core Layer 6](PROTOCOL_CORE_LAYER6.md) | Kubernetes |
 | Hold, transfer, and call forwarding | [RFC 5359 business calling services](BUSINESS_CALLING_SERVICES.md) | source/Docker/Kubernetes/devices |
 | Grafana, Prometheus, and metrics | [Observability](OBSERVABILITY.md) | Kubernetes |
 | Roadmap and production gates | [Evolution plan](EVOLUTION_PLAN.md) | all |
@@ -36,4 +42,4 @@ Use one canonical page for each task. Supporting pages explain design and eviden
 4. Commands must fail before changing workloads when variables or images are invalid.
 5. Local kind regression, AKS regression, Docker regression, and real-device behavior must remain isolated.
 
-Current release: `v3.0.0`.
+Current release: `v4.0.0`.

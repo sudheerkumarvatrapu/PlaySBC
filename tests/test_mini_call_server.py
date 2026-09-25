@@ -5,6 +5,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import mini_call_server as server
 from rtp.rtcp import (
@@ -19,6 +21,17 @@ from rtp.rtcp import (
 
 
 class SipParsingTests(unittest.TestCase):
+    def test_parser_runtime_limits_load_from_config(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            handle.write('{"sip_parser":{"max_message_bytes":2048,"max_header_bytes":1024,"max_header_count":20,"max_line_bytes":256,"allowed_content_types":["application/sdp"]}}')
+            path = handle.name
+        try:
+            config = server.load_config_file(path)
+            self.assertEqual(config.sip_parser["max_message_bytes"], 2048)
+            server.validate_config(config)
+        finally:
+            os.unlink(path)
+
     def test_parse_sip_message_and_compact_headers(self):
         raw = (
             "OPTIONS sip:echo@127.0.0.1 SIP/2.0\r\n"
@@ -63,6 +76,29 @@ class SipParsingTests(unittest.TestCase):
 
         protocol.receive_sip_data(b"keep-alive\r\n", ("192.0.2.10", 5060))
         protocol.receive_sip_data(b"\r\n\r\n", ("192.0.2.11", 61995))
+
+    def test_invalid_request_uri_gets_deterministic_wire_response(self):
+        class CaptureTransport:
+            def __init__(self):
+                self.sent = []
+
+            def sendto(self, packet, destination):
+                self.sent.append((packet, destination))
+
+        protocol = server.SipServerProtocol(
+            "127.0.0.1", 25062, None, server.SbcLogger(None), server.PCMU,
+            "playsbc", {}, (), {}, (), False,
+        )
+        transport = CaptureTransport()
+        protocol.transport = transport
+        packet = (
+            b"OPTIONS tel:+15551212 SIP/2.0\r\n"
+            b"Via: SIP/2.0/UDP client.example:5060;branch=z9hG4bK-error\r\n"
+            b"From: <sip:a@example.test>;tag=a\r\nTo: <sip:b@example.test>\r\n"
+            b"Call-ID: error-response\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n"
+        )
+        protocol.receive_sip_data(packet, ("192.0.2.10", 5060))
+        self.assertIn(b"SIP/2.0 416 Unsupported URI Scheme", transport.sent[0][0])
 
     def test_sdp_payload_and_dtmf_detection(self):
         sdp = (
@@ -443,6 +479,25 @@ class SipParsingTests(unittest.TestCase):
 
         self.assertIn(";received=122.171.34.210", response_via)
         self.assertIn(";rport=5072", response_via)
+
+    def test_rfc3581_response_destination_uses_rport_or_sent_by_port(self):
+        with_rport = server.SipMessage(
+            "OPTIONS sip:x@example SIP/2.0",
+            {"via": "SIP/2.0/UDP 192.168.1.9:5060;branch=z9;rport"},
+            "",
+            ("198.51.100.10", 62000),
+        )
+        without_rport = server.SipMessage(
+            "OPTIONS sip:x@example SIP/2.0",
+            {"via": "SIP/2.0/UDP 192.168.1.9:5070;branch=z9"},
+            "",
+            ("198.51.100.10", 62000),
+        )
+        self.assertEqual(server.response_destination(with_rport), ("198.51.100.10", 62000))
+        self.assertEqual(server.response_destination(without_rport), ("198.51.100.10", 5070))
+        self.assertNotIn(
+            "received=", server.response_via_header(without_rport.header("via"), ("192.168.1.9", 5070))
+        )
 
     def test_make_sdp_can_include_multiple_codecs_and_dtmf(self):
         sdp = server.make_sdp("127.0.0.1", 30000, server.PCMU, dtmf_payload_type=101, payloads=(0, 8, 101))
@@ -1497,6 +1552,56 @@ class DtmfTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_sip_transaction_timers_are_configurable_and_validated(self):
+        config = server.ServerConfig(sip_transactions={"t1": 0.25, "t2": 2.0, "t4": 4.0, "timer_c": 90.0})
+        server.validate_config(config)
+        protocol = server.SipServerProtocol(
+            "127.0.0.1", 5060, None, server.SbcLogger(None), server.PCMU, "playsbc", {}, (), {}, (), False,
+            sip_transactions=config.sip_transactions,
+        )
+        self.assertEqual(protocol.transactions.t1, 0.25)
+        self.assertEqual(protocol.client_transactions["udp"].timer_c, 90.0)
+        with self.assertRaises(ValueError):
+            server.validate_config(server.ServerConfig(sip_transactions={"timer_c": 0}))
+
+    def test_non_2xx_invite_final_acks_each_matched_response(self):
+        async def exercise():
+            protocol = server.SipServerProtocol(
+                "127.0.0.1", 5060, None, server.SbcLogger(None), server.PCMU,
+                "playsbc", {}, (), {}, (), False,
+            )
+            protocol.client_transactions["udp"].send_packet = lambda *_: None
+            protocol.send_outbound_ack = Mock()
+            call = SimpleNamespace(outbound_to_header="", outbound_contact_uri="", outbound_target=SimpleNamespace(uri="sip:b@example.test"))
+            protocol.b2bua_calls_by_outbound["layer3-ack"] = call
+            protocol.pending_outbound_responses["layer3-ack"] = asyncio.Queue()
+            via = "SIP/2.0/UDP sbc.example:5060;branch=z9hG4bK-layer3-ack"
+            protocol.client_transactions["udp"].start_request(
+                "INVITE", via, "1 INVITE", "layer3-ack", b"INVITE", ("127.0.0.1", 5060)
+            )
+            response = server.SipMessage(
+                "SIP/2.0 486 Busy Here",
+                {"via": via, "cseq": "1 INVITE", "call-id": "layer3-ack", "to": "<sip:b@example.test>;tag=busy"},
+                "", ("127.0.0.1", 5060),
+            )
+            protocol.handle_response(response)
+            protocol.handle_response(response)
+            self.assertEqual(protocol.send_outbound_ack.call_count, 2)
+            protocol.send_outbound_ack.assert_called_with(call, invite_transaction=True)
+            protocol.client_transactions["udp"].close()
+
+        asyncio.run(exercise())
+
+    def test_sip_stream_limits_are_configurable_and_validated(self):
+        config = server.ServerConfig(sip_stream={"idle_timeout": 30.5, "max_connections": 64})
+        server.validate_config(config)
+        self.assertEqual(config.sip_stream["idle_timeout"], 30.5)
+        self.assertEqual(config.sip_stream["max_connections"], 64)
+
+        for invalid in ({"idle_timeout": 0}, {"max_connections": 0}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                server.validate_config(server.ServerConfig(sip_stream=invalid))
+
     def test_load_config_and_cli_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
@@ -1812,6 +1917,85 @@ class ConfigTests(unittest.TestCase):
         assert restored_dialog is not None
         self.assertEqual(restored_dialog.state, server.CallState.ANSWERED)
         self.assertEqual(restored_dialog.remote_cseq, 1)
+
+    def test_shared_registration_rejects_stale_active_active_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = server.SharedStateStore(
+                str(Path(tmp) / "registration-fence.sqlite3"), "node-a", server.SbcLogger(None)
+            )
+            fresh = server.Registration(
+                "1002", "sip:1002@192.0.2.20:5060", ("192.0.2.20", 5060),
+                time.time() + 120, registered_at=200.0,
+            )
+            stale = server.Registration(
+                "1002", "sip:1002@192.0.2.10:5060", ("192.0.2.10", 5060),
+                time.time() + 120, registered_at=100.0,
+            )
+            store.save_registration(fresh)
+            store.save_registration(stale)
+            loaded = store.load_registrations()
+            store.close()
+        self.assertEqual(loaded["1002"].contact_uri, fresh.contact_uri)
+
+    def test_ha_dialog_takeover_fences_stale_owner_and_restores_layer4_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = str(Path(tmp) / "dialog-fence.sqlite3")
+            first = server.SharedStateStore(state_path, "playsbc-a", server.SbcLogger(None))
+            second = server.SharedStateStore(state_path, "playsbc-b", server.SbcLogger(None))
+            dialog = server.SipDialog(
+                call_id="fenced-call", local_tag="local", remote_tag="remote",
+                invite_branch="z9hG4bK-fence", remote_cseq=1,
+                state=server.CallState.ANSWERED,
+                route_set=("<sip:proxy.example;lr>",),
+                remote_target="sip:peer@example.test",
+            )
+            dialog.set_session_timer(90, "uac", now=100.0)
+            first.save_dialog(dialog)
+            first_epoch = first.owned_dialog_epochs[dialog.call_id]
+            self.assertTrue(first.owns_dialog(dialog.call_id))
+            second_epoch = second.claim_dialog(dialog.call_id, takeover=True)
+            self.assertGreater(second_epoch, first_epoch)
+            self.assertFalse(first.owns_dialog(dialog.call_id))
+            with self.assertRaises(server.DialogError):
+                first.save_dialog(dialog)
+            restored = second.load_dialog(dialog.call_id)
+            assert restored is not None
+            self.assertEqual(restored.route_set, dialog.route_set)
+            self.assertEqual(restored.remote_target, dialog.remote_target)
+            self.assertEqual(restored.session_expires_at, 190.0)
+            second.save_dialog(restored)
+            first.close()
+            second.close()
+
+    def test_ha_stale_owner_cannot_send_dialog_packets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = str(Path(tmp) / "packet-fence.sqlite3")
+            logger = server.SbcLogger(None)
+            media = server.MediaServer("127.0.0.1", 12000, 12010, None, logger)
+            protocol = server.SipServerProtocol(
+                "127.0.0.1", 25062, media, logger, server.PCMU,
+                "playsbc", {}, (), {}, (), False,
+                ha={"enabled": True, "node_id": "playsbc-a", "shared_state_path": state_path},
+            )
+            class CaptureTransport:
+                def __init__(self):
+                    self.sent = []
+                def sendto(self, packet, destination):
+                    self.sent.append((packet, destination))
+            transport = CaptureTransport()
+            protocol.transport = transport
+            dialog = server.SipDialog("fenced-packet", "local", "remote", "branch", 1)
+            protocol.dialogs.dialogs[dialog.call_id] = dialog
+            protocol.shared_state.save_dialog(dialog)
+            packet = b"BYE sip:peer@example.test SIP/2.0\r\nCall-ID: fenced-packet\r\nContent-Length: 0\r\n\r\n"
+            protocol._send_packet(packet, ("127.0.0.1", 25061))
+            self.assertEqual(len(transport.sent), 1)
+            successor = server.SharedStateStore(state_path, "playsbc-b", logger)
+            successor.claim_dialog(dialog.call_id, takeover=True)
+            protocol._send_packet(packet, ("127.0.0.1", 25061))
+            self.assertEqual(len(transport.sent), 1)
+            successor.close()
+            protocol.shared_state.close()
 
     def test_shared_state_store_replays_b2bua_call_for_failover(self):
         with tempfile.TemporaryDirectory() as tmp:

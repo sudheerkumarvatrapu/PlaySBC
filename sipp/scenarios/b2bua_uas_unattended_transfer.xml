@@ -2,7 +2,11 @@
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 
 <scenario name="RFC 5359 unattended transfer recipient">
-  <recv request="INVITE" crlf="true" />
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="sip:[^@]+@([^:>;]+):([0-9]+)" search_in="hdr" header="Contact:" check_it="true" assign_to="2,3,4" />
+    </action>
+  </recv>
 
   <send>
     <![CDATA[
@@ -51,6 +55,7 @@
 
   <nop>
     <action>
+      <log message="sbc-dialog-contact=[$2]" />
       <log message="refer-target=[$1]" />
     </action>
   </nop>
@@ -70,7 +75,7 @@
 
   <send retrans="500">
     <![CDATA[
-      NOTIFY sip:b2bua@[remote_ip]:[remote_port] SIP/2.0
+      NOTIFY sip:b2bua@[$3]:[$4] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       [last_To:]
       [last_From:]
@@ -90,7 +95,7 @@
   <recv response="200" />
   <send retrans="500" start_rtd="bye">
     <![CDATA[
-      BYE sip:b2bua@[remote_ip]:[remote_port] SIP/2.0
+      BYE sip:b2bua@[$3]:[$4] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       [last_From:]
       [last_To:]

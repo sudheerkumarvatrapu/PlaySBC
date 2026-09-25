@@ -146,6 +146,90 @@ def sip_body(payload: bytes) -> bytes:
 
 
 class SippScenarioTests(unittest.TestCase):
+    def test_protocol_core_live_call_profiles_cover_layer1_and_layer2(self):
+        layer1 = run_k8s_regression.profile_values("protocol-core-layer1-live-call", "unit-k8s")
+        layer1_xml = run_k8s_regression.rendered_scenario(layer1, "uac")
+        self.assertEqual(layer1.uac_scenario, "protocol_core_layer1_uac.xml")
+        self.assertIn("INVITE sip:[service]@[remote_ip]:[remote_port];transport=udp", layer1_xml)
+        self.assertIn("v: SIP/2.0/[transport]", layer1_xml)
+        self.assertIn("[folded_subject]", layer1_xml)
+        self.assertEqual(layer1.uac_keys, {"folded_subject": " folded-header-continuation"})
+        runner = run_k8s_regression.K8sRegressionRunner(
+            run_k8s_regression.parse_args(["--profile", layer1.profile]), "unit-k8s"
+        )
+        uac_args = runner.b2bua_uac_args(layer1, "/scenarios/layer1.xml", "10.0.0.10")
+        key_index = uac_args.index("folded_subject")
+        self.assertEqual(uac_args[key_index - 1], "-key")
+        self.assertEqual(uac_args[key_index + 1], " folded-header-continuation")
+        self.assertIn("X-Protocol-Core-Layer: parser-validation", layer1_xml)
+        self.assertEqual(
+            run_k8s_regression.profile_suite_label(layer1.profile),
+            "Kubernetes Protocol Core Live Calls",
+        )
+
+        layer2 = run_k8s_regression.profile_values("protocol-core-layer2-live-tcp-call", "unit-k8s")
+        self.assertEqual(layer2.sip_transport, "tcp")
+        self.assertEqual(layer2.uac_transport, "tcp")
+        self.assertEqual(layer2.uas_transport, "tcp")
+        self.assertIn("TCP CONNECTION REUSED", layer2.expected_log_markers["log.tcp"])
+        self.assertEqual(
+            run_k8s_regression.profile_suite_label(layer2.profile),
+            "Kubernetes Protocol Core Live Calls",
+        )
+
+        layer2_tls = run_k8s_regression.profile_values("protocol-core-layer2-live-tls-call", "unit-k8s")
+        self.assertEqual(layer2_tls.sip_transport, "tls")
+        self.assertEqual(layer2_tls.uac_transport, "tls")
+        self.assertEqual(layer2_tls.uas_transport, "tls")
+        self.assertIn("TLS CONNECTION REUSED", layer2_tls.expected_log_markers["log.tls"])
+
+        layer2_dns = run_k8s_regression.profile_values("protocol-core-layer2-live-dns-srv-call", "unit-k8s")
+        self.assertTrue(layer2_dns.k8s_dns_service)
+        self.assertFalse(layer2_dns.register_callee)
+        self.assertIn("SIP DNS TARGET SELECTED", layer2_dns.expected_log_markers["log.networking"])
+
+        layer2_dns_udp = run_k8s_regression.profile_values("protocol-core-layer2-live-dns-udp-call", "unit-k8s")
+        self.assertTrue(layer2_dns_udp.k8s_dns_service)
+        self.assertEqual(layer2_dns_udp.uas_transport, "udp")
+        self.assertIn("UDP TX", layer2_dns_udp.expected_log_markers["log.udp"])
+
+        layer2_rport = run_k8s_regression.profile_values("protocol-core-layer2-live-rport-call", "unit-k8s")
+        self.assertEqual(layer2_rport.uac_scenario, "protocol_core_layer2_rport_uac.xml")
+        self.assertIn("192.0.2.123:9;branch=[branch];rport", run_k8s_regression.rendered_scenario(layer2_rport, "uac"))
+
+        layer2_rotation = run_k8s_regression.profile_values("protocol-core-layer2-live-tls-rotation", "unit-k8s")
+        self.assertEqual(layer2_rotation.k8s_layer2_probe, "tls-rotation")
+        self.assertEqual(layer2_rotation.tls_reload_interval, 1.0)
+        self.assertIn("TLS CERTIFICATE RELOADED", layer2_rotation.expected_log_markers["log.tls"])
+
+        layer2_idle = run_k8s_regression.profile_values("protocol-core-layer2-live-idle-timeout", "unit-k8s")
+        self.assertEqual(layer2_idle.sip_stream["idle_timeout"], 3.0)
+        idle_probe = run_k8s_regression.layer2_probe_script("idle")
+        self.assertIn("time.sleep(5)", idle_probe)
+
+    def test_unattended_transfer_uas_targets_sbc_dialog_contact(self):
+        scenario = (ROOT / "sipp" / "scenarios" / "b2bua_uas_unattended_transfer.xml").read_text(
+            encoding="ISO-8859-1"
+        )
+        self.assertIn('search_in="hdr" header="Contact:"', scenario)
+        self.assertIn('assign_to="2,3,4"', scenario)
+        self.assertIn('sbc-dialog-contact=[$2]', scenario)
+        self.assertIn("NOTIFY sip:b2bua@[$3]:[$4] SIP/2.0", scenario)
+        self.assertIn("BYE sip:b2bua@[$3]:[$4] SIP/2.0", scenario)
+        self.assertNotIn("sip:b2bua@[remote_ip]:[remote_port]", scenario)
+
+    def test_k8s_regression_image_contains_every_protocol_core_module(self):
+        dockerfile = (ROOT / "docker" / "k8s-regression-runner.Dockerfile").read_text(encoding="utf-8")
+        for module in (
+            "test_sip_uri.py",
+            "test_mini_call_server.py",
+            "test_sip_stream.py",
+            "test_sip_rfc4475.py",
+            "test_sip_parser_fuzz.py",
+        ):
+            with self.subTest(module=module):
+                self.assertIn(f"COPY tests/{module} /workspace/tests/{module}", dockerfile)
+
     def test_sipp_trace_parser_accepts_debian_and_macos_byte_formats(self):
         trace = """----------------------------------------------- 2026-07-04 04:36:46.320000
 UDP message sent (100 bytes):
@@ -1610,6 +1694,10 @@ Content-Length: 0
         self.assertIn("mergeOverwrite $pair $existing", configmap)
         self.assertIn("rtpengine-headless", rtpengine)
         self.assertIn("--interface=default/${POD_IP}", rtpengine)
+        self.assertIn("--interface=core/${POD_IP}", rtpengine)
+        self.assertIn("--interface=peer/${POD_IP}", rtpengine)
+        self.assertIn("--interface=core/${NODE_IP}", rtpengine)
+        self.assertIn("--interface=peer/${NODE_IP}", rtpengine)
         self.assertIn("kind: PersistentVolumeClaim", shared_state)
         self.assertIn("NetworkAttachmentDefinition", multus)
 
@@ -1650,7 +1738,8 @@ Content-Length: 0
         values = (chart / "values.yaml").read_text(encoding="utf-8")
         azure = (chart / "templates" / "azure-services.yaml").read_text(encoding="utf-8")
         aks_values = (ROOT / "configs" / "kubernetes" / "aks-values.yaml").read_text(encoding="utf-8")
-        aks_runbook = (ROOT / "docs" / "AKS.md").read_text(encoding="utf-8")
+        product_guide = (ROOT / "docs" / "PRODUCT_GUIDE.md").read_text(encoding="utf-8")
+        aks_runbook = (ROOT / "docs" / "AZURE_AKS.md").read_text(encoding="utf-8")
 
         self.assertIn("cloud:", values)
         self.assertIn("azure:", values)
@@ -1667,14 +1756,13 @@ Content-Length: 0
         self.assertIn("documentedPortRange", aks_values)
         self.assertIn("portRange:", aks_values)
         self.assertIn("PlaySBC On Azure AKS", aks_runbook)
-        self.assertIn("Run AKS Regression", aks_runbook)
+        self.assertIn("AKS Regression", aks_runbook)
         self.assertIn("--aks-profiles", aks_runbook)
-        self.assertIn("--profile basic-signalling", aks_runbook)
-        self.assertIn("PLAYSBC_VERSION=3.0.0", aks_runbook)
+        self.assertIn("PLAYSBC_VERSION=4.0.0", product_guide)
 
     def test_current_release_keeps_kind_regression_path(self):
         chart = ROOT / "charts" / "playsbc"
-        current_version = "3.0.0"
+        current_version = "4.0.0"
         version = (ROOT / "VERSION").read_text(encoding="utf-8")
         chart_yaml = (chart / "Chart.yaml").read_text(encoding="utf-8")
         values = (chart / "values.yaml").read_text(encoding="utf-8")
@@ -1682,7 +1770,7 @@ Content-Length: 0
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         runbook = (ROOT / "docs" / "PRODUCT_GUIDE.md").read_text(encoding="utf-8")
         local_runbook = (ROOT / "docs" / "KUBERNETES_LOCAL.md").read_text(encoding="utf-8")
-        release_notes = (ROOT / "release" / f"RELEASE_NOTES_{current_version}.md").read_text(encoding="utf-8")
+        release_index = (ROOT / "release" / "README.md").read_text(encoding="utf-8")
 
         self.assertEqual(version.strip(), current_version)
         self.assertEqual(server.PLAYSBC_VERSION, current_version)
@@ -1691,15 +1779,23 @@ Content-Length: 0
         self.assertIn(f'tag: "{current_version}"', values)
         self.assertIn(f'tag: "{current_version}"', aks_values)
         self.assertIn(f"kind/minikube must track the current release (`v{current_version}`", readme)
-        self.assertIn(f"export PLAYSBC_VERSION={current_version}", runbook)
-        self.assertIn("[Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md)", local_runbook)
+        self.assertIn("export PLAYSBC_VERSION=4.0.0", runbook)
+        self.assertIn(
+            "[Kubernetes and Helm runbook](KUBERNETES_HELM_RUNBOOK.md)",
+            local_runbook,
+        )
         self.assertIn("--all-profiles", runbook)
         self.assertIn("--set-rtpengine-image", runbook)
         self.assertNotIn("playsbc-k8s-regression:1.4.2", runbook)
-        self.assertIn("78 full Kubernetes regression profiles", release_notes)
-        self.assertIn("RFC 5359 unattended transfer", release_notes)
-        self.assertIn("RTPengine", release_notes)
-        self.assertIn("AKS", release_notes)
+        self.assertIn(f"| Version | `{current_version}` |", release_index)
+        self.assertIn("| License | MIT |", release_index)
+        self.assertIn(f"playsbc-{current_version}.tgz", release_index)
+        self.assertIn(
+            f"ghcr.io/sudheerkumarvatrapu/playsbc:{current_version}",
+            release_index,
+        )
+        self.assertIn("kind-playsbc", runbook)
+        self.assertIn("AKS", release_index)
 
         args = run_k8s_regression_job.parse_args(
             [
@@ -2140,6 +2236,66 @@ Content-Length: 0
             self.assertIn("<h2>Unified SIP/RTP/AI Ladder</h2>", report)
             self.assertIn("SIPp A", report)
 
+    def test_regression_report_renders_observed_pcap_as_directional_ladder(self):
+        ladder = (
+            "KUBERNETES OBSERVED PCAP SIP LADDER profile=basic-signalling\n"
+            "Time (epoch)        Source                  Destination             Message\n"
+            "1789961330.272826   10.244.0.118:5060       10.96.70.36:5062        INVITE sip:basic-sig@example.test SIP/2.0\n"
+            "1789961330.278825   10.96.70.36:5062        10.244.0.118:5060       SIP/2.0 100 Trying\n"
+        )
+        row = run_regression_suite.ReportRow(
+            "Kubernetes B2BUA", "basic-signalling", "passed", 0, 1.0, "/tmp/missing", "cmd",
+            sip_ladder=ladder,
+        )
+
+        report = run_regression_suite.render_html([row], "2026-09-21", "directional-ladder")
+
+        self.assertIn('class="sip-ladder-diagram"', report)
+        self.assertIn('marker-end="url(#sip-arrow-', report)
+        self.assertIn('x1="265"', report)
+        self.assertIn('x2="488"', report)
+        self.assertIn('x1="495"', report)
+        self.assertIn('x2="272"', report)
+        self.assertIn("INVITE sip:basic-sig@example.test SIP/2.0", report)
+        self.assertIn("Observed packet trace", report)
+
+    def test_observed_ladder_labels_nodes_and_includes_rtpengine_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            (bundle / "log.platform").write_text(
+                "2026-09-21 04:33:00 | POD run-core READY\npod_ip=10.244.0.10\n"
+                "===== persistent pod/playsbc-playsbc-0 log.platform =====\n"
+                "2026-09-21 04:33:00 | SERVER CONFIG | sip_advertised=10.244.0.20:5062\n",
+                encoding="utf-8",
+            )
+            (bundle / "kubectl-pods.log").write_text(
+                "NAME READY STATUS RESTARTS AGE IP NODE NOMINATED READINESS\n"
+                "playsbc-playsbc-0 1/1 Running 0 1m 10.244.0.20 node <none> <none>\n"
+                "playsbc-playsbc-rtpengine-0 1/1 Running 0 1m 10.244.0.30 node <none> <none>\n",
+                encoding="utf-8",
+            )
+            (bundle / "log.media").write_text(
+                "===== persistent pod/playsbc-playsbc-0 log.media =====\n"
+                "2026-09-21 04:33:01 | B2BUA RTPENGINE OFFER | status=ok\n"
+                "2026-09-21 04:33:02 | B2BUA RTPENGINE PACKET VERDICT | caller_to_callee=observed callee_to_caller=observed\n",
+                encoding="utf-8",
+            )
+            ladder = (
+                "KUBERNETES OBSERVED PCAP SIP LADDER profile=rtpengine-media\n"
+                "Time (epoch) Source Destination Message\n"
+                "1789965180.000000 10.244.0.10:5060 10.244.0.20:5062 INVITE sip:test SIP/2.0\n"
+            )
+
+            diagram = run_regression_suite.render_observed_pcap_ladder(ladder, bundle)
+
+            self.assertIn("SIPp Core", diagram)
+            self.assertIn("PlaySBC 0", diagram)
+            self.assertIn("RTPengine 0", diagram)
+            self.assertIn("10.244.0.30", diagram)
+            self.assertIn("RTPengine Offer", diagram)
+            self.assertIn("RTP/RTCP media packets observed in both directions", diagram)
+            self.assertIn('class="ladder-arrow media"', diagram)
+
     def test_regression_report_embeds_ai_speech_audio_players(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2466,7 +2622,56 @@ Content-Length: 0
         self.assertIn("ai-rasa-real-lab", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("evidence-b2bua-two-leg-pcap", run_regression_suite.ALL_B2BUA_PROFILES)
-        self.assertEqual(len(run_k8s_regression.ALL_PROFILES), 78)
+        self.assertEqual(len(run_k8s_regression.ALL_PROFILES), 125)
+        self.assertIn("protocol-core-layer1-live-call", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-tcp-call", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-tls-call", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-dns-srv-call", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-dns-udp-call", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-rport-call", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-idle-timeout", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-half-close", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-pool-limit", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-tls-sni", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer2-live-tls-rotation", run_k8s_regression.ALL_PROFILES)
+        for layer3_profile in (
+            "protocol-core-layer3-live-client-transactions",
+            "protocol-core-layer3-live-non2xx-ack",
+            "protocol-core-layer3-live-cancel",
+            "protocol-core-layer3-live-retransmission",
+            "protocol-core-layer3-live-transport-error",
+        ):
+            self.assertIn(layer3_profile, run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-route-set", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-strict-route", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-prack", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-session-timer", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-session-expiry", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-min-se", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-update-target", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-update-offer", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-fork-cleanup", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-core-layer4-live-update-glare", run_k8s_regression.ALL_PROFILES)
+        for layer5_profile in (
+            "protocol-core-layer5-live-multi-contact",
+            "protocol-core-layer5-live-wildcard-expiry",
+            "protocol-core-layer5-live-path-outbound",
+            "protocol-core-layer5-live-max-forwards",
+            "protocol-core-layer5-live-digest-replay",
+        ):
+            self.assertIn(layer5_profile, run_k8s_regression.ALL_PROFILES)
+        for layer6_profile in (
+            "protocol-core-layer6-live-options-storm",
+            "protocol-core-layer6-live-register-storm",
+            "protocol-core-layer6-live-source-limit",
+            "protocol-core-layer6-live-priority-bypass",
+            "protocol-core-layer6-live-recovery",
+        ):
+            self.assertIn(layer6_profile, run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-uri-validation", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-parser-validation", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-server-transactions", run_k8s_regression.ALL_PROFILES)
+        self.assertIn("protocol-client-transactions", run_k8s_regression.ALL_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech", run_regression_suite.ALL_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.SELECTABLE_B2BUA_PROFILES)
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_regression_suite.ALL_B2BUA_PROFILES)
@@ -3345,6 +3550,10 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("rtpengine_media_handover", runner.profile_config(rtpengine))
         self.assertIn("rtpengine_nat_wait", runner.profile_config(rtpengine))
         self.assertIn("rtpengine_pierce_nat", runner.profile_config(rtpengine))
+        overloaded = run_k8s_regression.profile_values(
+            "protocol-core-layer6-live-options-storm", "unit-k8s"
+        )
+        self.assertEqual(runner.profile_config(overloaded)["overload"]["method_rps"]["OPTIONS"], 1)
         ha = runner.profile_config(rtpengine)["ha"]
         self.assertTrue(ha["enabled"])
         self.assertEqual(ha["node_id"], "$POD_NAME")
@@ -3763,6 +3972,25 @@ class RealTopologyTests(unittest.TestCase):
             self.assertTrue(any("missing the out-of-dialog BYE" in item for item in failures))
             self.assertTrue(any("unexpectedly contains an INVITE" in item for item in failures))
 
+    def test_kubernetes_rtpengine_evidence_rejects_missing_logical_interfaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            (bundle / "rtpengine.log").write_text(
+                "WARNING: Interface 'core' not found, using default\n"
+                "WARNING: Interface 'peer' not found, using default\n",
+                encoding="utf-8",
+            )
+            failures = run_k8s_regression.validate_k8s_profile_evidence(
+                "rtpengine-media", bundle
+            )
+            self.assertTrue(any("'core'" in item for item in failures))
+            self.assertTrue(any("'peer'" in item for item in failures))
+
+            deliberate_failures = run_k8s_regression.validate_k8s_profile_evidence(
+                "rtpengine-interface-failure", bundle
+            )
+            self.assertFalse(any("logical interface" in item for item in deliberate_failures))
+
     def test_kubernetes_rejection_ladders_use_profile_specific_statuses(self):
         args = run_k8s_regression.parse_args(["--aks-profiles"])
         runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
@@ -3829,6 +4057,51 @@ class RealTopologyTests(unittest.TestCase):
         self.assertTrue(any("invented=['INVITE']" in item for item in failures))
         self.assertTrue(any("omitted=['BYE']" in item for item in failures))
         self.assertTrue(any("omitted=['481']" in item for item in failures))
+
+    def test_observed_ladder_uses_completed_trace_not_success_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            self.assertEqual(run_k8s_regression.observed_sip_ladder("failure", bundle), "")
+            (bundle / "sipmsg.log").write_text(
+                "INVITE sip:b@example.test SIP/2.0\n"
+                "SIP/2.0 503 Service Unavailable\n"
+                "ACK sip:b@example.test SIP/2.0\n",
+                encoding="utf-8",
+            )
+            ladder = run_k8s_regression.observed_sip_ladder("failure", bundle)
+            self.assertIn("503 Service Unavailable", ladder)
+            self.assertIn("ACK sip:", ladder)
+            self.assertNotIn("BYE", ladder)
+            self.assertEqual(
+                run_k8s_regression.validate_ladder_against_sipmsg(
+                    ladder, (bundle / "sipmsg.log").read_text(encoding="utf-8")
+                ),
+                [],
+            )
+
+    def test_final_evidence_ladder_preserves_ai_components_and_observed_sip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            (bundle / "log.ai").write_text(
+                "2026-09-24 01:00:00 | AI VOICE CALL LADDER | call_id=ai\n"
+                "AI VOICE CALL LADDER\nSIPp A | RTPengine | PlaySBC | Vosk STT | Rasa Bot | Piper TTS\n",
+                encoding="utf-8",
+            )
+            (bundle / "sipmsg.log").write_text("INVITE sip:b@example SIP/2.0\n", encoding="utf-8")
+            ladder = run_k8s_regression.final_evidence_ladder("ai-rasa-lab", bundle)
+            for component in ("RTPengine", "Vosk STT", "Rasa Bot", "Piper TTS", "INVITE"):
+                self.assertIn(component, ladder)
+
+    def test_final_evidence_ladder_covers_protocol_and_pre_sip_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            (bundle / "protocol-core.log").write_text("test_parser (suite) ... ok\n\nOK\n", encoding="utf-8")
+            ladder = run_k8s_regression.final_evidence_ladder("protocol-parser-validation", bundle)
+            self.assertIn("PROTOCOL CORE EVIDENCE LADDER", ladder)
+            self.assertIn("test_parser", ladder)
+        with tempfile.TemporaryDirectory() as tmp:
+            ladder = run_k8s_regression.final_evidence_ladder("startup-failure", Path(tmp))
+            self.assertIn("REGRESSION EVIDENCE LADDER", ladder)
 
     def test_kubernetes_evidence_validation_requires_srtp_two_way_verdict(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4442,6 +4715,11 @@ class RealTopologyTests(unittest.TestCase):
         self.assertIn("ai-rasa-rtpengine-speech-whisper", run_k8s_regression.RASA_PROFILES)
         self.assertIn("ai-rasa-long-response-streaming", run_k8s_regression.RASA_PROFILES)
         self.assertIn("ai-rasa-contact-center-sales-coqui", run_k8s_regression.RASA_PROFILES)
+
+    def test_kubernetes_full_suite_timeout_covers_one_hundred_profiles(self):
+        job_args = run_k8s_regression_job.parse_args(["--all-profiles"])
+        self.assertEqual(job_args.job_timeout, 28800)
+        self.assertGreater(job_args.active_deadline_seconds, job_args.job_timeout)
 
     def test_kubernetes_aks_profile_shortcut_uses_dedicated_outputs_and_validation(self):
         args = run_k8s_regression.parse_args(["--aks-profiles"])

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="Layer5 Path and outbound">
+  <send retrans="500"><![CDATA[
+REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+From: <sip:[service]@[remote_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 REGISTER
+Path: <sip:edge.example.test;lr>
+Supported: outbound, path
+Contact: <sip:[service]@[local_ip]:[contact_port]>;+sip.instance="urn:uuid:layer5";reg-id=1
+Expires: 300
+Content-Length: 0
+
+]]></send>
+  <recv response="200"/>
+</scenario>

@@ -1008,9 +1008,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--pod-ready-timeout", type=int, default=60)
     parser.add_argument("--deployment-log-tail", type=int, default=250)
     parser.add_argument("--tls-secret-name", default="playsbc-regression-tls")
-    parser.add_argument("--job-timeout", type=int, default=10800)
+    parser.add_argument(
+        "--job-timeout",
+        type=int,
+        default=28800,
+        help="Maximum seconds for the in-cluster regression Job (default: 28800 for catalogs larger than 100 profiles)",
+    )
     parser.add_argument("--job-poll-interval", type=float, default=5.0)
-    parser.add_argument("--active-deadline-seconds", type=int, default=12000)
+    parser.add_argument("--active-deadline-seconds", type=int, default=30000)
     parser.add_argument("--ttl-seconds-after-finished", type=int, default=3600)
     parser.add_argument("--kubectl-timeout", type=int, default=180)
     parser.add_argument("--copy-timeout", type=int, default=600)

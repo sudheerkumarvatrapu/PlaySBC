@@ -60,7 +60,109 @@ from tools.real_device_evidence import read_pcap, sip_events  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 RASA_NLU_PROFILES = ("ai-rasa-chat-nlu", "ai-rasa-chat-negative")
-ALL_PROFILES = (*ALL_B2BUA_PROFILES, *RASA_NLU_PROFILES)
+PROTOCOL_CORE_PROFILES = (
+    "protocol-parser-validation",
+    "protocol-uri-validation",
+    "protocol-header-grammar",
+    "protocol-mime-binary-body",
+    "protocol-request-policy",
+    "protocol-error-responses",
+    "protocol-stream-parser-limits",
+    "protocol-rfc4475-corpus",
+    "protocol-parser-fuzz-resource",
+    "protocol-server-transactions",
+    "protocol-client-transactions",
+)
+PROTOCOL_CORE_LABELS = {
+    "protocol-core-layer1-live-call": {
+        "title": "Protocol Core Layer 1 Live Call",
+        "suite": "Kubernetes Protocol Core Live Calls",
+        "mode": "real UDP B2BUA call through compact/folded/extension headers, parameterized URI parsing, SDP, ACK, and BYE",
+    },
+    "protocol-core-layer2-live-tcp-call": {
+        "title": "Protocol Core Layer 2 Live TCP Call",
+        "suite": "Kubernetes Protocol Core Live Calls",
+        "mode": "real TCP registrar-backed B2BUA call through stream framing, lifecycle handling, and connection reuse",
+    },
+    "protocol-core-layer2-live-tls-call": {
+        "title": "Protocol Core Layer 2 Live TLS Call",
+        "suite": "Kubernetes Protocol Core Live Calls",
+        "mode": "real TLS 1.2+ registrar-backed B2BUA call through encrypted stream framing, lifecycle handling, and connection reuse",
+    },
+    "protocol-core-layer2-live-dns-srv-call": {
+        "title": "Protocol Core Layer 2 Live DNS SRV Call",
+        "suite": "Kubernetes Protocol Core Live Calls",
+        "mode": "real TCP B2BUA call using Kubernetes SRV and A/AAAA discovery with bounded candidate selection",
+    },
+    "protocol-core-layer2-live-dns-udp-call": {
+        "title": "Protocol Core Layer 2 Live DNS UDP Call",
+        "suite": "Kubernetes Protocol Core Live Calls",
+        "mode": "real UDP B2BUA call through Kubernetes DNS A/AAAA resolution",
+    },
+    "protocol-core-layer2-live-rport-call": {
+        "title": "Protocol Core Layer 2 Live RFC 3581 Call",
+        "suite": "Kubernetes Protocol Core Live Calls",
+        "mode": "real UDP B2BUA call proving received and rport response routing from a mismatched Via sent-by",
+    },
+    "protocol-core-layer2-live-idle-timeout": {"title": "Protocol Core Layer 2 Live Idle Timeout", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real TCP call plus idle socket expiry and cleanup"},
+    "protocol-core-layer2-live-half-close": {"title": "Protocol Core Layer 2 Live Half Close", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real TCP call plus partial-frame half-close cleanup"},
+    "protocol-core-layer2-live-pool-limit": {"title": "Protocol Core Layer 2 Live Pool Limit", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real TCP call plus bounded concurrent connection rejection"},
+    "protocol-core-layer2-live-tls-sni": {"title": "Protocol Core Layer 2 Live TLS SNI", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real TLS call plus accepted and rejected SNI identity handshakes"},
+    "protocol-core-layer2-live-tls-rotation": {"title": "Protocol Core Layer 2 Live TLS Rotation", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real TLS call plus in-place certificate rotation observed by a fresh handshake"},
+    "protocol-core-layer3-live-client-transactions": {"title": "Protocol Core Layer 3 Live Client Transactions", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real B2BUA call with outbound INVITE and BYE UAC transaction state"},
+    "protocol-core-layer3-live-non2xx-ack": {"title": "Protocol Core Layer 3 Live Non-2xx ACK", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real rejected INVITE with transaction-layer ACK generation"},
+    "protocol-core-layer3-live-cancel": {"title": "Protocol Core Layer 3 Live CANCEL", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real pending INVITE cancellation with 200, 487, ACK and bounded cleanup"},
+    "protocol-core-layer3-live-retransmission": {"title": "Protocol Core Layer 3 Live Retransmission", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real duplicate INVITE with cached response replay and no duplicate application action"},
+    "protocol-core-layer3-live-transport-error": {"title": "Protocol Core Layer 3 Live Transport Error", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real TCP connection failure propagated into client transaction state"},
+    "protocol-core-layer4-live-route-set": {"title": "Protocol Core Layer 4 Live Route Set", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real B2BUA call with reversed Record-Route applied to ACK and BYE"},
+    "protocol-core-layer4-live-strict-route": {"title": "Protocol Core Layer 4 Live Strict Route", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real strict-route Request-URI and trailing remote-target validation"},
+    "protocol-core-layer4-live-prack": {"title": "Protocol Core Layer 4 Live PRACK", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real reliable 183 and PRACK/RAck across B2BUA legs"},
+    "protocol-core-layer4-live-session-timer": {"title": "Protocol Core Layer 4 Live Session Timer", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real Session-Expires negotiation and expiration state"},
+    "protocol-core-layer4-live-session-expiry": {"title": "Protocol Core Layer 4 Live Session Expiry", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real 90-second expiration followed by two-leg BYE cleanup"},
+    "protocol-core-layer4-live-min-se": {"title": "Protocol Core Layer 4 Live Min-SE", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real rejected INVITE with RFC 4028 422 and Min-SE"},
+    "protocol-core-layer4-live-update-target": {"title": "Protocol Core Layer 4 Live UPDATE Target", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real in-dialog UPDATE with Contact target refresh verified by BYE routing"},
+    "protocol-core-layer4-live-update-offer": {"title": "Protocol Core Layer 4 Live UPDATE Offer", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real in-dialog UPDATE offer/answer and Contact target refresh"},
+    "protocol-core-layer4-live-fork-cleanup": {"title": "Protocol Core Layer 4 Live Fork Cleanup", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real forked 2xx branches with ACK/BYE cleanup of losing dialog"},
+    "protocol-core-layer4-live-update-glare": {"title": "Protocol Core Layer 4 Live UPDATE Glare", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real 491 UPDATE followed by delayed higher-CSeq retry"},
+    "protocol-core-layer5-live-multi-contact": {"title": "Protocol Core Layer 5 Multi Contact", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real multi-Contact REGISTER with q-value ordering"},
+    "protocol-core-layer5-live-wildcard-expiry": {"title": "Protocol Core Layer 5 Wildcard Expiry", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real wildcard de-registration"},
+    "protocol-core-layer5-live-path-outbound": {"title": "Protocol Core Layer 5 Path Outbound", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real Path, Service-Route, instance and reg-id exchange"},
+    "protocol-core-layer5-live-max-forwards": {"title": "Protocol Core Layer 5 Loop Policy", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real Max-Forwards exhaustion rejection"},
+    "protocol-core-layer5-live-digest-replay": {"title": "Protocol Core Layer 5 Digest", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real nonce-count protected digest REGISTER"},
+    "protocol-core-layer6-live-options-storm": {"title": "Protocol Core Layer 6 OPTIONS Storm", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real method overload and Retry-After"},
+    "protocol-core-layer6-live-register-storm": {"title": "Protocol Core Layer 6 REGISTER Storm", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real registrar overload rejection"},
+    "protocol-core-layer6-live-source-limit": {"title": "Protocol Core Layer 6 Source Limit", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real per-source request shedding"},
+    "protocol-core-layer6-live-priority-bypass": {"title": "Protocol Core Layer 6 Priority", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real priority admission during overload"},
+    "protocol-core-layer6-live-recovery": {"title": "Protocol Core Layer 6 Recovery", "suite": "Kubernetes Protocol Core Live Calls", "mode": "real hysteresis and admission recovery"},
+    "protocol-parser-validation": {
+        "title": "SIP Parser Validation And Framing",
+        "suite": "Kubernetes Protocol Core",
+        "mode": "byte-exact SIP grammar, mandatory headers, compact/repeated fields, limits, and Content-Length smuggling rejection",
+    },
+    "protocol-uri-validation": {
+        "title": "SIP/SIPS Request-URI And IPv6 Validation",
+        "suite": "Kubernetes Protocol Core",
+        "mode": "RFC 3261 SIP/SIPS schemes, hostname/IPv4/IPv6 targets, ports, parameters, escapes, and deterministic rejection",
+    },
+    "protocol-header-grammar": {"title": "SIP Header Grammar", "suite": "Kubernetes Protocol Core", "mode": "quoted strings, escaped values, parameters, and comma lists"},
+    "protocol-mime-binary-body": {"title": "SIP MIME And Binary Bodies", "suite": "Kubernetes Protocol Core", "mode": "Content-Type grammar and byte-exact body preservation"},
+    "protocol-request-policy": {"title": "SIP Request Policy", "suite": "Kubernetes Protocol Core", "mode": "Max-Forwards, URI, and Content-Type policy"},
+    "protocol-error-responses": {"title": "SIP Protocol Error Responses", "suite": "Kubernetes Protocol Core", "mode": "deterministic wire responses for rejected requests"},
+    "protocol-stream-parser-limits": {"title": "SIP Stream Parser Limits", "suite": "Kubernetes Protocol Core", "mode": "bounded TCP/TLS buffers and pipelined framing"},
+    "protocol-rfc4475-corpus": {"title": "RFC 4475 Parser Corpus", "suite": "Kubernetes Protocol Core", "mode": "maintained accepted and rejected torture-message corpus"},
+    "protocol-parser-fuzz-resource": {"title": "SIP Parser Fuzz And Resources", "suite": "Kubernetes Protocol Core", "mode": "deterministic mutation and resource-bound gates"},
+    "protocol-server-transactions": {
+        "title": "SIP Server Transaction State Machines",
+        "suite": "Kubernetes Protocol Core",
+        "mode": "RFC 3261/RFC 6026 server states, matching, retransmissions, and Timers G/H/I/J",
+    },
+    "protocol-client-transactions": {
+        "title": "SIP Client Transaction State Machines",
+        "suite": "Kubernetes Protocol Core",
+        "mode": "RFC 3261/RFC 6026 client states, response matching, and Timers A/B/D/E/F/K/M",
+    },
+}
+ALL_PROFILES = (*ALL_B2BUA_PROFILES, *PROTOCOL_CORE_PROFILES, *RASA_NLU_PROFILES)
 CATALOG_PROFILES = ALL_B2BUA_PROFILES
 RASA_PROFILES = (*RASA_B2BUA_PROFILES, *RASA_NLU_PROFILES)
 AKS_PROFILES = (
@@ -236,11 +338,13 @@ def selected_profiles(args: argparse.Namespace) -> tuple[str, ...]:
 
 
 def profile_display_title(profile_name: str) -> str:
-    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("title") or profile_name)
+    labels = PROTOCOL_CORE_LABELS.get(profile_name) or RASA_PROFILE_LABELS.get(profile_name, {})
+    return str(labels.get("title") or profile_name)
 
 
 def profile_suite_label(profile_name: str) -> str:
-    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("suite") or f"Kubernetes {profile_name}")
+    labels = PROTOCOL_CORE_LABELS.get(profile_name) or RASA_PROFILE_LABELS.get(profile_name, {})
+    return str(labels.get("suite") or f"Kubernetes {profile_name}")
 
 
 def profile_execution_label(profile_name: str) -> str:
@@ -249,7 +353,8 @@ def profile_execution_label(profile_name: str) -> str:
 
 
 def profile_mode_detail(profile_name: str) -> str:
-    return str(RASA_PROFILE_LABELS.get(profile_name, {}).get("mode") or PROFILE_DESCRIPTIONS.get(profile_name, "special profile"))
+    labels = PROTOCOL_CORE_LABELS.get(profile_name) or RASA_PROFILE_LABELS.get(profile_name, {})
+    return str(labels.get("mode") or PROFILE_DESCRIPTIONS.get(profile_name, "special profile"))
 
 
 def ai_ladder_nodes(profile: SimpleNamespace) -> tuple[str, str, str]:
@@ -406,6 +511,40 @@ def transport_args(transport: str, role: str) -> list[str]:
 
 def trace_args() -> list[str]:
     return ["-trace_msg", "-trace_err", "-trace_stat", "-trace_counts", "-trace_logs"]
+
+
+def layer2_probe_script(probe: str) -> str:
+    scripts = {
+        "idle": (
+            "import socket,time,sys; s=socket.create_connection((sys.argv[1],int(sys.argv[2])),3); "
+            "started=time.monotonic(); time.sleep(5); s.settimeout(2); data=s.recv(1); "
+            "print('idle_eof=',data==b'','elapsed=',round(time.monotonic()-started,3)); "
+            "raise SystemExit(0 if data==b'' else 1)"
+        ),
+        "half-close": (
+            "import socket,sys; s=socket.create_connection((sys.argv[1],int(sys.argv[2])),3); "
+            "s.sendall(b'OPTIONS sip:x@example SIP/2.0\\r\\nVia: unfinished'); "
+            "s.shutdown(socket.SHUT_WR); s.settimeout(3); data=s.recv(1); print('half_close_eof=',data==b''); "
+            "raise SystemExit(0 if data==b'' else 1)"
+        ),
+        "pool": (
+            "import socket,sys; a=socket.create_connection((sys.argv[1],int(sys.argv[2])),3); "
+            "b=socket.create_connection((sys.argv[1],int(sys.argv[2])),3); "
+            "c=socket.create_connection((sys.argv[1],int(sys.argv[2])),3); c.settimeout(3); "
+            "data=c.recv(1); print('pool_rejected=',data==b''); a.close(); b.close(); c.close(); "
+            "raise SystemExit(0 if data==b'' else 1)"
+        ),
+        "tls-sni": (
+            "import socket,ssl,sys; ctx=ssl.create_default_context(cafile='/tmp/playsbc-tls/ca.crt'); "
+            "ok=ctx.wrap_socket(socket.create_connection((sys.argv[1],int(sys.argv[2])),3),server_hostname=sys.argv[3]); ok.close(); "
+            "bad=False\ntry:\n ctx.wrap_socket(socket.create_connection((sys.argv[1],int(sys.argv[2])),3),server_hostname='wrong.invalid')\n"
+            "except ssl.SSLError:\n bad=True\n"
+            "print('valid_sni=True invalid_sni_rejected=',bad); raise SystemExit(0 if bad else 1)"
+        ),
+    }
+    if probe not in scripts:
+        raise ValueError(f"Unsupported Layer 2 socket probe: {probe}")
+    return scripts[probe]
 
 
 def sdp_payloads(profile: SimpleNamespace, role: str) -> tuple[str, str]:
@@ -992,6 +1131,80 @@ def validate_ladder_against_sipmsg(ladder: str, sipmsg_text: str) -> list[str]:
     return failures
 
 
+def observed_sip_ladder(profile_name: str, bundle: Path) -> str:
+    """Render a completed scenario solely from retained packet or SIPp evidence."""
+    capture = bundle / "capture.pcap"
+    if capture.exists():
+        events = sip_events(read_pcap(capture))
+        if events:
+            return "\n".join(
+                [f"KUBERNETES OBSERVED PCAP SIP LADDER profile={profile_name}", "Time (epoch)        Source                  Destination             Message"]
+                + [f"{event.timestamp:<19.6f} {event.src:<23} {event.dst:<23} {event.start_line}" for event in events]
+            )
+    sipmsg = bundle / "sipmsg.log"
+    if not sipmsg.exists():
+        return ""
+    trace_text = sipmsg.read_text(encoding="utf-8", errors="replace")
+    observed = []
+    for line in trace_text.splitlines():
+        if re.match(r"^(?:[A-Z]+\s+\S+\s+SIP/2\.0$|SIP/2\.0\s+\d{3}\b)", line):
+            observed.append(line)
+    if not observed:
+        return ""
+    # SIPp's TCP/TLS trace can omit a buffered request start line while still
+    # recording its response and CSeq. Describe that as indirect evidence.
+    observed_methods = {line.split(" ", 1)[0] for line in observed if not line.startswith("SIP/2.0")}
+    for method in sorted(set(re.findall(r"(?m)^CSeq:\s*\d+\s+([A-Z]+)\s*$", trace_text)) - observed_methods):
+        observed.append(f"{method} (evidenced by response CSeq; request bytes not retained)")
+    return "\n".join(
+        [f"KUBERNETES OBSERVED SIPP SIP LADDER profile={profile_name}"] + observed
+    )
+
+
+def final_evidence_ladder(profile_name: str, bundle: Path, execution_ladder: str = "") -> str:
+    """Build the ladder only after all packet and application evidence is collected."""
+    observed = observed_sip_ladder(profile_name, bundle)
+    ai_log = bundle / "log.ai"
+    if ai_log.exists():
+        text = ai_log.read_text(encoding="utf-8", errors="replace")
+        markers = list(re.finditer(r"(?m)^AI VOICE CALL LADDER\s*$", text))
+        if markers:
+            start = markers[-1].start()
+            next_event = re.search(r"(?m)^\d{4}-\d{2}-\d{2} .*? \| ", text[markers[-1].end():])
+            end = markers[-1].end() + next_event.start() if next_event else len(text)
+            rich_ladder = text[start:end].strip()
+            if observed:
+                rich_ladder += "\n\n" + observed
+            return rich_ladder
+    if observed:
+        return observed
+    if execution_ladder:
+        return execution_ladder
+    protocol_log = bundle / "protocol-core.log"
+    if protocol_log.exists():
+        verdicts = [
+            line.strip() for line in protocol_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            if re.search(r"\.\.\. (?:ok|FAIL|ERROR|skipped)", line)
+        ]
+        if verdicts:
+            return "\n".join(
+                [
+                    f"PROTOCOL CORE EVIDENCE LADDER profile={profile_name}",
+                    "Runner -> unittest -> protocol component -> verdict",
+                ]
+                + [f"{index:03d} Runner -> {verdict}" for index, verdict in enumerate(verdicts, 1)]
+            )
+    # Every profile receives a truthful post-run evidence timeline, including
+    # infrastructure failures that occur before any SIP packet can be emitted.
+    files = sorted(path.name for path in bundle.iterdir() if path.is_file())
+    return "\n".join([
+        f"REGRESSION EVIDENCE LADDER profile={profile_name}",
+        "01 K8s Runner -> profile preparation",
+        "02 Profile execution -> evidence collection",
+        f"03 Evidence bundle -> HTML report files={','.join(files) or 'none'}",
+    ])
+
+
 def validate_k8s_profile_evidence(
     profile_name: str, bundle: Path, sip_ladder: str = ""
 ) -> list[str]:
@@ -999,9 +1212,99 @@ def validate_k8s_profile_evidence(
     profile = profile_values(profile_name, "evidence") if profile_name in CATALOG_PROFILES else None
 
     sipmsg = bundle / "sipmsg.log"
-    if profile_name not in RASA_NLU_PROFILES and not sipmsg.exists():
+    if profile_name not in (*RASA_NLU_PROFILES, *PROTOCOL_CORE_PROFILES) and not sipmsg.exists():
         failures.append("missing root sipmsg.log")
-    if sipmsg.exists() and sip_ladder:
+    if profile_name in PROTOCOL_CORE_PROFILES:
+        protocol_log = bundle / "protocol-core.log"
+        if not protocol_log.exists():
+            failures.append("missing protocol-core.log")
+        elif "OK" not in protocol_log.read_text(encoding="utf-8", errors="replace"):
+            failures.append("protocol-core.log does not contain a passing unittest verdict")
+    if profile_name == "protocol-core-layer1-live-call" and sipmsg.exists():
+        layer1_text = sipmsg.read_text(encoding="utf-8", errors="replace")
+        for marker in (
+            "v: SIP/2.0/UDP",
+            'f: "Layer One, Parser"',
+            "i:",
+            "Subject: Protocol Core Layer 1\n folded-header-continuation",
+            "X-Protocol-Core-Layer: parser-validation",
+            "c: application/sdp",
+            "l:",
+        ):
+            if marker not in layer1_text:
+                failures.append(f"Layer 1 live call evidence is missing {marker!r}")
+    if profile_name in {"protocol-core-layer2-live-tcp-call", "protocol-core-layer2-live-tls-call"}:
+        transport = "tls" if profile_name.endswith("tls-call") else "tcp"
+        stream_log = bundle / f"log.{transport}"
+        if not stream_log.exists():
+            failures.append(f"Layer 2 live call is missing log.{transport}")
+        else:
+            stream_text = stream_log.read_text(encoding="utf-8", errors="replace")
+            for marker in ("CONNECTED", "RX BYTES", "CONNECTION REUSED", "TX"):
+                marker = f"{transport.upper()} {marker}"
+                if marker not in stream_text:
+                    failures.append(f"Layer 2 live call evidence is missing {marker}")
+    if profile_name == "protocol-core-layer2-live-rport-call" and sipmsg.exists():
+        rport_text = sipmsg.read_text(encoding="utf-8", errors="replace")
+        via_lines = re.findall(r"(?im)^Via:\s+SIP/2\.0/UDP\s+192\.0\.2\.123:9;[^\r\n]+", rport_text)
+        if not any("received=" in line and re.search(r";rport=\d+", line) for line in via_lines):
+            failures.append("Layer 2 RFC 3581 evidence is missing received/rport on the mismatched Via")
+    if profile_name == "protocol-core-layer3-live-client-transactions":
+        transaction_log = bundle / "log.sip"
+        transaction_text = transaction_log.read_text(encoding="utf-8", errors="replace") if transaction_log.exists() else ""
+        for method in ("INVITE", "BYE"):
+            if not re.search(rf"CLIENT TRANSACTION STARTED[^\n]*method={method}\b", transaction_text):
+                failures.append(f"Layer 3 client transaction evidence is missing outbound {method}")
+            if not re.search(rf"CLIENT TRANSACTION RESPONSE[^\n]*method={method} status=200 matched=True", transaction_text):
+                failures.append(f"Layer 3 client transaction evidence is missing matched {method} 200")
+    if profile_name == "protocol-core-layer3-live-non2xx-ack":
+        transaction_log = bundle / "log.sip"
+        transaction_text = transaction_log.read_text(encoding="utf-8", errors="replace") if transaction_log.exists() else ""
+        packet_text = sipmsg.read_text(encoding="utf-8", errors="replace") if sipmsg.exists() else ""
+        for marker in ("CLIENT TRANSACTION NON-2XX FINAL", "status=503 matched=True"):
+            if marker not in transaction_text:
+                failures.append(f"Layer 3 non-2xx transaction evidence is missing {marker}")
+        for marker in ("SIP/2.0 503 Service Unavailable", "ACK sip:"):
+            if marker not in packet_text:
+                failures.append(f"Layer 3 non-2xx packet evidence is missing {marker}")
+    if profile_name == "protocol-core-layer3-live-cancel":
+        transaction_log = bundle / "log.sip"
+        transaction_text = transaction_log.read_text(encoding="utf-8", errors="replace") if transaction_log.exists() else ""
+        packet_text = sipmsg.read_text(encoding="utf-8", errors="replace") if sipmsg.exists() else ""
+        for marker in ("method=CANCEL", "status=200 matched=True"):
+            if marker not in transaction_text:
+                failures.append(f"Layer 3 CANCEL evidence is missing {marker}")
+        for marker in ("SIP/2.0 487 Request Terminated", "ACK sip:"):
+            if marker not in packet_text:
+                failures.append(f"Layer 3 CANCEL packet evidence is missing {marker}")
+    if profile_name == "protocol-core-layer3-live-retransmission":
+        transaction_log = bundle / "log.sip"
+        transaction_text = transaction_log.read_text(encoding="utf-8", errors="replace") if transaction_log.exists() else ""
+        outbound_invites = len(re.findall(r"CLIENT TRANSACTION STARTED[^\n]*method=INVITE", transaction_text))
+        if outbound_invites != 1:
+            failures.append(f"Layer 3 retransmission produced {outbound_invites} outbound INVITE transactions instead of one")
+    if profile_name == "protocol-core-layer3-live-transport-error":
+        networking_log = bundle / "log.networking"
+        networking_text = networking_log.read_text(encoding="utf-8", errors="replace") if networking_log.exists() else ""
+        for marker in ("TCP TX FAILED", "CLIENT TRANSACTION TRANSPORT ERROR", "method=INVITE"):
+            if marker not in networking_text:
+                failures.append(f"Layer 3 transport failure evidence is missing {marker}")
+        call_log = bundle / "log.call"
+        if not call_log.exists() or "B2BUA FAILURE" not in call_log.read_text(encoding="utf-8", errors="replace"):
+            failures.append("Layer 3 transport failure is missing upstream failure mapping")
+    if profile and profile_uses_rtpengine(profile) and profile_name != "rtpengine-interface-failure":
+        rtpengine_log = bundle / "rtpengine.log"
+        if rtpengine_log.exists():
+            rtpengine_text = rtpengine_log.read_text(encoding="utf-8", errors="replace")
+            for interface in ("core", "peer"):
+                if f"Interface '{interface}' not found" in rtpengine_text:
+                    failures.append(
+                        f"RTPengine is missing configured logical interface {interface!r}"
+                    )
+    if (sipmsg.exists() and sip_ladder and "OBSERVED PCAP SIP LADDER" not in sip_ladder
+            and "AI VOICE CALL LADDER" not in sip_ladder
+            and "PROTOCOL CORE EVIDENCE LADDER" not in sip_ladder
+            and "REGRESSION EVIDENCE LADDER" not in sip_ladder):
         failures.extend(
             validate_ladder_against_sipmsg(
                 sip_ladder,
@@ -1176,6 +1479,7 @@ def pod_manifest(
         "app.kubernetes.io/name": "playsbc-k8s-regression",
         "app.kubernetes.io/part-of": "playsbc",
         "playsbc-regression-run": run_id,
+        "playsbc-regression-agent": name,
     }
     if realm:
         labels["playsbc.openai.com/realm"] = realm
@@ -1203,6 +1507,22 @@ def pod_manifest(
                 }
             ],
             "volumes": volumes,
+        },
+    }
+
+
+def agent_service_manifest(name: str, pod_name: str, run_id: str) -> dict[str, object]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": name, "labels": {"playsbc-regression-run": run_id}},
+        "spec": {
+            "selector": {"playsbc-regression-agent": pod_name},
+            "ports": [
+                {"name": "sip", "protocol": "TCP", "port": 5060, "targetPort": 5060},
+                {"name": "sips", "protocol": "TCP", "port": 5061, "targetPort": 5060},
+                {"name": "sip-udp", "protocol": "UDP", "port": 5060, "targetPort": 5060},
+            ],
         },
     }
 
@@ -1645,6 +1965,12 @@ class K8sRegressionRunner:
         self.write_log(bundle, "log.platform", "TLS REGRESSION SECRET READY", result.stdout + result.stderr)
         self.tls_secret_prepared = True
 
+    def rotate_tls_secret(self, bundle: Path) -> None:
+        """Replace the mounted certificate without restarting the PlaySBC workload."""
+        self.tls_secret_prepared = False
+        self.ensure_tls_secret(bundle)
+        self.write_log(bundle, "log.platform", "TLS REGRESSION SECRET ROTATED", self.args.tls_secret_name)
+
     def generate_lab_tls_pair(self, bundle: Path) -> tuple[str, str]:
         ensure_binary("openssl")
         with tempfile.TemporaryDirectory(prefix="playsbc-k8s-tls-") as tmp:
@@ -1968,10 +2294,75 @@ class K8sRegressionRunner:
         self.write_log(bundle, "log.platform", f"POD {name} READY", f"pod_ip={pod_ip}")
         return pod_ip
 
+    def create_agent_service(self, name: str, pod_name: str, bundle: Path) -> None:
+        manifest = agent_service_manifest(name, pod_name, self.run_id)
+        result = self.kubectl("apply", "-f", "-", input_text=json.dumps(manifest), check=True)
+        self.write_log(bundle, "log.platform", f"SERVICE {name} READY", result.stdout + result.stderr)
+
+    def run_layer2_socket_probe(
+        self, profile: SimpleNamespace, core_pod: str, bundle: Path
+    ) -> Optional[CommandResult]:
+        probe = str(getattr(profile, "k8s_layer2_probe", "") or "")
+        if not probe:
+            return None
+        playsbc_pod = self.workload_pod_name("playsbc", 0)
+        snapshot = self.pod_snapshot(playsbc_pod)
+        target_ip = str(snapshot.get("status", {}).get("podIP", ""))
+        if not target_ip:
+            raise RuntimeError(f"Could not resolve pod IP for Layer 2 probe target {playsbc_pod}")
+        port = self.args.tls_port if probe in {"tls-sni", "tls-rotation"} else self.args.sip_port
+        if probe == "tls-rotation":
+            fingerprint_script = (
+                "import hashlib,socket,ssl,sys; c=ssl._create_unverified_context(); "
+                "s=c.wrap_socket(socket.create_connection((sys.argv[1],int(sys.argv[2])),3),server_hostname=sys.argv[3]); "
+                "print(hashlib.sha256(s.getpeercert(binary_form=True)).hexdigest()); s.close()"
+            )
+            base = [
+                self.args.kubectl_bin, "-n", self.args.namespace, "exec", core_pod, "--",
+                "python3", "-c", fingerprint_script, target_ip, str(port), self.args.service,
+            ]
+            before = run_command(base, timeout=20)
+            if before.returncode != 0 or not before.stdout.strip():
+                return before
+            self.rotate_tls_secret(bundle)
+            wait_script = (
+                "import hashlib,socket,ssl,sys,time; old=sys.argv[4]; deadline=time.time()+120; c=ssl._create_unverified_context(); new=old\n"
+                "while time.time()<deadline:\n"
+                " try:\n"
+                "  s=c.wrap_socket(socket.create_connection((sys.argv[1],int(sys.argv[2])),3),server_hostname=sys.argv[3]); new=hashlib.sha256(s.getpeercert(binary_form=True)).hexdigest(); s.close()\n"
+                "  if new != old: break\n"
+                " except OSError: pass\n"
+                " time.sleep(2)\n"
+                "print('certificate_rotated=',new!=old,'before=',old,'after=',new); raise SystemExit(0 if new!=old else 1)"
+            )
+            command = [
+                self.args.kubectl_bin, "-n", self.args.namespace, "exec", core_pod, "--",
+                "python3", "-c", wait_script, target_ip, str(port), self.args.service, before.stdout.strip(),
+            ]
+            result = run_command(command, timeout=135)
+        else:
+            command = [
+                self.args.kubectl_bin, "-n", self.args.namespace, "exec", core_pod, "--",
+                "python3", "-c", layer2_probe_script(probe), target_ip, str(port), self.args.service,
+            ]
+            result = run_command(command, timeout=20)
+        step_dir = bundle / f"layer2-{probe}-probe"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / "command.txt").write_text(command_text(command) + "\n", encoding="utf-8")
+        (step_dir / "stdout.log").write_text(result.stdout, encoding="utf-8")
+        (step_dir / "stderr.log").write_text(result.stderr, encoding="utf-8")
+        self.write_log(
+            bundle, "log.networking", f"LAYER2 {probe.upper()} PROBE",
+            f"target={target_ip}:{port} returncode={result.returncode}\n{result.stdout}{result.stderr}",
+        )
+        return result
+
     def delete_run_pods(self, bundle: Path) -> CommandResult:
         selector = f"playsbc-regression-run={self.run_id}"
         result = self.kubectl("delete", "pod", "-l", selector, "--ignore-not-found=true", check=False)
+        service_result = self.kubectl("delete", "service", "-l", selector, "--ignore-not-found=true", check=False)
         self.write_log(bundle, "log.platform", "K8S REGRESSION POD CLEANUP", result.stdout + result.stderr)
+        self.write_log(bundle, "log.platform", "K8S REGRESSION SERVICE CLEANUP", service_result.stdout + service_result.stderr)
         return result
 
     def sipp_exec_command(self, pod: str, sipp_args: list[str]) -> list[str]:
@@ -2009,6 +2400,52 @@ class K8sRegressionRunner:
         process._playsbc_stderr = stderr  # type: ignore[attr-defined]
         process._playsbc_step_dir = step_dir  # type: ignore[attr-defined]
         return process
+
+    def wait_for_sipp_listener(
+        self, process: subprocess.Popen[str], pod: str, step_name: str,
+        sipp_args: list[str], bundle: Path,
+    ) -> None:
+        """Wait for the UAS socket, rather than assuming one second is enough."""
+        try:
+            port = int(sipp_args[sipp_args.index("-p") + 1])
+        except (ValueError, IndexError):
+            raise RuntimeError(f"{step_name}: SIPp server arguments have no valid -p port")
+        transport = "udp"
+        if "-t" in sipp_args:
+            mode = sipp_args[sipp_args.index("-t") + 1].lower()
+            transport = "tcp" if mode.startswith(("t", "l")) else "udp"
+        proc_files = (
+            "/proc/net/tcp /proc/net/tcp6"
+            if transport == "tcp"
+            else "/proc/net/udp /proc/net/udp6"
+        )
+        state_test = '$4 == "0A"' if transport == "tcp" else '$4 == "07"'
+        probe = (
+            f"port=$(printf '%04X' {port}); "
+            f"awk -v p=\":$port\" '{'{'} if (index($2,p) && {state_test}) "
+            f"found=1 {'}'} END {'{'} exit !found {'}'}' {proc_files}"
+        )
+        deadline = time.monotonic() + float(self.args.sipp_ready_timeout)
+        last = ""
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(f"{step_name}: SIPp exited before listening (returncode={process.returncode})")
+            result = run_command(
+                [self.args.kubectl_bin, "-n", self.args.namespace, "exec", pod, "--", "sh", "-lc", probe],
+                timeout=min(5, self.args.timeout), check=False,
+            )
+            last = (result.stdout + result.stderr).strip()
+            if result.returncode == 0:
+                self.write_log(
+                    bundle, "log.sipp", f"{step_name.upper()} READY",
+                    f"transport={transport} port={port}",
+                )
+                return
+            time.sleep(0.2)
+        raise RuntimeError(
+            f"{step_name}: SIPp did not listen on {transport}/{port} within "
+            f"{self.args.sipp_ready_timeout}s{f': {last}' if last else ''}"
+        )
 
     def start_srtp_sender(
         self,
@@ -2759,10 +3196,14 @@ class K8sRegressionRunner:
             "header_normalization": getattr(profile, "header_normalization", {}),
             "transport_policies": getattr(profile, "transport_policies", []),
             "call_admission": getattr(profile, "call_admission", {}),
+            "overload": getattr(profile, "overload", {}),
             "business_services": format_config_value(
                 getattr(profile, "business_services", {}),
                 profile,
             ),
+            "sip_stream": getattr(profile, "sip_stream", {}),
+            "sip_transactions": getattr(profile, "sip_transactions", {}),
+            "server_location": getattr(profile, "server_location", {}),
             "b2bua_ladder_logs": getattr(profile, "ladder_enabled", True),
             "b2bua_invite_timeout": getattr(profile, "b2bua_invite_timeout", 10.0),
             "media_backend": getattr(profile, "media_backend", "internal"),
@@ -2785,6 +3226,10 @@ class K8sRegressionRunner:
             "ai_voice_gateway": getattr(profile, "ai_voice_gateway", {}),
             "ha": self.active_active_ha_config(profile),
             "reject_unknown_routes": getattr(profile, "reject_unknown_routes", False),
+            "tls_verify_peer": getattr(profile, "tls_verify_peer", False),
+            "tls_server_names": getattr(profile, "tls_server_names", []),
+            "tls_require_sni": getattr(profile, "tls_require_sni", False),
+            "tls_reload_interval": getattr(profile, "tls_reload_interval", 30.0),
             "debug": True,
         }
 
@@ -3045,6 +3490,8 @@ class K8sRegressionRunner:
             str(hold_ms),
             *self.b2bua_base_args(profile, core_ip, 5060),
         ]
+        for key, value in getattr(profile, "uac_keys", {}).items():
+            args.extend(["-key", str(key), str(value)])
         if bool(getattr(profile, "uac_srtp", False)):
             args.extend(["-rtpcheck_debug", "-srtpcheck_debug"])
         return [*args, *transport_args(transport_name, "client")]
@@ -3065,6 +3512,8 @@ class K8sRegressionRunner:
             self.prepare_common(bundle, phases)
             if profile in RASA_NLU_PROFILES:
                 returncodes, command_lines, sip_ladder = self.profile_rasa_nlu(profile, bundle, phases)
+            elif profile in PROTOCOL_CORE_PROFILES:
+                returncodes, command_lines, sip_ladder = self.profile_protocol_core(profile, bundle, phases)
             else:
                 self.build_and_load_sipp_image(bundle, phases)
             if profile == "options":
@@ -3074,6 +3523,8 @@ class K8sRegressionRunner:
             elif profile == "b2bua-signalling":
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_signalling(bundle, phases)
             elif profile in RASA_NLU_PROFILES:
+                pass
+            elif profile in PROTOCOL_CORE_PROFILES:
                 pass
             elif profile in CATALOG_PROFILES:
                 returncodes, command_lines, sip_ladder = self.profile_b2bua_catalog(profile, bundle, phases)
@@ -3115,6 +3566,9 @@ class K8sRegressionRunner:
             evidence_started = time.monotonic()
             self.collect_k8s_evidence(bundle, profile, profile_started_at)
             sipmsg_sections = write_combined_sipmsg_log(bundle, profile)
+            # Never publish a scenario template as an actual SIP ladder. Captures
+            # and SIPp traces are final only after execution, teardown and collection.
+            sip_ladder = final_evidence_ladder(profile, bundle, sip_ladder)
             self.write_log(
                 bundle,
                 "log.sipp",
@@ -3167,6 +3621,38 @@ class K8sRegressionRunner:
             phases=phases.phases,
             sip_ladder=sip_ladder,
         )
+
+    def profile_protocol_core(
+        self,
+        profile_name: str,
+        bundle: Path,
+        phases: PhaseLog,
+    ) -> tuple[list[int], list[str], str]:
+        started = time.monotonic()
+        module = {
+            "protocol-parser-validation": "tests.test_sip_parser",
+            "protocol-uri-validation": "tests.test_sip_uri",
+            "protocol-header-grammar": "tests.test_sip_parser",
+            "protocol-mime-binary-body": "tests.test_sip_parser",
+            "protocol-request-policy": "tests.test_sip_parser",
+            "protocol-error-responses": "tests.test_mini_call_server.SipParsingTests",
+            "protocol-stream-parser-limits": "tests.test_sip_stream",
+            "protocol-rfc4475-corpus": "tests.test_sip_rfc4475",
+            "protocol-parser-fuzz-resource": "tests.test_sip_parser_fuzz",
+            "protocol-server-transactions": "tests.test_sip_transaction",
+            "protocol-client-transactions": "tests.test_sip_client_transaction",
+        }[profile_name]
+        command = [sys.executable, "-m", "unittest", "-v", module]
+        completed = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+        output = completed.stdout + completed.stderr
+        (bundle / "protocol-core.log").write_text(output, encoding="utf-8")
+        phases.append(
+            "Protocol Core Regression",
+            "passed" if completed.returncode == 0 else "failed",
+            started,
+            f"Executed deterministic protocol-core suite {module} inside the Kubernetes regression runner.",
+        )
+        return [completed.returncode], [shlex.join(command)], ""
 
     def profile_rasa_nlu(self, profile_name: str, bundle: Path, phases: PhaseLog) -> tuple[list[int], list[str], str]:
         setup_started = time.monotonic()
@@ -3305,6 +3791,12 @@ class K8sRegressionRunner:
             self.ensure_tls_secret(bundle)
         core_ip = self.create_agent(core_pod, bundle, realm="core", tls_secret=tls_secret)
         peer_ip = self.create_agent(peer_pod, bundle, realm="peer", tls_secret=tls_secret)
+        if bool(getattr(profile, "k8s_dns_service", False)):
+            dns_service = short_name(f"{stem}-dns-peer", limit=63)
+            self.create_agent_service(dns_service, peer_pod, bundle)
+            profile.b2bua_routes = {
+                str(profile.callee): f"sip:{profile.callee}@{dns_service};transport={profile.uas_transport}"
+            }
         target_ip = (
             self.create_agent(target_pod, bundle, realm="target", tls_secret=tls_secret)
             if target_pod
@@ -3390,7 +3882,7 @@ class K8sRegressionRunner:
                 uas_process = self.start_sipp_process(peer_pod, "peer-sipp-b-uas", uas_args, bundle)
                 processes.append(("peer-sipp-b-uas", peer_pod, uas_process))
                 commands.append(command_text(self.sipp_exec_command(peer_pod, uas_args)))
-                time.sleep(self.args.uas_start_delay)
+                self.wait_for_sipp_listener(uas_process, peer_pod, "peer-sipp-b-uas", uas_args, bundle)
 
             if target_pod:
                 target_profile = copy.copy(profile)
@@ -3399,7 +3891,7 @@ class K8sRegressionRunner:
                 target_process = self.start_sipp_process(target_pod, "target-sipp-c-uas", target_args, bundle)
                 processes.append(("target-sipp-c-uas", target_pod, target_process))
                 commands.append(command_text(self.sipp_exec_command(target_pod, target_args)))
-                time.sleep(self.args.uas_start_delay)
+                self.wait_for_sipp_listener(target_process, target_pod, "target-sipp-c-uas", target_args, bundle)
 
                 target_register_args = self.b2bua_register_args(
                     target_profile,
@@ -3552,6 +4044,10 @@ class K8sRegressionRunner:
                 self.write_log(bundle, "log.sipp", f"{step_name.upper()} RESULT", f"returncode={rc}")
                 self.finalize_sipp_step_logs(bundle / step_name)
                 self.collect_sipp_traces(pod, bundle / step_name)
+            probe_result = self.run_layer2_socket_probe(profile, core_pod, bundle)
+            if probe_result is not None:
+                returncodes.append(probe_result.returncode)
+                commands.append(command_text(probe_result.command))
             self.run_ha_action(profile, bundle, phases, "postcall")
         finally:
             if srtp_sender is not None:
@@ -4125,7 +4621,7 @@ class K8sRegressionRunner:
         ]
         uas_process = self.start_sipp_process(uas_pod, "sipp-b-uas", uas_args, bundle)
         commands.append(command_text(self.sipp_exec_command(uas_pod, uas_args)))
-        time.sleep(self.args.uas_start_delay)
+        self.wait_for_sipp_listener(uas_process, uas_pod, "sipp-b-uas", uas_args, bundle)
 
         register_args = [
             self.target(),
@@ -4289,6 +4785,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--callee", default="1002")
     parser.add_argument("--call-hold-ms", type=int, default=1000)
     parser.add_argument("--uas-start-delay", type=float, default=1.0)
+    parser.add_argument(
+        "--sipp-ready-timeout", type=float, default=20.0,
+        help="Maximum time to verify each background SIPp UAS listener (portable to slower WSL nodes)",
+    )
     parser.add_argument("--keep-pods", action="store_true")
     parser.add_argument("--metrics-settle-seconds", type=float, default=2.0, help="Wait after each profile so Prometheus can scrape final counters before the next rollout")
     args = parser.parse_args(argv)

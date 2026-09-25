@@ -179,6 +179,9 @@ BASE_DEFAULTS = {
     "tls_keyfile": "",
     "tls_cafile": "",
     "tls_verify_peer": False,
+    "tls_server_names": [],
+    "tls_require_sni": False,
+    "tls_reload_interval": 30.0,
     "registration_driver": "sipp",
     "registration_scenario": "register_contact.xml",
     "registration_auth_expected": "",
@@ -188,7 +191,13 @@ BASE_DEFAULTS = {
     "run_call": True,
     "dtmf_expected": False,
     "uac_scenario": "",
+    "uac_keys": {},
     "uas_scenario": "",
+    "sip_stream": {},
+    "sip_transactions": {},
+    "server_location": {},
+    "registrar": {},
+    "overload": {},
     "ladder": None,
     "output_root": "",
     "log_folder": DEFAULT_LOG_FOLDER,
@@ -205,6 +214,240 @@ BASE_DEFAULTS = {
 B2BUA_PROFILES = {
     "basic-signalling": {
         "callee": "basic-sig",
+    },
+    "protocol-core-layer1-live-call": {
+        "caller": "protocol-layer1-a",
+        "callee": "protocol-layer1-b",
+        "uac_scenario": "protocol_core_layer1_uac.xml",
+        # SIPp strips indentation following CDATA newlines. Expanding a keyword
+        # preserves the leading whitespace required for a real folded header.
+        "uac_keys": {"folded_subject": " folded-header-continuation"},
+        "expected_log_markers": {
+            "log.sip": ["B2BUA OUTBOUND INVITE", "B2BUA ANSWERED", "B2BUA CALL CLOSED"],
+        },
+    },
+    "protocol-core-layer2-live-tcp-call": {
+        "caller": "protocol-layer2-a",
+        "callee": "protocol-layer2-b",
+        "sip_transport": "tcp",
+        "uac_transport": "tcp",
+        "uas_transport": "tcp",
+        "expected_log_markers": {
+            "log.tcp": ["TCP CONNECTED", "TCP RX BYTES", "TCP CONNECTION REUSED", "TCP TX"],
+        },
+    },
+    "protocol-core-layer2-live-tls-call": {
+        "caller": "protocol-layer2-tls-a",
+        "callee": "protocol-layer2-tls-b",
+        "sip_transport": "tls",
+        "uac_transport": "tls",
+        "uas_transport": "tls",
+        "expected_log_markers": {
+            "log.tls": ["TLS CONNECTED", "TLS RX BYTES", "TLS CONNECTION REUSED", "TLS TX"],
+        },
+    },
+    "protocol-core-layer2-live-dns-srv-call": {
+        "caller": "protocol-layer2-dns-a",
+        "callee": "protocol-layer2-dns-b",
+        "sip_transport": "tcp",
+        "uac_transport": "tcp",
+        "uas_transport": "tcp",
+        "register_callee": False,
+        "k8s_dns_service": True,
+        "expected_log_markers": {
+            "log.tcp": ["TCP CONNECTED", "TCP TX"],
+            "log.networking": ["SIP DNS CANDIDATES", "SIP DNS TARGET ATTEMPT", "SIP DNS TARGET SELECTED"],
+        },
+    },
+    "protocol-core-layer2-live-dns-udp-call": {
+        "caller": "protocol-layer2-dns-udp-a",
+        "callee": "protocol-layer2-dns-udp-b",
+        "sip_transport": "udp",
+        "uac_transport": "udp",
+        "uas_transport": "udp",
+        "register_callee": False,
+        "k8s_dns_service": True,
+        "expected_log_markers": {
+            "log.udp": ["UDP TX"],
+            "log.networking": ["SIP DNS CANDIDATES", "SIP DNS TARGET SELECTED"],
+        },
+    },
+    "protocol-core-layer2-live-rport-call": {
+        "caller": "protocol-layer2-rport-a",
+        "callee": "protocol-layer2-rport-b",
+        "uac_scenario": "protocol_core_layer2_rport_uac.xml",
+        "expected_log_markers": {"log.sip": ["B2BUA ANSWERED", "B2BUA CALL CLOSED"]},
+    },
+    "protocol-core-layer2-live-idle-timeout": {
+        "caller": "protocol-layer2-idle-a", "callee": "protocol-layer2-idle-b",
+        "sip_transport": "tcp", "uac_transport": "tcp", "uas_transport": "tcp",
+        # Keep the real call's one-second dialog pause comfortably below the
+        # idle threshold; the raw probe remains idle beyond this threshold.
+        "sip_stream": {"idle_timeout": 3.0, "max_connections": 1024},
+        "k8s_layer2_probe": "idle",
+        "expected_log_markers": {"log.networking": ["SIP STREAM IDLE TIMEOUT", "LAYER2 IDLE PROBE"]},
+    },
+    "protocol-core-layer2-live-half-close": {
+        "caller": "protocol-layer2-half-a", "callee": "protocol-layer2-half-b",
+        "sip_transport": "tcp", "uac_transport": "tcp", "uas_transport": "tcp",
+        "k8s_layer2_probe": "half-close",
+        "expected_log_markers": {"log.networking": ["SIP STREAM INCOMPLETE EOF", "SIP STREAM HALF CLOSED", "LAYER2 HALF-CLOSE PROBE"]},
+    },
+    "protocol-core-layer2-live-pool-limit": {
+        "caller": "protocol-layer2-pool-a", "callee": "protocol-layer2-pool-b",
+        "sip_transport": "tcp", "uac_transport": "tcp", "uas_transport": "tcp",
+        "sip_stream": {"idle_timeout": 10.0, "max_connections": 2},
+        "k8s_layer2_probe": "pool",
+        "expected_log_markers": {"log.networking": ["SIP STREAM POOL REJECTED", "LAYER2 POOL PROBE"]},
+    },
+    "protocol-core-layer2-live-tls-sni": {
+        "caller": "protocol-layer2-sni-a", "callee": "protocol-layer2-sni-b",
+        "sip_transport": "tls", "uac_transport": "tls", "uas_transport": "tls",
+        "tls_server_names": ["playsbc-playsbc", "playsbc-playsbc.playsbc.svc"],
+        "k8s_layer2_probe": "tls-sni",
+        "expected_log_markers": {"log.tls": ["TLS CONNECTED"], "log.networking": ["LAYER2 TLS-SNI PROBE"]},
+    },
+    "protocol-core-layer2-live-tls-rotation": {
+        "caller": "protocol-layer2-rotation-a", "callee": "protocol-layer2-rotation-b",
+        "sip_transport": "tls", "uac_transport": "tls", "uas_transport": "tls",
+        "tls_reload_interval": 1.0,
+        "k8s_layer2_probe": "tls-rotation",
+        "expected_log_markers": {
+            "log.tls": ["TLS CERTIFICATE RELOADED"],
+            "log.networking": ["LAYER2 TLS-ROTATION PROBE"],
+        },
+    },
+    "protocol-core-layer3-live-client-transactions": {
+        "caller": "protocol-layer3-client-a", "callee": "protocol-layer3-client-b",
+        "expected_log_markers": {"log.sip": ["CLIENT TRANSACTION STARTED", "CLIENT TRANSACTION RESPONSE"]},
+    },
+    "protocol-core-layer3-live-non2xx-ack": {
+        "caller": "protocol-layer3-failure-a", "callee": "protocol-layer3-failure-b",
+        "uac_scenario": "b2bua_uac_failed_outbound.xml", "uas_scenario": "b2bua_uas_failed_outbound.xml",
+        "expected_log_markers": {"log.sip": ["CLIENT TRANSACTION NON-2XX FINAL", "CLIENT TRANSACTION RESPONSE"]},
+    },
+    "protocol-core-layer3-live-cancel": {
+        "caller": "protocol-layer3-cancel-a", "callee": "protocol-layer3-cancel-b",
+        "uac_scenario": "b2bua_uac_cancel.xml", "uas_scenario": "b2bua_uas_cancel.xml",
+        "expected_log_markers": {"log.sip": ["CLIENT TRANSACTION STARTED", "CLIENT TRANSACTION RESPONSE"]},
+    },
+    "protocol-core-layer3-live-retransmission": {
+        "caller": "protocol-layer3-retransmit-a", "callee": "protocol-layer3-retransmit-b",
+        "uac_scenario": "b2bua_uac_retransmit_invite.xml",
+        "expected_log_markers": {"log.sip": ["CLIENT TRANSACTION STARTED"]},
+    },
+    "protocol-core-layer3-live-transport-error": {
+        "caller": "protocol-layer3-transport-a", "callee": "protocol-layer3-unreachable-b",
+        "sip_transport": "tcp", "register_callee": False, "start_uas": False,
+        "uac_scenario": "b2bua_uac_expect_480.xml",
+        "route_policies": [{"name": "unreachable-layer3-peer", "match": "*", "target": "sip:{user}@127.0.0.1:29999;transport=tcp", "priority": 10}],
+        "expected_log_markers": {"log.networking": ["TCP TX FAILED", "CLIENT TRANSACTION TRANSPORT ERROR"]},
+    },
+    "protocol-core-layer4-live-route-set": {
+        "caller": "protocol-layer4-route-a", "callee": "protocol-layer4-route-b",
+        "uas_scenario": "b2bua_uas_layer4_route_set.xml",
+        "expected_log_markers": {"log.sip": ["B2BUA OUTBOUND ROUTE SET"]},
+    },
+    "protocol-core-layer4-live-strict-route": {
+        "caller": "protocol-layer4-strict-a", "callee": "protocol-layer4-strict-b",
+        "uas_scenario": "b2bua_uas_layer4_strict_route.xml",
+    },
+    "protocol-core-layer4-live-prack": {
+        "caller": "protocol-layer4-prack-a", "callee": "protocol-layer4-prack-b",
+        "uac_scenario": "b2bua_uac_layer4_prack.xml",
+        "uas_scenario": "b2bua_uas_layer4_prack.xml",
+    },
+    "protocol-core-layer4-live-session-timer": {
+        "caller": "protocol-layer4-timer-a", "callee": "protocol-layer4-timer-b",
+        "uac_scenario": "b2bua_uac_layer4_session_timer.xml",
+        "expected_log_markers": {"log.sip": ["Session-Expires"]},
+    },
+    "protocol-core-layer4-live-session-expiry": {
+        "caller": "protocol-layer4-expiry-a", "callee": "protocol-layer4-expiry-b",
+        "uac_scenario": "b2bua_uac_layer4_session_expiry.xml",
+        "hold_ms": 92000,
+        "expected_log_markers": {"log.sip": ["DIALOG SESSION EXPIRED"]},
+    },
+    "protocol-core-layer4-live-min-se": {
+        "caller": "protocol-layer4-minse-a", "callee": "protocol-layer4-minse-b",
+        "uac_scenario": "b2bua_uac_layer4_min_se.xml",
+        "register_callee": False, "start_uas": False,
+    },
+    "protocol-core-layer4-live-update-target": {
+        "caller": "protocol-layer4-update-a", "callee": "protocol-layer4-update-b",
+        "uac_scenario": "b2bua_uac_layer4_update.xml",
+        "uas_scenario": "b2bua_uas_layer4_update.xml",
+    },
+    "protocol-core-layer4-live-update-offer": {
+        "caller": "protocol-layer4-offer-a", "callee": "protocol-layer4-offer-b",
+        "uac_scenario": "b2bua_uac_layer4_update_offer.xml",
+        "uas_scenario": "b2bua_uas_layer4_update_offer.xml",
+    },
+    "protocol-core-layer4-live-fork-cleanup": {
+        "caller": "protocol-layer4-fork-a", "callee": "protocol-layer4-fork-b",
+        "uas_scenario": "b2bua_uas_layer4_fork.xml",
+        "expected_log_markers": {"log.sip": ["B2BUA LOSING FORK CLEANUP"]},
+    },
+    "protocol-core-layer4-live-update-glare": {
+        "caller": "protocol-layer4-glare-a", "callee": "protocol-layer4-glare-b",
+        "uac_scenario": "b2bua_uac_layer4_update.xml",
+        "uas_scenario": "b2bua_uas_layer4_update_glare.xml",
+        "expected_log_markers": {"log.sip": ["B2BUA UPDATE GLARE RETRY"]},
+    },
+    "protocol-core-layer5-live-multi-contact": {
+        "callee": "protocol-layer5-multi", "run_call": False, "start_uas": False,
+        "registration_scenario": "register_layer5_multi_contact.xml",
+    },
+    "protocol-core-layer5-live-wildcard-expiry": {
+        "callee": "protocol-layer5-wildcard", "run_call": False, "start_uas": False,
+        "registration_scenario": "register_layer5_wildcard.xml",
+    },
+    "protocol-core-layer5-live-path-outbound": {
+        "callee": "protocol-layer5-outbound", "run_call": False, "start_uas": False,
+        "registration_scenario": "register_layer5_path_outbound.xml",
+        "registrar": {"service_route": "<sip:edge.playsbc.invalid;lr>"},
+    },
+    "protocol-core-layer5-live-max-forwards": {
+        "caller": "protocol-layer5-loop-a", "callee": "protocol-layer5-loop-b",
+        "register_callee": False, "start_uas": False,
+        "uac_scenario": "protocol_core_layer5_max_forwards.xml",
+    },
+    "protocol-core-layer5-live-digest-replay": {
+        "callee": "protocol-layer5-auth", "run_call": False, "start_uas": False,
+        "registration_scenario": "register_digest.xml", "registration_auth_expected": "success",
+        "registration_username": "protocol-layer5-auth", "registration_password": "playsbc-secret",
+        "users": {"protocol-layer5-auth": "playsbc-secret"},
+        "registrar": {"digest_algorithms": ["MD5", "SHA-256"]},
+    },
+    "protocol-core-layer6-live-options-storm": {
+        "caller": "protocol-layer6-options", "callee": "unused", "register_callee": False,
+        "start_uas": False, "uac_scenario": "protocol_core_layer6_options_storm.xml",
+        "overload": {"enabled": True, "method_rps": {"OPTIONS": 1}, "recovery_seconds": 2, "retry_after": 2},
+        "expected_log_markers": {"log.networking": ["SIP OVERLOAD REJECTED"]},
+    },
+    "protocol-core-layer6-live-register-storm": {
+        "caller": "protocol-layer6-register", "callee": "unused", "register_callee": False,
+        "start_uas": False, "uac_scenario": "protocol_core_layer6_register_storm.xml",
+        "overload": {"enabled": True, "registration_rps": 1, "recovery_seconds": 2},
+        "expected_log_markers": {"log.networking": ["dimension=registration"]},
+    },
+    "protocol-core-layer6-live-source-limit": {
+        "caller": "protocol-layer6-source", "callee": "unused", "register_callee": False,
+        "start_uas": False, "uac_scenario": "protocol_core_layer6_options_storm.xml",
+        "overload": {"enabled": True, "per_source_rps": 1, "recovery_seconds": 2},
+        "expected_log_markers": {"log.networking": ["dimension=source"]},
+    },
+    "protocol-core-layer6-live-priority-bypass": {
+        "caller": "protocol-layer6-priority", "callee": "unused", "register_callee": False,
+        "start_uas": False, "uac_scenario": "protocol_core_layer6_priority.xml",
+        "overload": {"enabled": True, "method_rps": {"OPTIONS": 1}, "recovery_seconds": 2, "priority_sources": ["127.0.0.1"]},
+        "expected_log_markers": {"log.networking": ["SIP OVERLOAD REJECTED"]},
+    },
+    "protocol-core-layer6-live-recovery": {
+        "caller": "protocol-layer6-recovery", "callee": "unused", "register_callee": False,
+        "start_uas": False, "uac_scenario": "protocol_core_layer6_recovery.xml",
+        "overload": {"enabled": True, "method_rps": {"OPTIONS": 1}, "recovery_seconds": 1, "retry_after": 1},
+        "expected_log_markers": {"log.networking": ["SIP OVERLOAD REJECTED"]},
     },
     "evidence-b2bua-two-leg-pcap": {
         "callee": "evidence-two-leg",
@@ -1623,6 +1866,42 @@ for _profile_name in (
 
 PROFILE_DESCRIPTIONS = {
     "basic-signalling": "One SIPp A -> B2BUA -> registered SIPp B call without RTP replay.",
+    "protocol-core-layer1-live-call": "Live UDP B2BUA call proving Layer 1 compact/folded/extension header parsing, parameterized Request-URI handling, SDP framing, dialog ACK, and BYE.",
+    "protocol-core-layer2-live-tcp-call": "Live registrar-backed TCP B2BUA call proving Layer 2 stream framing, connection lifecycle, and peer connection reuse.",
+    "protocol-core-layer2-live-tls-call": "Live registrar-backed TLS B2BUA call proving encrypted stream framing, TLS 1.2+ lifecycle, and peer connection reuse.",
+    "protocol-core-layer2-live-dns-srv-call": "Live TCP B2BUA call routed through Kubernetes SRV plus A/AAAA discovery with retained DNS selection evidence.",
+    "protocol-core-layer2-live-dns-udp-call": "Live UDP B2BUA call routed to a Kubernetes hostname, proving asynchronous address discovery and datagram delivery.",
+    "protocol-core-layer2-live-rport-call": "Live UDP B2BUA call proving RFC 3581 received/rport response routing from a deliberately mismatched Via sent-by.",
+    "protocol-core-layer2-live-idle-timeout": "Live TCP call plus raw idle socket proving configured idle expiry and cleanup.",
+    "protocol-core-layer2-live-half-close": "Live TCP call plus partial-frame half-close proving deterministic EOF cleanup.",
+    "protocol-core-layer2-live-pool-limit": "Live TCP call plus concurrent sockets proving bounded connection-pool rejection and recovery.",
+    "protocol-core-layer2-live-tls-sni": "Live TLS call plus positive and negative SNI handshakes against the configured identity policy.",
+    "protocol-core-layer2-live-tls-rotation": "Live TLS call plus secret replacement proving new handshakes receive the rotated certificate without a pod restart.",
+    "protocol-core-layer3-live-client-transactions": "Real call proving outbound INVITE and BYE client transactions are started and matched.",
+    "protocol-core-layer3-live-non2xx-ack": "Real rejected call proving a non-2xx INVITE final response produces transaction-layer ACK evidence.",
+    "protocol-core-layer3-live-cancel": "Real early-dialog cancellation proving matched CANCEL, 200, 487, and cleanup across both legs.",
+    "protocol-core-layer3-live-retransmission": "Real duplicate INVITE proving cached response replay without a duplicate outbound call action.",
+    "protocol-core-layer3-live-transport-error": "Real unreachable TCP route proving client transaction transport-error propagation and upstream failure mapping.",
+    "protocol-core-layer4-live-route-set": "Real call proving reversed Record-Route is used on outbound ACK and BYE.",
+    "protocol-core-layer4-live-strict-route": "Real call proving strict-route Request-URI rewriting and trailing remote target on ACK/BYE.",
+    "protocol-core-layer4-live-prack": "Real reliable provisional call proving RSeq and RAck translation across independent B2BUA legs.",
+    "protocol-core-layer4-live-session-timer": "Real call proving Session-Expires negotiation and expiration state creation.",
+    "protocol-core-layer4-live-session-expiry": "Real 90-second call proving missing refresh expires the session and sends BYE to both legs.",
+    "protocol-core-layer4-live-min-se": "Real rejected INVITE proving RFC 4028 422 and Min-SE floor enforcement.",
+    "protocol-core-layer4-live-update-target": "Real in-dialog UPDATE and Contact target refresh, verified by the subsequent BYE Request-URI.",
+    "protocol-core-layer4-live-update-offer": "Real in-dialog UPDATE offer/answer with SDP direction change and target refresh.",
+    "protocol-core-layer4-live-fork-cleanup": "Real two-final-response call proving losing 2xx branch ACK/BYE cleanup without disturbing the winner.",
+    "protocol-core-layer4-live-update-glare": "Real 491 UPDATE glare followed by a delayed B2BUA retry with a higher outbound CSeq.",
+    "protocol-core-layer5-live-multi-contact": "Real REGISTER proving multiple Contact bindings and q-value ordering.",
+    "protocol-core-layer5-live-wildcard-expiry": "Real REGISTER sequence proving wildcard de-registration with Expires 0.",
+    "protocol-core-layer5-live-path-outbound": "Real REGISTER proving Path, Service-Route, and RFC 5626 outbound parameters.",
+    "protocol-core-layer5-live-max-forwards": "Real INVITE proving deterministic loop prevention with 483.",
+    "protocol-core-layer5-live-digest-replay": "Real authenticated REGISTER using nonce-count replay-controlled digest state.",
+    "protocol-core-layer6-live-options-storm": "Real OPTIONS storm proving method rate rejection with 503 and Retry-After.",
+    "protocol-core-layer6-live-register-storm": "Real REGISTER storm proving registration-specific rate control.",
+    "protocol-core-layer6-live-source-limit": "Real request burst proving per-source rate control.",
+    "protocol-core-layer6-live-priority-bypass": "Real overload sequence proving Resource-Priority bypass policy.",
+    "protocol-core-layer6-live-recovery": "Real overload sequence proving recovery hysteresis and admission restoration.",
     "evidence-b2bua-two-leg-pcap": "One bridged call whose combined Kubernetes PCAP must prove core and peer capture roles plus distinct B2BUA INVITE legs.",
     "basic-media": "One registered 60 second B2BUA call with PCMU RTP replay.",
     "transcoding": "One registered 60 second B2BUA media call with PCMU media and PCMA server codec preference.",
@@ -2019,6 +2298,8 @@ def build_uac_command(args: argparse.Namespace, sipp_binary: str) -> List[str]:
         "-max_rtp_port",
         str(args.uac_rtp_max),
     ]
+    for key, value in getattr(args, "uac_keys", {}).items():
+        command.extend(["-key", str(key), str(value)])
     command.extend(sipp_trace_args(args))
     command.extend(sipp_transport_args(args))
     return maybe_sudo_sipp_pcap(args, command)
@@ -2088,6 +2369,7 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
     config = {
         "sip_ip": args.host,
         "sip_port": args.server_port,
+        "health_port": getattr(args, "health_port", 8080),
         "tls_port": args.server_port,
         "sip_transport": args.sip_transport,
         "rtp_min": args.server_rtp_min,
@@ -2109,6 +2391,11 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
             getattr(args, "business_services", {}),
             args,
         ),
+        "sip_stream": getattr(args, "sip_stream", {}),
+        "sip_transactions": getattr(args, "sip_transactions", {}),
+        "server_location": getattr(args, "server_location", {}),
+        "registrar": getattr(args, "registrar", {}),
+        "overload": getattr(args, "overload", {}),
         "b2bua_ladder_logs": args.ladder_enabled,
         "b2bua_invite_timeout": getattr(args, "b2bua_invite_timeout", 10.0),
         "media_backend": args.media_backend,
@@ -2129,6 +2416,9 @@ def write_dynamic_config(args: argparse.Namespace, work_dir: Path, log_dir: Path
         "tls_keyfile": getattr(args, "tls_keyfile", ""),
         "tls_cafile": getattr(args, "tls_cafile", ""),
         "tls_verify_peer": getattr(args, "tls_verify_peer", False),
+        "tls_server_names": getattr(args, "tls_server_names", []),
+        "tls_require_sni": getattr(args, "tls_require_sni", False),
+        "tls_reload_interval": getattr(args, "tls_reload_interval", 30.0),
         "debug": True,
     }
     values_path = work_dir / "helm-values.yaml"
@@ -4408,6 +4698,7 @@ def main() -> int:
     parser.add_argument("--list-profiles", action="store_true", help="List named B2BUA SIPp test profiles")
     parser.add_argument("--host", default=BASE_DEFAULTS["host"])
     parser.add_argument("--server-port", type=int, default=BASE_DEFAULTS["server_port"])
+    parser.add_argument("--health-port", type=int, default=8080, help="Mini server health-listener port")
     parser.add_argument("--sip-transport", choices=("udp", "tcp", "tls", "udp,tcp"), default=BASE_DEFAULTS["sip_transport"], help="PlaySBC SIP listener transport for this run")
     parser.add_argument("--uac-port", type=int, default=BASE_DEFAULTS["uac_port"])
     parser.add_argument("--uas-port", type=int, default=BASE_DEFAULTS["uas_port"])

@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="Protocol Core Layer 4 forked final responses">
+  <recv request="INVITE" crlf="true">
+    <action><ereg regexp="Via: ([^\r\n]+)" search_in="msg" check_it="true" assign_to="1,2" /></action>
+  </recv>
+  <nop><action><log message="fork-invite-via=[$1] via-value=[$2]" /></action></nop>
+  <send><![CDATA[
+    SIP/2.0 100 Trying
+    Via: [$2]
+    [last_From:]
+    [last_To:]
+    [last_Call-ID:]
+    [last_CSeq:]
+    Content-Length: 0
+
+  ]]></send>
+  <send retrans="500"><![CDATA[
+    SIP/2.0 200 OK
+    Via: [$2]
+    [last_From:]
+    [last_To:];tag=layer4-winner-[call_number]
+    [last_Call-ID:]
+    [last_CSeq:]
+    Contact: <sip:winner@[local_ip]:[local_port]>
+    Content-Type: application/sdp
+    Content-Length: [len]
+
+    v=0
+    o=sipp-b 53655765 2353687638 IN IP4 [local_ip]
+    s=Layer 4 forked dialogs
+    c=IN IP[media_ip_type] [media_ip]
+    t=0 0
+    m=audio [media_port] RTP/AVP 0 8 101
+    a=rtpmap:0 PCMU/8000
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-16
+    a=sendrecv
+  ]]></send>
+  <recv request="ACK" crlf="true">
+    <action><ereg regexp="tag=layer4-winner-" search_in="msg" check_it="true" assign_to="3" /></action>
+  </recv>
+  <nop><action><log message="winner-ack=[$3]" /></action></nop>
+  <send retrans="500"><![CDATA[
+    SIP/2.0 200 OK
+    Via: [$2]
+    [last_From:]
+    To: <sip:[service]@[local_ip]:[local_port]>;tag=layer4-loser-[call_number]
+    [last_Call-ID:]
+    CSeq: 1 INVITE
+    Contact: <sip:loser@[local_ip]:[local_port]>
+    Content-Type: application/sdp
+    Content-Length: [len]
+
+    v=0
+    o=sipp-b 53655765 2353687638 IN IP4 [local_ip]
+    s=Layer 4 losing fork
+    c=IN IP[media_ip_type] [media_ip]
+    t=0 0
+    m=audio [media_port] RTP/AVP 0 8 101
+    a=rtpmap:0 PCMU/8000
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-16
+    a=sendrecv
+  ]]></send>
+  <recv request="ACK" crlf="true">
+    <action><ereg regexp="tag=layer4-loser-" search_in="msg" check_it="true" assign_to="4" /></action>
+  </recv>
+  <nop><action><log message="loser-ack=[$4]" /></action></nop>
+  <recv request="BYE" crlf="true">
+    <action><ereg regexp="BYE sip:loser@" search_in="msg" check_it="true" assign_to="5" /></action>
+  </recv>
+  <nop><action><log message="loser-bye=[$5]" /></action></nop>
+  <send><![CDATA[
+    SIP/2.0 200 OK
+    [last_Via:]
+    [last_From:]
+    [last_To:]
+    [last_Call-ID:]
+    [last_CSeq:]
+    Content-Length: 0
+
+  ]]></send>
+  <recv request="BYE" crlf="true">
+    <action><ereg regexp="BYE sip:winner@" search_in="msg" check_it="true" assign_to="6" /></action>
+  </recv>
+  <nop><action><log message="winner-bye=[$6]" /></action></nop>
+  <send><![CDATA[
+    SIP/2.0 200 OK
+    [last_Via:]
+    [last_From:]
+    [last_To:]
+    [last_Call-ID:]
+    [last_CSeq:]
+    Content-Length: 0
+
+  ]]></send>
+  <timewait milliseconds="1000" />
+</scenario>

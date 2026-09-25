@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import html
 import json
 import os
@@ -32,6 +33,42 @@ DEFAULT_B2BUA_PROFILES = (
 )
 ALL_B2BUA_PROFILES = (
     "basic-signalling",
+    "protocol-core-layer1-live-call",
+    "protocol-core-layer2-live-tcp-call",
+    "protocol-core-layer2-live-tls-call",
+    "protocol-core-layer2-live-dns-srv-call",
+    "protocol-core-layer2-live-dns-udp-call",
+    "protocol-core-layer2-live-rport-call",
+    "protocol-core-layer2-live-idle-timeout",
+    "protocol-core-layer2-live-half-close",
+    "protocol-core-layer2-live-pool-limit",
+    "protocol-core-layer2-live-tls-sni",
+    "protocol-core-layer2-live-tls-rotation",
+    "protocol-core-layer3-live-client-transactions",
+    "protocol-core-layer3-live-non2xx-ack",
+    "protocol-core-layer3-live-cancel",
+    "protocol-core-layer3-live-retransmission",
+    "protocol-core-layer3-live-transport-error",
+    "protocol-core-layer4-live-route-set",
+    "protocol-core-layer4-live-strict-route",
+    "protocol-core-layer4-live-prack",
+    "protocol-core-layer4-live-session-timer",
+    "protocol-core-layer4-live-session-expiry",
+    "protocol-core-layer4-live-min-se",
+    "protocol-core-layer4-live-update-target",
+    "protocol-core-layer4-live-update-offer",
+    "protocol-core-layer4-live-fork-cleanup",
+    "protocol-core-layer4-live-update-glare",
+    "protocol-core-layer5-live-multi-contact",
+    "protocol-core-layer5-live-wildcard-expiry",
+    "protocol-core-layer5-live-path-outbound",
+    "protocol-core-layer5-live-max-forwards",
+    "protocol-core-layer5-live-digest-replay",
+    "protocol-core-layer6-live-options-storm",
+    "protocol-core-layer6-live-register-storm",
+    "protocol-core-layer6-live-source-limit",
+    "protocol-core-layer6-live-priority-bypass",
+    "protocol-core-layer6-live-recovery",
     "evidence-b2bua-two-leg-pcap",
     "basic-media",
     "transcoding",
@@ -936,6 +973,165 @@ def parse_b2bua_stdout(profile: str, stdout: str, returncode: int, duration: flo
     ]
 
 
+def observed_endpoint_roles(bundle: Optional[Path]) -> dict[str, str]:
+    """Map retained Kubernetes endpoint IPs to concise participant roles."""
+    roles: dict[str, str] = {}
+    if bundle is None:
+        return roles
+    platform = bundle / "log.platform"
+    if platform.is_file():
+        text = platform.read_text(encoding="utf-8", errors="replace")
+        for pod, ip in re.findall(r"POD\s+(\S+)\s+READY\s*\npod_ip=(\S+)", text):
+            lowered = pod.lower()
+            role = "SIPp Target" if "target" in lowered else "SIPp Peer" if "peer" in lowered or "uas" in lowered else "SIPp Core"
+            roles[ip] = role
+        for pod, ip in re.findall(
+            r"===== persistent pod/(\S+) log\.platform =====.*?SERVER CONFIG.*?sip_advertised=([^:\s]+)",
+            text,
+            re.DOTALL,
+        ):
+            roles[ip] = "PlaySBC" + (f" {pod.rsplit('-', 1)[-1]}" if re.search(r"-\d+$", pod) else "")
+    pods = bundle / "kubectl-pods.log"
+    if pods.is_file():
+        for line in pods.read_text(encoding="utf-8", errors="replace").splitlines():
+            columns = line.split()
+            if len(columns) < 7 or not re.match(r"^\d+\.\d+\.\d+\.\d+$", columns[5]):
+                continue
+            name, ip = columns[0], columns[5]
+            if "rtpengine" in name:
+                roles[ip] = "RTPengine" + (f" {name.rsplit('-', 1)[-1]}" if re.search(r"-\d+$", name) else "")
+            elif re.search(r"playsbc-playsbc-\d+$", name):
+                roles[ip] = f"PlaySBC {name.rsplit('-', 1)[-1]}"
+    services = bundle / "kubectl-services.log"
+    if services.is_file():
+        for line in services.read_text(encoding="utf-8", errors="replace").splitlines():
+            columns = line.split()
+            if len(columns) >= 3 and columns[0] == "playsbc-playsbc" and re.match(r"^\d+\.\d+\.\d+\.\d+$", columns[2]):
+                roles[columns[2]] = "PlaySBC Service"
+    return roles
+
+
+def observed_rtpengine_events(bundle: Optional[Path], roles: dict[str, str]) -> list[tuple[float, str, str, str, str]]:
+    """Read RTPengine control and packet-verdict events retained in log.media."""
+    if bundle is None or not (bundle / "log.media").is_file():
+        return []
+    text = (bundle / "log.media").read_text(encoding="utf-8", errors="replace")
+    rtpengine_ips = [ip for ip, role in roles.items() if role.startswith("RTPengine")]
+    if not rtpengine_ips:
+        rtpengine_ips = re.findall(r"RTPENGINE PORT ALLOCATION.*?rtp=(\d+\.\d+\.\d+\.\d+):", text)
+        for ip in rtpengine_ips:
+            roles.setdefault(ip, "RTPengine")
+    if not rtpengine_ips:
+        return []
+    events = []
+    current_playsbc_ip = ""
+    pod_ips = {role: ip for ip, role in roles.items() if role.startswith("PlaySBC ")}
+    for line in text.splitlines():
+        heading = re.match(r"===== persistent pod/(\S+) log\.media =====", line)
+        if heading:
+            suffix = heading.group(1).rsplit("-", 1)[-1]
+            current_playsbc_ip = pod_ips.get(f"PlaySBC {suffix}", "")
+            continue
+        match = re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \| B2BUA RTPENGINE (OFFER|ANSWER|QUERY|DELETE|PACKET VERDICT)\b", line)
+        if not match or not current_playsbc_ip:
+            continue
+        timestamp_text, action = match.groups()
+        timestamp = datetime.datetime.strptime(timestamp_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+        rtpe_ip = rtpengine_ips[0]
+        if action == "PACKET VERDICT":
+            message = "RTP/RTCP media packets observed in both directions"
+            events.append((timestamp + 0.001, rtpe_ip, current_playsbc_ip, message, "media"))
+        else:
+            events.append((timestamp, current_playsbc_ip, rtpe_ip, f"RTPengine {action.title()}", "media"))
+    return events
+
+
+def render_observed_pcap_ladder(ladder: str, bundle: Optional[Path] = None) -> str:
+    """Render observed SIP and RTPengine evidence as a directional SVG ladder."""
+    lines = ladder.splitlines()
+    if not lines or not lines[0].startswith("KUBERNETES OBSERVED PCAP SIP LADDER"):
+        return ""
+
+    roles = observed_endpoint_roles(bundle)
+    events: list[tuple[float, str, str, str, str]] = []
+    participants = []
+    for line in lines[2:]:
+        match = re.match(r"^(\d+(?:\.\d+)?)\s+(\S+)\s+(\S+)\s+(.+)$", line.strip())
+        if not match:
+            continue
+        timestamp, source, destination, message = match.groups()
+        source = source.rsplit(":", 1)[0]
+        destination = destination.rsplit(":", 1)[0]
+        events.append((float(timestamp), source, destination, message, "sip"))
+        for endpoint in (source, destination):
+            if endpoint not in participants:
+                participants.append(endpoint)
+    events.extend(observed_rtpengine_events(bundle, roles))
+    events.sort(key=lambda item: item[0])
+    for _timestamp, source, destination, _message, _kind in events:
+        for endpoint in (source, destination):
+            if endpoint not in participants:
+                participants.append(endpoint)
+    if not events or not participants:
+        return ""
+
+    left_margin = 150
+    lane_width = 230
+    header_height = 66
+    row_height = 46
+    bottom_margin = 18
+    width = left_margin + max(2, len(participants)) * lane_width
+    height = header_height + len(events) * row_height + bottom_margin
+    x_positions = {
+        endpoint: left_margin + lane_width // 2 + index * lane_width
+        for index, endpoint in enumerate(participants)
+    }
+    marker_id = "sip-arrow-" + re.sub(r"[^a-zA-Z0-9_-]+", "-", lines[0]).strip("-")
+
+    svg = [
+        f'<div class="sip-ladder-diagram" role="img" aria-label="{html.escape(lines[0])}">',
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">',
+        "<defs>",
+        f'<marker id="{marker_id}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">',
+        '<path d="M0,0 L8,4 L0,8 z" fill="#2563eb"/></marker>',
+        "</defs>",
+        '<text class="ladder-time-heading" x="12" y="32">Time (epoch)</text>',
+    ]
+    for endpoint in participants:
+        x = x_positions[endpoint]
+        svg.extend(
+            [
+                f'<rect class="ladder-participant" x="{x - 92}" y="8" width="184" height="38" rx="6"/>',
+                f'<text class="ladder-participant-label" x="{x}" y="25">{html.escape(roles.get(endpoint, "SIP endpoint"))}'
+                f'<tspan x="{x}" dy="14">{html.escape(endpoint)}</tspan></text>',
+                f'<line class="ladder-lifeline" x1="{x}" y1="46" x2="{x}" y2="{height - 8}"/>',
+            ]
+        )
+    for index, (timestamp, source, destination, message, kind) in enumerate(events):
+        y = header_height + index * row_height + 22
+        source_x = x_positions[source]
+        destination_x = x_positions[destination]
+        svg.append(f'<text class="ladder-timestamp" x="12" y="{y + 4}">{timestamp:.6f}</text>')
+        if source_x == destination_x:
+            svg.append(
+                f'<path class="ladder-arrow" d="M {source_x} {y} h 45 v 20 h -45" marker-end="url(#{marker_id})"/>'
+            )
+            label_x = source_x + 52
+            label_anchor = "start"
+        else:
+            inset = 7 if destination_x > source_x else -7
+            svg.append(
+                f'<line class="ladder-arrow {kind}" x1="{source_x}" y1="{y}" x2="{destination_x - inset}" y2="{y}" marker-end="url(#{marker_id})"/>'
+            )
+            label_x = (source_x + destination_x) / 2
+            label_anchor = "middle"
+        svg.append(
+            f'<text class="ladder-message" x="{label_x}" y="{y - 7}" text-anchor="{label_anchor}">{html.escape(message)}</text>'
+        )
+    svg.extend(["</svg>", "</div>"])
+    return "".join(svg)
+
+
 def render_html(
     rows: List[ReportRow],
     generated_at: str,
@@ -1011,6 +1207,12 @@ def render_html(
                 ladder_note = (
                     "Chat-specific ladder for the Rasa NLU regression path. This is not a SIP/RTP ladder."
                 )
+            elif "PROTOCOL CORE EVIDENCE LADDER" in row.sip_ladder:
+                ladder_title = "Protocol Core Evidence Ladder"
+                ladder_note = "Observed post-execution protocol-core test verdicts retained in the evidence bundle."
+            elif "REGRESSION EVIDENCE LADDER" in row.sip_ladder:
+                ladder_title = "Regression Evidence Ladder"
+                ladder_note = "Post-execution lifecycle and retained evidence for a case with no SIP packet flow."
             else:
                 is_ai_ladder = "AI VOICE" in row.sip_ladder or "ai-rasa" in row.name
                 ladder_title = "Unified SIP/RTP/AI Ladder" if is_ai_ladder else "Unified SIP Ladder"
@@ -1019,10 +1221,18 @@ def render_html(
                     if is_ai_ladder
                     else "Single ordered SIP ladder for the test case."
                 )
+            evidence_bundle = resolve_evidence_bundle(row.log_path, report_dir)
+            observed_diagram = render_observed_pcap_ladder(row.sip_ladder, evidence_bundle)
+            ladder_content = observed_diagram or f"<pre>{html.escape(row.sip_ladder)}</pre>"
+            raw_observed = (
+                '<details class="ladder-source"><summary>Observed packet trace</summary>'
+                f'<pre>{html.escape(row.sip_ladder)}</pre></details>'
+                if observed_diagram else ""
+            )
             ladder_html = (
                 f"<section class=\"ladder\"><h2>{html.escape(ladder_title)}</h2>"
                 f"<p>{html.escape(ladder_note)}</p>"
-                f"<pre>{html.escape(row.sip_ladder)}</pre></section>"
+                f"{ladder_content}{raw_observed}</section>"
             )
         audio_html = ""
         audio_evidence = [] if is_chat_nlu else discover_audio_evidence(row.log_path, report_dir)
@@ -1195,6 +1405,18 @@ def render_html(
     .intent-line span {{ padding: 4px 7px; border-radius: 999px; background: rgba(255,255,255,.72); border: 1px solid rgba(15,23,42,.12); font-size: 12px; }}
     .chat-message small {{ display: block; margin-top: 8px; color: inherit; opacity: .78; }}
     .ladder pre {{ margin: 0; padding: 14px; overflow-x: auto; border: 1px solid #d1d5db; background: #111827; color: #e5e7eb; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }}
+    .sip-ladder-diagram {{ overflow-x: auto; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; }}
+    .sip-ladder-diagram svg {{ display: block; max-width: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+    .ladder-participant {{ fill: #eff6ff; stroke: #2563eb; stroke-width: 1.5; }}
+    .ladder-participant-label {{ fill: #172554; font-size: 12px; font-weight: 700; text-anchor: middle; }}
+    .ladder-lifeline {{ stroke: #94a3b8; stroke-width: 1; stroke-dasharray: 5 5; }}
+    .ladder-arrow {{ fill: none; stroke: #2563eb; stroke-width: 1.6; }}
+    .ladder-arrow.media {{ stroke: #7c3aed; stroke-dasharray: 6 3; }}
+    .ladder-message {{ fill: #111827; font-size: 11px; font-weight: 650; paint-order: stroke; stroke: #fff; stroke-width: 4px; stroke-linejoin: round; }}
+    .ladder-timestamp, .ladder-time-heading {{ fill: #475569; font-size: 11px; font-variant-numeric: tabular-nums; }}
+    .ladder-time-heading {{ font-weight: 750; }}
+    .ladder-source {{ margin-top: 8px; border: 1px solid #d1d5db; border-radius: 5px; }}
+    .ladder-source summary {{ cursor: pointer; padding: 8px 10px; color: #334155; font-size: 12px; font-weight: 700; }}
     .badge {{ display: inline-block; min-width: 68px; text-align: center; border-radius: 999px; padding: 4px 8px; font-weight: 700; font-size: 12px; }}
     .badge.pass {{ color: #166534; background: #dcfce7; border: 1px solid #16a34a; }}
     .badge.blocked {{ color: #92400e; background: #fef3c7; border: 1px solid #f59e0b; }}
