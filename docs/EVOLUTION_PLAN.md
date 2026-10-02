@@ -7,7 +7,7 @@ PlaySBC is an enterprise-style SIP/RTP and AI voice lab. It is not yet a product
 This document is ordered by dependency, not by feature visibility:
 
 1. Preserve the public `v2.6.0` regression and evidence baseline.
-2. Maintain the public `v4.0.0` 78-profile release gate.
+2. Maintain the public `v4.0.0` 125-profile release gate.
 3. Complete the production SBC protocol core; every higher-level service depends on it.
 4. Complete all network-side RFC 5359 business calling services with three-endpoint, RTPengine, AKS, and real-device evidence.
 5. Complete the production AI Voice Gateway on the proven signaling/media core.
@@ -32,9 +32,9 @@ The baseline includes selected transaction, retransmission, CANCEL, dialog,
 TCP reuse, and transport-failure tests. It is not a complete RFC 3261
 transaction-layer implementation or a SIP conformance claim.
 
-### v2.6.0 Regression And Evidence Gate
+### Current Regression And Evidence Gate
 
-- The v4.0.0 catalog contains 78 full-regression profiles, and the launcher reports live `X/78` progress for a complete run. Three smoke profiles remain a separate per-build gate.
+- The v4.0.0 catalog contains 125 full-regression profiles, and the launcher reports live `X/125` progress for a complete run. Three smoke profiles remain a separate per-build gate.
 - `evidence-b2bua-two-leg-pcap` requires core and peer packet sources plus two distinct B2BUA INVITE Call-IDs.
 - Long local macOS runs use a scoped `caffeinate` process to prevent host sleep from creating false SIPp timeouts.
 - Missing or empty expected capture roles fail evidence collection before split captures are removed.
@@ -50,7 +50,7 @@ claim.
 ## 2. Current Public Release Gate: v4.0.0
 
 The public `v4.0.0` release carries the runtime, chart, operator configuration,
-evidence viewer, and all 78 full-regression profiles under the MIT license.
+evidence viewer, and all 125 full-regression profiles under the MIT license.
 The release gate requires matching `VERSION`, chart, image, guide, and release
 metadata plus focused unit, Helm, evidence, and profile-catalog validation.
 Private governance, credentials, generated evidence, and customer-specific
