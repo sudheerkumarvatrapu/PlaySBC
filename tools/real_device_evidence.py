@@ -65,6 +65,15 @@ class SipEvent:
     transport: str
 
 
+@dataclass(frozen=True)
+class SipMessageEvent:
+    timestamp: float
+    src: str
+    dst: str
+    transport: str
+    text: str
+
+
 def _network_payload(linktype: int, frame: bytes) -> bytes | None:
     if linktype == 1:  # Ethernet
         if len(frame) < 14:
@@ -183,8 +192,9 @@ def _header(text: str, name: str) -> str:
     return ""
 
 
-def sip_events(packets: Iterable[Packet]) -> list[SipEvent]:
-    events: list[SipEvent] = []
+def sip_message_events(packets: Iterable[Packet]) -> list[SipMessageEvent]:
+    """Return complete SIP messages retained in packet payloads."""
+    messages: list[SipMessageEvent] = []
     for packet in packets:
         for raw_message in _sip_messages(packet.payload):
             text = raw_message.decode("ISO-8859-1", "replace")
@@ -192,20 +202,38 @@ def sip_events(packets: Iterable[Packet]) -> list[SipEvent]:
             first_token = start_line.split(" ", 1)[0].upper() if start_line else ""
             if first_token not in SIP_METHODS and first_token != "SIP/2.0":
                 continue
-            cseq = _header(text, "CSeq")
-            cseq_parts = cseq.split()
-            events.append(
-                SipEvent(
+            messages.append(
+                SipMessageEvent(
                     timestamp=packet.timestamp,
                     src=f"{packet.src_ip}:{packet.src_port}",
                     dst=f"{packet.dst_ip}:{packet.dst_port}",
-                    start_line=start_line,
-                    call_id=_header(text, "Call-ID") or _header(text, "i") or "unknown",
-                    cseq=cseq,
-                    cseq_method=cseq_parts[-1].upper() if cseq_parts else first_token,
                     transport=packet.transport.upper(),
+                    text=text.rstrip("\x00\r\n"),
                 )
             )
+    return sorted(messages, key=lambda item: item.timestamp)
+
+
+def sip_events(packets: Iterable[Packet]) -> list[SipEvent]:
+    events: list[SipEvent] = []
+    for message in sip_message_events(packets):
+        text = message.text
+        start_line = text.replace("\r\n", "\n").split("\n", 1)[0].strip()
+        first_token = start_line.split(" ", 1)[0].upper() if start_line else ""
+        cseq = _header(text, "CSeq")
+        cseq_parts = cseq.split()
+        events.append(
+            SipEvent(
+                timestamp=message.timestamp,
+                src=message.src,
+                dst=message.dst,
+                start_line=start_line,
+                call_id=_header(text, "Call-ID") or _header(text, "i") or "unknown",
+                cseq=cseq,
+                cseq_method=cseq_parts[-1].upper() if cseq_parts else first_token,
+                transport=message.transport,
+            )
+        )
     return sorted(events, key=lambda item: item.timestamp)
 
 

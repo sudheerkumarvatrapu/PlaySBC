@@ -67,6 +67,9 @@
     </action>
   </nop>
 
+  <!-- A retransmitted UDP 200 OK legitimately elicits another ACK. Keep BYE mandatory. -->
+  <recv request="ACK" optional="global" />
+
   <recv request="BYE" crlf="true" />
 
   <send>

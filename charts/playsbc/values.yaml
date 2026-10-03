@@ -141,7 +141,20 @@ observability:
       enabled: true
       size: 5Gi
       storageClassName: ""
-    resources: {}
+    startupProbe:
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 60
+    readinessProbe:
+      timeoutSeconds: 5
+      failureThreshold: 6
+    livenessProbe:
+      timeoutSeconds: 5
+      failureThreshold: 6
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
     scrapeAnnotations: false
     serviceMonitor:
       enabled: false
@@ -166,7 +179,20 @@ observability:
       enabled: true
       size: 2Gi
       storageClassName: ""
-    resources: {}
+    startupProbe:
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 60
+    readinessProbe:
+      timeoutSeconds: 5
+      failureThreshold: 6
+    livenessProbe:
+      timeoutSeconds: 5
+      failureThreshold: 6
+    resources:
+      requests:
+        cpu: 25m
+        memory: 128Mi
     dashboard:
       enabled: false
       labels:
@@ -205,32 +231,39 @@ rasa:
     tag: 3.6.20-full
     pullPolicy: IfNotPresent
   servicePort: 5005
+  evidencePort: 5006
   trainOnStart: true
   startupProbe:
     initialDelaySeconds: 10
     periodSeconds: 5
+    timeoutSeconds: 5
     failureThreshold: 120
   readinessProbe:
     initialDelaySeconds: 5
     periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 6
   livenessProbe:
     initialDelaySeconds: 30
     periodSeconds: 10
-  resources: {}
+    timeoutSeconds: 5
+    failureThreshold: 6
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
   project:
     config: |
       recipe: default.v1
       language: en
+      assistant_id: playsbc-public-rasa
       pipeline:
         - name: WhitespaceTokenizer
         - name: RegexFeaturizer
         - name: LexicalSyntacticFeaturizer
         - name: CountVectorsFeaturizer
-        - name: DIETClassifier
-          epochs: 100
+        - name: LogisticRegressionClassifier
         - name: EntitySynonymMapper
-        - name: ResponseSelector
-          epochs: 40
         - name: FallbackClassifier
           threshold: 0.05
       policies:

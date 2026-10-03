@@ -8,10 +8,16 @@
 {{- $promService := get $prometheus "service" | default dict }}
 {{- $promPersistence := get $prometheus "persistence" | default dict }}
 {{- $promResources := get $prometheus "resources" | default dict }}
+{{- $promStartupProbe := get $prometheus "startupProbe" | default dict }}
+{{- $promReadinessProbe := get $prometheus "readinessProbe" | default dict }}
+{{- $promLivenessProbe := get $prometheus "livenessProbe" | default dict }}
 {{- $grafanaImage := get $grafana "image" | default dict }}
 {{- $grafanaService := get $grafana "service" | default dict }}
 {{- $grafanaPersistence := get $grafana "persistence" | default dict }}
 {{- $grafanaResources := get $grafana "resources" | default dict }}
+{{- $grafanaStartupProbe := get $grafana "startupProbe" | default dict }}
+{{- $grafanaReadinessProbe := get $grafana "readinessProbe" | default dict }}
+{{- $grafanaLivenessProbe := get $grafana "livenessProbe" | default dict }}
 {{- $topology := .Values.topology | default dict }}
 {{- $activeActiveCfg := get $topology "activeActive" | default dict }}
 {{- $activeActive := get $activeActiveCfg "enabled" | default false }}
@@ -144,6 +150,8 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/prometheus-config: {{ printf "%s|%s|%d|%t" (toJson $prometheus) .Release.Namespace $playsbcReplicas $useStatefulSet | sha256sum | quote }}
       labels:
         app.kubernetes.io/name: {{ include "playsbc.name" . }}-prometheus
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -162,18 +170,29 @@ spec:
             - name: http
               containerPort: 9090
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: {{ get $promStartupProbe "periodSeconds" | default 5 }}
+            timeoutSeconds: {{ get $promStartupProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $promStartupProbe "failureThreshold" | default 60 }}
           readinessProbe:
             httpGet:
               path: /-/ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: {{ get $promReadinessProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $promReadinessProbe "failureThreshold" | default 6 }}
           livenessProbe:
             httpGet:
               path: /-/healthy
               port: http
             initialDelaySeconds: 10
             periodSeconds: 30
+            timeoutSeconds: {{ get $promLivenessProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $promLivenessProbe "failureThreshold" | default 6 }}
           volumeMounts:
             - name: config
               mountPath: /etc/prometheus
@@ -284,6 +303,8 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/grafana-dashboard: {{ include (print $.Template.BasePath "/observability.yaml") . | sha256sum | quote }}
       labels:
         app.kubernetes.io/name: {{ include "playsbc.name" . }}-grafana
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -308,18 +329,29 @@ spec:
             - name: http
               containerPort: 3000
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: {{ get $grafanaStartupProbe "periodSeconds" | default 5 }}
+            timeoutSeconds: {{ get $grafanaStartupProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $grafanaStartupProbe "failureThreshold" | default 60 }}
           readinessProbe:
             httpGet:
               path: /api/health
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: {{ get $grafanaReadinessProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $grafanaReadinessProbe "failureThreshold" | default 6 }}
           livenessProbe:
             httpGet:
               path: /api/health
               port: http
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: {{ get $grafanaLivenessProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $grafanaLivenessProbe "failureThreshold" | default 6 }}
           volumeMounts:
             - name: provisioning
               mountPath: /etc/grafana/provisioning/datasources/datasource.yml

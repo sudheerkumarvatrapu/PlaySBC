@@ -40,12 +40,13 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/playsbc-config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
       labels:
         app.kubernetes.io/name: {{ include "playsbc.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
         playsbc.io/topology: {{ get $topology "model" | default "single-realm" | quote }}
 {{- if or $multusEnabled $activeActive }}
-      annotations:
 {{- if $activeActive }}
         playsbc.io/active-active: "true"
 {{- end }}
@@ -101,12 +102,16 @@ spec:
               port: health
             initialDelaySeconds: 2
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - name: config
               mountPath: /etc/playsbc

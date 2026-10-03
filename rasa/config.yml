@@ -1,16 +1,15 @@
 recipe: default.v1
 language: en
+assistant_id: playsbc-public-rasa
 
 pipeline:
   - name: WhitespaceTokenizer
   - name: RegexFeaturizer
   - name: LexicalSyntacticFeaturizer
   - name: CountVectorsFeaturizer
-  - name: DIETClassifier
-    epochs: 100
+  # Compact intent catalog: deterministic and faster on kind/WSL nodes.
+  - name: LogisticRegressionClassifier
   - name: EntitySynonymMapper
-  - name: ResponseSelector
-    epochs: 40
   - name: FallbackClassifier
     threshold: 0.05
 

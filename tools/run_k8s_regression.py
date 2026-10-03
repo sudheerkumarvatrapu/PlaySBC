@@ -41,6 +41,7 @@ from tools.run_b2bua_sipp_smoke import (  # noqa: E402
     render_srtp_media_scenario,
     render_harness_config_templates,
     srtp_sender_command,
+    tolerate_retransmitted_load_invites,
     sipp_timeout_seconds,
     uas_media_codec,
     wait_for_process_log_marker,
@@ -56,7 +57,7 @@ from tools.run_regression_suite import (  # noqa: E402
     write_reports,
 )
 from mini_call_server import B2BUAFlowLog, RouteResult, SipUri  # noqa: E402
-from tools.real_device_evidence import read_pcap, sip_events  # noqa: E402
+from tools.real_device_evidence import read_pcap, sip_events, sip_message_events  # noqa: E402
 
 DEFAULT_PROFILES = ("basic-signalling", "basic-media", "transcoding", "registered-inbound", "registered-outbound")
 RASA_NLU_PROFILES = ("ai-rasa-chat-nlu", "ai-rasa-chat-negative")
@@ -379,21 +380,40 @@ def run_command(
     check: bool = False,
 ) -> CommandResult:
     started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        cwd=ROOT,
-        text=True,
-        input=input_text,
-        capture_output=True,
-        timeout=timeout,
-    )
-    result = CommandResult(
-        command=command,
-        returncode=completed.returncode,
-        duration_seconds=time.monotonic() - started,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            input=input_text,
+            capture_output=True,
+            timeout=timeout,
+        )
+        result = CommandResult(
+            command=command,
+            returncode=completed.returncode,
+            duration_seconds=time.monotonic() - started,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    except subprocess.TimeoutExpired as exc:
+        def timeout_output(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            return str(value)
+
+        result = CommandResult(
+            command=command,
+            returncode=124,
+            duration_seconds=time.monotonic() - started,
+            stdout=timeout_output(exc.stdout),
+            stderr=(
+                timeout_output(exc.stderr)
+                + f"\ncommand timed out after {timeout} seconds: {command_text(command)}\n"
+            ).lstrip(),
+        )
     if check and result.returncode != 0:
         raise RuntimeError(
             f"Command failed ({result.returncode}): {command_text(command)}\n"
@@ -418,6 +438,69 @@ def is_statefulset_immutable_upgrade_error(text: str) -> bool:
 def ensure_binary(name: str) -> None:
     if not shutil.which(name):
         raise SystemExit(f"{name} executable not found in PATH")
+
+
+def configure_in_cluster_kubeconfig(
+    token_path: Path = Path("/var/run/secrets/kubernetes.io/serviceaccount/token"),
+    ca_path: Path = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
+    output_path: Path = Path("/tmp/playsbc-regression-kubeconfig"),
+) -> Optional[Path]:
+    """Give kubectl/Helm an explicit, rotation-safe in-cluster kubeconfig."""
+    if os.environ.get("KUBECONFIG"):
+        return None
+    host = os.environ.get("KUBERNETES_SERVICE_HOST", "").strip()
+    port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443").strip() or "443"
+    if not host or not token_path.is_file() or not ca_path.is_file():
+        return None
+    server_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    namespace_path = token_path.parent / "namespace"
+    namespace = namespace_path.read_text(encoding="utf-8").strip() if namespace_path.is_file() else "default"
+    output_path.write_text(
+        "apiVersion: v1\n"
+        "kind: Config\n"
+        "clusters:\n"
+        "- name: in-cluster\n"
+        "  cluster:\n"
+        f"    server: https://{server_host}:{port}\n"
+        f"    certificate-authority: {ca_path}\n"
+        "users:\n"
+        "- name: service-account\n"
+        "  user:\n"
+        f"    tokenFile: {token_path}\n"
+        "contexts:\n"
+        "- name: in-cluster\n"
+        "  context:\n"
+        "    cluster: in-cluster\n"
+        "    user: service-account\n"
+        f"    namespace: {namespace}\n"
+        "current-context: in-cluster\n",
+        encoding="utf-8",
+    )
+    output_path.chmod(0o600)
+    os.environ["KUBECONFIG"] = str(output_path)
+    return output_path
+
+
+def start_host_sleep_inhibitor() -> Optional[subprocess.Popen[bytes]]:
+    """Keep a directly launched regression awake for its complete lifetime."""
+    if sys.platform != "darwin" or not shutil.which("caffeinate"):
+        return None
+    return subprocess.Popen(
+        ["caffeinate", "-dimsu", "-w", str(os.getpid())],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def stop_host_sleep_inhibitor(process: Optional[subprocess.Popen[bytes]]) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
 
 
 def short_name(text: str, limit: int = 44) -> str:
@@ -592,6 +675,8 @@ def rendered_scenario(profile: SimpleNamespace, role: str) -> str:
     if "[uas_sdp_payloads]" in text:
         payloads, rtpmaps = sdp_payloads(profile, "uas")
         text = text.replace("[uas_sdp_payloads]", payloads).replace("[uas_sdp_rtpmaps]", rtpmaps)
+    if role == "uas" and profile.profile == "load-5cps-60s-rtpengine-transcoding":
+        text = tolerate_retransmitted_load_invites(text)
     secure_leg = bool(
         getattr(profile, "uac_srtp", False)
         if role == "uac"
@@ -983,12 +1068,74 @@ def extract_sipp_message_sections(trace_text: str) -> list[tuple[str, str]]:
     return sections
 
 
+def canonical_sipp_message_trace(body: str) -> str:
+    """Keep only SIPp wire-message blocks and discard socket diagnostics."""
+    blocks = re.findall(
+        r"(?ms)(-{20,}[ \t]*"
+        r"(?:\d{4}-\d{2}-\d{2}T[^\n]+)?\n"
+        r"(?:TCP|TLS|UDP)?\s*message (?:sent|received)(?: \[\d+\])? bytes:\s*\n"
+        r".*?)(?=\n-{20,}|\Z)",
+        body,
+    )
+    if blocks:
+        return "\n".join(block.strip() for block in blocks)
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^(?:[A-Z]+\s+\S+\s+SIP/2\.0|SIP/2\.0\s+\d{3}\b)", line.strip()):
+            return "\n".join(lines[index:]).strip()
+    return ""
+
+
+def format_observed_sip_message(timestamp: str, transport: str, src: str, dst: str, text: str) -> str:
+    normalized = text.replace("\r\n", "\n").rstrip("\n")
+    return "\n".join([
+        f"----- BEGIN SIP MESSAGE {timestamp} -----",
+        f"{transport} {src} -> {dst}",
+        "",
+        normalized,
+        "",
+        "----- END SIP MESSAGE -----",
+    ])
+
+
 def write_combined_sipmsg_log(bundle: Path, profile_name: str) -> int:
     sections: list[tuple[str, str, str]] = []
+    capture = bundle / "capture.pcap"
+    packet_messages = []
+    if capture.exists() and capture.stat().st_size > 24:
+        packet_messages = sip_message_events(read_pcap(capture))
+        if packet_messages:
+            sections.append((
+                "packet-capture", "capture.pcap",
+                "\n\n".join(
+                    format_observed_sip_message(
+                        f"{message.timestamp:.6f}", message.transport,
+                        message.src, message.dst, message.text,
+                    )
+                    for message in packet_messages
+                ),
+            ))
     for trace_path in sorted(bundle.glob("*/sipp-traces.log")):
         trace_text = trace_path.read_text(encoding="utf-8", errors="replace")
         for source_name, body in extract_sipp_message_sections(trace_text):
-            sections.append((trace_path.parent.name, source_name, body))
+            canonical = canonical_sipp_message_trace(body)
+            if canonical:
+                if "uac" in source_name.lower() and not re.search(r"(?m)^INVITE ", canonical):
+                    call_ids = set(re.findall(r"(?mi)^Call-ID:\s*(\S+)", canonical))
+                    invite = next(
+                        (
+                            message for message in packet_messages
+                            if message.text.startswith("INVITE ")
+                            and any(f"Call-ID: {call_id}" in message.text for call_id in call_ids)
+                        ),
+                        None,
+                    )
+                    if invite is not None:
+                        canonical = format_observed_sip_message(
+                            f"{invite.timestamp:.6f}", invite.transport,
+                            invite.src, invite.dst, invite.text,
+                        ) + "\n\n" + canonical
+                sections.append((trace_path.parent.name, source_name, canonical))
 
     output = bundle / "sipmsg.log"
     if not sections:
@@ -1280,9 +1427,26 @@ def validate_k8s_profile_evidence(
     if profile_name == "protocol-core-layer3-live-retransmission":
         transaction_log = bundle / "log.sip"
         transaction_text = transaction_log.read_text(encoding="utf-8", errors="replace") if transaction_log.exists() else ""
-        outbound_invites = len(re.findall(r"CLIENT TRANSACTION STARTED[^\n]*method=INVITE", transaction_text))
-        if outbound_invites != 1:
-            failures.append(f"Layer 3 retransmission produced {outbound_invites} outbound INVITE transactions instead of one")
+        # Both PlaySBC pods can contribute older persistent log lines. Match
+        # transaction starts to this profile's B-leg call ID before counting.
+        retransmit_call_ids = set(
+            re.findall(
+                r"B2BUA SIP FLOW[^\n]*B2BUA -> SIPp B: INVITE "
+                r"call_id=([^\s|]+)[^\n]*target=sip:protocol-layer3-retransmit-b@",
+                transaction_text,
+            )
+        )
+        started_call_ids = re.findall(
+            r"CLIENT TRANSACTION STARTED[^\n]*call_id=([^\s|]+)[^\n]*method=INVITE",
+            transaction_text,
+        )
+        outbound_invites = sum(call_id in retransmit_call_ids for call_id in started_call_ids)
+        if len(retransmit_call_ids) != 1 or outbound_invites != 1:
+            failures.append(
+                "Layer 3 retransmission produced "
+                f"{outbound_invites} scoped outbound INVITE transaction starts "
+                f"across {len(retransmit_call_ids)} B-leg call IDs instead of one"
+            )
     if profile_name == "protocol-core-layer3-live-transport-error":
         networking_log = bundle / "log.networking"
         networking_text = networking_log.read_text(encoding="utf-8", errors="replace") if networking_log.exists() else ""
@@ -1443,6 +1607,16 @@ def validate_k8s_profile_evidence(
         ):
             failures.append("mock Rasa RTPengine evidence is missing bot transfer action")
 
+    if (profile and profile_uses_real_rasa(profile)) or profile_name in RASA_NLU_PROFILES:
+        rasa_text = read_bundle_evidence_text(bundle, ("rasa.log",))
+        expected_path = "/model/parse" if profile_name in RASA_NLU_PROFILES else "/webhooks/rest/webhook"
+        if '"event":"rasa.http.completed"' not in rasa_text:
+            failures.append("real Rasa profile is missing server-side HTTP evidence")
+        if f'"path":"{expected_path}"' not in rasa_text:
+            failures.append(f"real Rasa profile is missing server-side evidence for {expected_path}")
+        if not re.search(r'"status":2\d\d', rasa_text):
+            failures.append("real Rasa server-side evidence has no successful HTTP status")
+
     return failures
 
 
@@ -1474,6 +1648,7 @@ def pod_manifest(
     run_id: str,
     realm: str = "",
     tls_secret: str = "",
+    resource_requests: dict[str, str] | None = None,
 ) -> dict[str, object]:
     labels = {
         "app.kubernetes.io/name": "playsbc-k8s-regression",
@@ -1488,24 +1663,23 @@ def pod_manifest(
     if tls_secret:
         volume_mounts.append({"name": "tls-secret", "mountPath": "/tmp/playsbc-tls", "readOnly": True})
         volumes.append({"name": "tls-secret", "secret": {"secretName": tls_secret}})
+    container: dict[str, object] = {
+        "name": "sipp-agent",
+        "image": image,
+        "imagePullPolicy": pull_policy,
+        "command": ["sleep", "3600"],
+        "volumeMounts": volume_mounts,
+        "securityContext": {"capabilities": {"add": ["NET_RAW"]}},
+    }
+    if resource_requests:
+        container["resources"] = {"requests": resource_requests}
     return {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {"name": name, "labels": labels},
         "spec": {
             "restartPolicy": "Never",
-            "containers": [
-                {
-                    "name": "sipp-agent",
-                    "image": image,
-                    "imagePullPolicy": pull_policy,
-                    "command": ["sleep", "3600"],
-                    "volumeMounts": volume_mounts,
-                    "securityContext": {
-                        "capabilities": {"add": ["NET_RAW"]},
-                    },
-                }
-            ],
+            "containers": [container],
             "volumes": volumes,
         },
     }
@@ -2273,7 +2447,10 @@ class K8sRegressionRunner:
         )
         self.image_prepared = True
 
-    def create_agent(self, name: str, bundle: Path, realm: str = "", tls_secret: str = "") -> str:
+    def create_agent(
+        self, name: str, bundle: Path, realm: str = "", tls_secret: str = "", profile_name: str = "",
+    ) -> str:
+        load_canary = profile_name == "load-5cps-60s-rtpengine-transcoding"
         manifest = pod_manifest(
             name,
             self.args.sipp_image,
@@ -2282,6 +2459,7 @@ class K8sRegressionRunner:
             self.run_id,
             realm=realm,
             tls_secret=tls_secret,
+            resource_requests={"cpu": "150m", "memory": "128Mi"} if load_canary else None,
         )
         self.kubectl("apply", "-f", "-", input_text=json.dumps(manifest), check=True)
         self.kubectl("wait", "--for=condition=Ready", f"pod/{name}", f"--timeout={self.args.pod_ready_timeout}s", check=True)
@@ -2359,11 +2537,43 @@ class K8sRegressionRunner:
 
     def delete_run_pods(self, bundle: Path) -> CommandResult:
         selector = f"playsbc-regression-run={self.run_id}"
-        result = self.kubectl("delete", "pod", "-l", selector, "--ignore-not-found=true", check=False)
-        service_result = self.kubectl("delete", "service", "-l", selector, "--ignore-not-found=true", check=False)
-        self.write_log(bundle, "log.platform", "K8S REGRESSION POD CLEANUP", result.stdout + result.stderr)
-        self.write_log(bundle, "log.platform", "K8S REGRESSION SERVICE CLEANUP", service_result.stdout + service_result.stderr)
-        return result
+        delete_options = (
+            "--ignore-not-found=true",
+            "--wait=false",
+            "--request-timeout=15s",
+        )
+        attempts: list[str] = []
+        last_result = CommandResult([], 1, 0.0, "", "cleanup not attempted")
+        for attempt in range(1, 4):
+            pod_result = self.kubectl(
+                "delete", "pod", "-l", selector, *delete_options, check=False, timeout=20
+            )
+            service_result = self.kubectl(
+                "delete", "service", "-l", selector, *delete_options, check=False, timeout=20
+            )
+            attempts.append(
+                f"attempt={attempt} pods_rc={pod_result.returncode} services_rc={service_result.returncode}\n"
+                f"{pod_result.stdout}{pod_result.stderr}{service_result.stdout}{service_result.stderr}"
+            )
+            last_result = pod_result if pod_result.returncode else service_result
+            if pod_result.returncode == 0 and service_result.returncode == 0:
+                deadline = time.monotonic() + 45.0
+                while time.monotonic() < deadline:
+                    pods = self.kubectl("get", "pod", "-l", selector, "-o", "name", check=False, timeout=10)
+                    services = self.kubectl("get", "service", "-l", selector, "-o", "name", check=False, timeout=10)
+                    if pods.returncode == 0 and services.returncode == 0 and not pods.stdout.strip() and not services.stdout.strip():
+                        result = CommandResult([], 0, 0.0, "cleanup complete", "")
+                        self.write_log(bundle, "log.platform", "K8S REGRESSION CLEANUP", "\n".join(attempts))
+                        return result
+                    time.sleep(0.5)
+                attempts.append(f"attempt={attempt} cleanup resources still present after 45 seconds")
+            time.sleep(float(attempt))
+        failure = CommandResult(
+            last_result.command, 1, last_result.duration_seconds, last_result.stdout,
+            "Regression cleanup failed after three attempts.\n" + "\n".join(attempts),
+        )
+        self.write_log(bundle, "log.platform", "K8S REGRESSION CLEANUP FAILED", failure.stderr)
+        return failure
 
     def sipp_exec_command(self, pod: str, sipp_args: list[str]) -> list[str]:
         shell_command = f"cd /tmp && {shlex.join(['sipp', *sipp_args])}"
@@ -3000,6 +3210,8 @@ class K8sRegressionRunner:
         selector = f"app.kubernetes.io/name=playsbc-rasa,app.kubernetes.io/instance={self.args.helm_release}"
         result = self.kubectl("get", "pods", "-l", selector, "-o", "json", check=False)
         evidence: list[str] = []
+        startup: list[str] = []
+        http_evidence: list[str] = []
         since_time = kubectl_since_time(profile_started_at)
         try:
             pods = json.loads(result.stdout or "{}").get("items", [])
@@ -3014,6 +3226,18 @@ class K8sRegressionRunner:
             evidence.append(f"===== describe pod/{name} =====")
             described = self.kubectl("describe", "pod", str(name), check=False)
             evidence.append(described.stdout + described.stderr)
+            startup_logs = self.kubectl(
+                "logs", f"pod/{name}", "-c", "rasa",
+                f"--tail={self.args.deployment_log_tail}", check=False,
+            )
+            startup.append(startup_logs.stdout + startup_logs.stderr)
+            http_evidence.append(f"===== logs pod/{name} container/rasa-evidence-proxy =====")
+            proxy_logs = self.kubectl(
+                "logs", f"pod/{name}", "-c", "rasa-evidence-proxy",
+                f"--since-time={since_time}",
+                f"--tail={self.args.deployment_log_tail}", check=False,
+            )
+            http_evidence.append(proxy_logs.stdout + proxy_logs.stderr)
             previous_values = (False, True) if pod_has_previous_container_logs(pod, "rasa") else (False,)
             for previous in previous_values:
                 title = f"logs pod/{name}" + (" --previous" if previous else "")
@@ -3031,6 +3255,8 @@ class K8sRegressionRunner:
                 logs = self.kubectl(*command, check=False)
                 evidence.append(logs.stdout + logs.stderr)
         (bundle / "rasa-pod-evidence.log").write_text("\n".join(evidence), encoding="utf-8")
+        (bundle / "rasa-startup.log").write_text("\n".join(startup), encoding="utf-8")
+        (bundle / "rasa.log").write_text("\n".join(http_evidence), encoding="utf-8")
 
     def write_log(self, bundle: Path, filename: str, title: str, body: str = "") -> None:
         bundle.mkdir(parents=True, exist_ok=True)
@@ -3354,6 +3580,18 @@ class K8sRegressionRunner:
         self.cleanup_stale_active_active_workloads(bundle)
         restart = self.rollout_restart(self.playsbc_workload_ref())
         self.write_log(bundle, "log.platform", "PLAYSBC ROLLOUT RESTART", restart.stdout + restart.stderr)
+        rasa_detail = "not-required"
+        if profile_uses_real_rasa(profile):
+            # The Rasa model and PlaySBC StatefulSet start together. Observe Rasa
+            # before waiting for a slow, ordered PlaySBC rollout on kind/WSL.
+            rasa_deployment = f"{self.args.service}-rasa"
+            rasa_started = time.monotonic()
+            rasa_rollout = self.kubectl(
+                "rollout", "status", f"deployment/{rasa_deployment}",
+                f"--timeout={self.args.rollout_timeout}s", check=True,
+            )
+            rasa_detail = f"{rasa_deployment} ready in {time.monotonic() - rasa_started:.3f}s"
+            self.write_log(bundle, "log.platform", "RASA ROLLOUT READY", rasa_rollout.stdout + rasa_rollout.stderr)
         rollout_started = time.monotonic()
         rollout = self.rollout_status(self.playsbc_workload_ref(), check=True)
         rollout_seconds = time.monotonic() - rollout_started
@@ -3364,19 +3602,6 @@ class K8sRegressionRunner:
             rtp_rollout = self.rollout_status(self.rtpengine_workload_ref(), check=True)
             rtpengine_detail = f"{self.rtpengine_workload_ref()} ready in {time.monotonic() - rtp_started:.3f}s"
             self.write_log(bundle, "log.platform", "RTPENGINE ROLLOUT READY", rtp_rollout.stdout + rtp_rollout.stderr)
-        rasa_detail = "not-required"
-        if profile_uses_real_rasa(profile):
-            rasa_deployment = f"{self.args.service}-rasa"
-            rasa_started = time.monotonic()
-            rasa_rollout = self.kubectl(
-                "rollout",
-                "status",
-                f"deployment/{rasa_deployment}",
-                f"--timeout={self.args.rollout_timeout}s",
-                check=True,
-            )
-            rasa_detail = f"{rasa_deployment} ready in {time.monotonic() - rasa_started:.3f}s"
-            self.write_log(bundle, "log.platform", "RASA ROLLOUT READY", rasa_rollout.stdout + rasa_rollout.stderr)
         aks_post_detail = "not-required"
         if getattr(self.args, "aks_mode", False):
             aks_post_detail = self.validate_aks_exposure(
@@ -3539,13 +3764,23 @@ class K8sRegressionRunner:
         finally:
             self.stop_mock_rasa()
             teardown_started = time.monotonic()
+            cleanup_result: Optional[CommandResult] = None
             if not self.args.keep_pods:
-                self.delete_run_pods(bundle)
+                cleanup_result = self.delete_run_pods(bundle)
+                if cleanup_result.returncode != 0:
+                    status = "failed"
+                    if not any(code != 0 for code in returncodes):
+                        returncodes.append(1)
+                    detail = (detail.rstrip() + " " if detail else "") + "Kubernetes regression cleanup failed."
             phases.append(
                 "Test Teardown",
-                "passed" if not self.args.keep_pods else "skipped",
+                ("passed" if cleanup_result and cleanup_result.returncode == 0 else "failed")
+                if not self.args.keep_pods else "skipped",
                 teardown_started,
-                "Deleted temporary SIPp regression pods." if not self.args.keep_pods else "Kept temporary SIPp pods for debugging.",
+                "Deleted temporary SIPp regression pods and verified their removal."
+                if cleanup_result and cleanup_result.returncode == 0
+                else "Temporary SIPp cleanup failed; the profile is failed to prevent cross-profile resource contamination."
+                if not self.args.keep_pods else "Kept temporary SIPp pods for debugging.",
             )
             settle_seconds = float(getattr(self.args, "metrics_settle_seconds", 0.0) or 0.0)
             if settle_seconds > 0:
@@ -3789,8 +4024,8 @@ class K8sRegressionRunner:
         tls_secret = self.args.tls_secret_name if profile_uses_tls(profile) else ""
         if tls_secret:
             self.ensure_tls_secret(bundle)
-        core_ip = self.create_agent(core_pod, bundle, realm="core", tls_secret=tls_secret)
-        peer_ip = self.create_agent(peer_pod, bundle, realm="peer", tls_secret=tls_secret)
+        core_ip = self.create_agent(core_pod, bundle, realm="core", tls_secret=tls_secret, profile_name=profile_name)
+        peer_ip = self.create_agent(peer_pod, bundle, realm="peer", tls_secret=tls_secret, profile_name=profile_name)
         if bool(getattr(profile, "k8s_dns_service", False)):
             dns_service = short_name(f"{stem}-dns-peer", limit=63)
             self.create_agent_service(dns_service, peer_pod, bundle)
@@ -4803,6 +5038,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             args.report_dir = RASA_REPORT_DIR
         if args.rollout_timeout == DEFAULT_ROLLOUT_TIMEOUT:
             args.rollout_timeout = RASA_ROLLOUT_TIMEOUT
+    elif any(name in RASA_PROFILES for name in selected_profiles(args)):
+        # A full or selected run can also include real Rasa training.
+        args.rollout_timeout = max(args.rollout_timeout, RASA_ROLLOUT_TIMEOUT)
     if args.aks_profiles:
         args.aks_mode = True
         args.aks_require_azure_services = True
@@ -4829,6 +5067,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    configure_in_cluster_kubeconfig()
     ensure_binary(args.kubectl_bin)
     ensure_binary(args.helm_bin)
     if args.list_profiles:
@@ -4857,33 +5096,39 @@ def main() -> int:
             shutil.rmtree(report_dir, ignore_errors=True)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    runner = K8sRegressionRunner(args, run_id)
-    rows: list[ReportRow] = []
-    restore_error = ""
+    sleep_inhibitor = start_host_sleep_inhibitor()
+    if sleep_inhibitor is not None:
+        print("Host sleep inhibition: active (macOS caffeinate)", flush=True)
     try:
-        runner.capture_original_values()
-        total_profiles = len(profiles)
-        print(f"Regression progress: 0/{total_profiles} started", flush=True)
-        for profile_index, profile in enumerate(profiles, start=1):
-            row = runner.run_profile(profile, output_root)
-            rows.append(row)
-            print(
-                f"Regression progress: {profile_index}/{total_profiles} completed "
-                f"profile={profile} status={row.status}",
-                flush=True,
-            )
+        runner = K8sRegressionRunner(args, run_id)
+        rows: list[ReportRow] = []
+        restore_error = ""
+        try:
+            runner.capture_original_values()
+            total_profiles = len(profiles)
+            print(f"Regression progress: 0/{total_profiles} started", flush=True)
+            for profile_index, profile in enumerate(profiles, start=1):
+                row = runner.run_profile(profile, output_root)
+                rows.append(row)
+                print(
+                    f"Regression progress: {profile_index}/{total_profiles} completed "
+                    f"profile={profile} status={row.status}",
+                    flush=True,
+                )
+        finally:
+            restore_error = runner.restore_original_values(report_dir) or ""
+        cleanup_old_reports(report_dir, run_id)
+        report_path = write_reports(rows, report_dir, run_id, include_rasa_test_section=args.rasa_profiles)
+        print(f"Kubernetes regression report: {report_path}")
+        print(f"Latest report: {report_dir / 'latest.html'}")
+        for row in rows:
+            print(f"{row.suite} / {row.name}: {row.status}")
+        if restore_error:
+            print(restore_error, file=sys.stderr)
+            return 1
+        return 1 if any(row.status != "passed" for row in rows) else 0
     finally:
-        restore_error = runner.restore_original_values(report_dir) or ""
-    cleanup_old_reports(report_dir, run_id)
-    report_path = write_reports(rows, report_dir, run_id, include_rasa_test_section=args.rasa_profiles)
-    print(f"Kubernetes regression report: {report_path}")
-    print(f"Latest report: {report_dir / 'latest.html'}")
-    for row in rows:
-        print(f"{row.suite} / {row.name}: {row.status}")
-    if restore_error:
-        print(restore_error, file=sys.stderr)
-        return 1
-    return 1 if any(row.status != "passed" for row in rows) else 0
+        stop_host_sleep_inhibitor(sleep_inhibitor)
 
 
 if __name__ == "__main__":

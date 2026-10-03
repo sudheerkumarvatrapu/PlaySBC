@@ -322,6 +322,60 @@ data:
             {"expr": "sum by (cluster,node) (playsbc_ha_configured_nodes{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} configured nodes"},
             {"expr": "sum by (cluster,node) (playsbc_ha_node_draining{job=~\"${job:regex}\"})", "legendFormat": "{{ "{{" }}node{{ "}}" }} draining"}
           ]
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Failed Calls And SIP Timeouts",
+          "description": "Distinct failure signals: B2BUA failed calls, admission rejections, SIP error responses, and outbound transaction timeouts. These series must not be added together because one call can appear in multiple signals.",
+          "gridPos": {"x": 0, "y": 50, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []},
+          "targets": [
+            {"expr": "sum by (node) (increase(playsbc_b2bua_calls_failed_total{job=~\"${job:regex}\"}[$__rate_interval]))", "legendFormat": "{{ "{{" }}node{{ "}}" }} failed calls"},
+            {"expr": "sum by (node) (increase(playsbc_admission_rejections_total{job=~\"${job:regex}\"}[$__rate_interval]))", "legendFormat": "{{ "{{" }}node{{ "}}" }} admission rejected"},
+            {"expr": "sum by (node,status) (increase(playsbc_sip_responses_total{job=~\"${job:regex}\",direction=\"tx\",status_class=~\"[456]xx\"}[$__rate_interval]))", "legendFormat": "{{ "{{" }}node{{ "}}" }} SIP {{ "{{" }}status{{ "}}" }}"},
+            {"expr": "sum by (node,method) (increase(playsbc_client_transactions_total{job=~\"${job:regex}\",outcome=\"timeout\"}[$__rate_interval]))", "legendFormat": "{{ "{{" }}node{{ "}}" }} {{ "{{" }}method{{ "}}" }} timeout"}
+          ]
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "SIP Retransmissions",
+          "description": "Outbound request and response retransmissions plus duplicate inbound requests; grouped by node, method, kind, direction, and transport.",
+          "gridPos": {"x": 12, "y": 50, "w": 12, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []},
+          "targets": [
+            {"expr": "sum by (node,method,kind,direction,transport) (increase(playsbc_sip_retransmissions_total{job=~\"${job:regex}\"}[$__rate_interval])) or vector(0)", "legendFormat": "{{ "{{" }}node{{ "}}" }} {{ "{{" }}method{{ "}}" }} {{ "{{" }}kind{{ "}}" }} {{ "{{" }}direction{{ "}}" }}/{{ "{{" }}transport{{ "}}" }}"}
+          ]
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Codec Negotiations By Backend And Realm",
+          "description": "Actual answered-call codec pair counts, including the RTPengine PCMU-to-PCMA load path and transcoding state.",
+          "gridPos": {"x": 0, "y": 57, "w": 24, "h": 7},
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []},
+          "targets": [
+            {"expr": "sum by (backend,from_realm,to_realm,inbound_codec,outbound_codec,transcoding) (increase(playsbc_media_negotiations_total{job=~\"${job:regex}\"}[$__rate_interval])) or vector(0)", "legendFormat": "{{ "{{" }}backend{{ "}}" }} {{ "{{" }}from_realm{{ "}}" }}->{{ "{{" }}to_realm{{ "}}" }} {{ "{{" }}inbound_codec{{ "}}" }}->{{ "{{" }}outbound_codec{{ "}}" }} transcode={{ "{{" }}transcoding{{ "}}" }}"}
+          ]
+        },
+        {
+          "id": 22,
+          "type": "stat",
+          "title": "Failed B2BUA Calls In Range",
+          "description": "PlaySBC call failures only; compare with SIPp's independent failed-call count in the regression report.",
+          "gridPos": {"x": 0, "y": 64, "w": 12, "h": 5},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "red"}}, "overrides": []},
+          "targets": [{"expr": "sum(increase(playsbc_b2bua_calls_failed_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "failed calls"}]
+        },
+        {
+          "id": 23,
+          "type": "stat",
+          "title": "SIP Retransmissions In Range",
+          "description": "PlaySBC-observed or generated retransmissions; this does not include SIPp-internal counters.",
+          "gridPos": {"x": 12, "y": 64, "w": 12, "h": 5},
+          "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "orange"}}, "overrides": []},
+          "targets": [{"expr": "sum(increase(playsbc_sip_retransmissions_total{job=~\"${job:regex}\"}[$__range])) or vector(0)", "legendFormat": "retransmissions"}]
         }
       ]
     }

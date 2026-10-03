@@ -10,10 +10,12 @@ class ClientTransactionTests(unittest.IsolatedAsyncioTestCase):
         self.source = ("127.0.0.1", 5060)
 
     async def test_invite_timer_a_retransmits_until_provisional_response(self):
+        retransmitted = []
         manager = ClientTransactionManager(
             lambda packet, destination: self.sent.append((packet, destination)),
             t1=0.01,
             timer_b=0.2,
+            on_retransmit=retransmitted.append,
         )
         via = "SIP/2.0/UDP sbc.example:5060;branch=z9hG4bK-client-a"
         transaction = manager.start_request(
@@ -21,6 +23,8 @@ class ClientTransactionTests(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.sleep(0.025)
         self.assertGreaterEqual(transaction.retransmissions, 1)
+        self.assertEqual(len(retransmitted), transaction.retransmissions)
+        self.assertTrue(all(item is transaction for item in retransmitted))
 
         manager.receive_response(180, via, "1 INVITE", "client-a")
         count = len(self.sent)

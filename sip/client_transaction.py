@@ -29,6 +29,7 @@ class ClientTransactionState(Enum):
 TimeoutHandler = Callable[["ClientTransaction"], None]
 FinalHandler = Callable[["ClientTransaction", int], None]
 TransportErrorHandler = Callable[["ClientTransaction", Exception], None]
+RetransmitHandler = Callable[["ClientTransaction"], None]
 
 
 @dataclass
@@ -80,6 +81,7 @@ class ClientTransactionManager:
         on_timeout: Optional[TimeoutHandler] = None,
         on_non_2xx_final: Optional[FinalHandler] = None,
         on_transport_error: Optional[TransportErrorHandler] = None,
+        on_retransmit: Optional[RetransmitHandler] = None,
     ) -> None:
         self.send_packet = send_packet
         self.t1 = t1
@@ -92,6 +94,7 @@ class ClientTransactionManager:
         self.on_timeout = on_timeout
         self.on_non_2xx_final = on_non_2xx_final
         self.on_transport_error = on_transport_error
+        self.on_retransmit = on_retransmit
         self.transactions: Dict[TransactionKey, ClientTransaction] = {}
 
     def start_request(
@@ -242,6 +245,8 @@ class ClientTransactionManager:
                     return
                 self.send_packet(transaction.request, transaction.destination)
                 transaction.retransmissions += 1
+                if self.on_retransmit:
+                    self.on_retransmit(transaction)
                 if transaction.kind is TransactionKind.INVITE:
                     interval *= 2
                 else:

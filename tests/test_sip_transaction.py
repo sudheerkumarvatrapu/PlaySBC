@@ -154,8 +154,10 @@ class TransactionTests(unittest.TestCase):
 class InviteTimerTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_2xx_final_invite_response_retransmits_until_ack(self):
         sent = []
+        retransmitted = []
         transactions = TransactionManager(
             lambda packet, destination: sent.append((packet, destination)),
+            on_retransmit=retransmitted.append,
             t1=0.01,
             t2=0.02,
             transaction_timeout=0.2,
@@ -169,6 +171,7 @@ class InviteTimerTests(unittest.IsolatedAsyncioTestCase):
         while len(sent) < 2 and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.005)
         self.assertGreaterEqual(len(sent), 2)
+        self.assertEqual(len(retransmitted), len(sent))
 
         transactions.acknowledge_invite("timer-call", "1 ACK")
         sent_after_ack = len(sent)

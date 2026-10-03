@@ -95,7 +95,10 @@
 {{- $rasaServicePort := get $rasa "servicePort" | default 5005 -}}
 {{- if and $rasaEnabled (hasKey $config "ai_voice_gateway") -}}
 {{- $ai := deepCopy (get $config "ai_voice_gateway") -}}
+{{- $webhook := get $ai "rasa_webhook_url" | default "" -}}
+{{- if or (eq $webhook "") (eq $webhook "http://rasa:5005/webhooks/rest/webhook") -}}
 {{- $_ := set $ai "rasa_webhook_url" (printf "http://%s-rasa:%v/webhooks/rest/webhook" (include "playsbc.fullname" .) $rasaServicePort) -}}
+{{- end -}}
 {{- $_ := set $config "ai_voice_gateway" $ai -}}
 {{- end -}}
 apiVersion: v1

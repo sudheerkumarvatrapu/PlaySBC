@@ -2556,6 +2556,18 @@ def render_srtp_media_scenario(text: str) -> str:
     )
 
 
+def tolerate_retransmitted_load_invites(text: str) -> str:
+    """Accept a duplicate initial INVITE while waiting for the first ACK."""
+    initial_ack = '<recv request="ACK" rtd="true" crlf="true" />'
+    if text.count(initial_ack) != 1:
+        raise ValueError("load UAS scenario must have exactly one initial ACK receive")
+    return text.replace(
+        initial_ack,
+        '<recv request="INVITE" optional="global" />\n\n  ' + initial_ack,
+        1,
+    )
+
+
 def srtp_sender_command(
     bind_ip: str,
     *,
@@ -2621,6 +2633,8 @@ def prepare_media_scenarios(args: argparse.Namespace, run_dir: Path) -> None:
             uas_payloads, uas_rtpmaps = uas_sdp_payloads(args)
             text = text.replace("[uas_sdp_payloads]", uas_payloads)
             text = text.replace("[uas_sdp_rtpmaps]", uas_rtpmaps)
+            if getattr(args, "profile", "") == "load-5cps-60s-rtpengine-transcoding":
+                text = tolerate_retransmitted_load_invites(text)
         secure_leg = bool(
             getattr(args, "uac_srtp", False) if attr_name == "uac_scenario" else getattr(args, "uas_srtp", False)
         )

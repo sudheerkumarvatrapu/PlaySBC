@@ -55,7 +55,7 @@ from sip.business_services import (
     parse_refer_to,
 )
 from sip.dialog import CallState, DialogError, DialogManager, SipDialog, extract_branch, in_dialog_route, parse_session_expires, split_header_values
-from sip.transaction import MergedRequestError, TransactionManager, extract_via_sent_by
+from sip.transaction import MergedRequestError, ServerTransaction, TransactionManager, extract_via_sent_by
 from sip.client_transaction import ClientTransaction, ClientTransactionManager
 from sip.parser import SipParseError, SipParseLimits, parse_sip_bytes
 from sip.server_location import ServerLocator, ServerTarget
@@ -793,6 +793,7 @@ PROMETHEUS_METRIC_META: Dict[str, Tuple[str, str]] = {
     "playsbc_admission_rejections_total": ("counter", "Total calls rejected by call admission control."),
     "playsbc_sip_requests_total": ("counter", "Total SIP requests observed by PlaySBC."),
     "playsbc_sip_responses_total": ("counter", "Total SIP responses observed by PlaySBC."),
+    "playsbc_sip_retransmissions_total": ("counter", "SIP request and response retransmissions observed or sent by PlaySBC."),
     "playsbc_client_transactions_total": ("counter", "Total outbound SIP client transaction events."),
     "playsbc_b2bua_calls_total": ("counter", "Total B2BUA calls attempted by PlaySBC."),
     "playsbc_b2bua_calls_answered_total": ("counter", "Total B2BUA calls answered by PlaySBC."),
@@ -2614,7 +2615,13 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         transaction_t1 = float(transaction_config.get("t1", 0.5))
         transaction_t2 = float(transaction_config.get("t2", 4.0))
         transaction_t4 = float(transaction_config.get("t4", 5.0))
-        self.transactions = TransactionManager(self._send_packet, t1=transaction_t1, t2=transaction_t2, t4=transaction_t4)
+        self.transactions = TransactionManager(
+            self._send_packet,
+            t1=transaction_t1,
+            t2=transaction_t2,
+            t4=transaction_t4,
+            on_retransmit=self._on_server_transaction_retransmit,
+        )
         self.client_transactions = {
             transport: ClientTransactionManager(
                 lambda packet, destination, selected=transport: self._send_packet(
@@ -2627,6 +2634,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 on_timeout=self._on_client_transaction_timeout,
                 on_non_2xx_final=self._on_client_transaction_non_2xx,
                 on_transport_error=self._on_client_transaction_transport_error,
+                on_retransmit=self._on_client_transaction_retransmit,
             )
             for transport in ("udp", "tcp", "tls")
         }
@@ -2675,6 +2683,11 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         self.rtpengine_control_failures_total = 0
         self.sip_requests_total: Dict[Tuple[str, str, str, str], int] = {}
         self.sip_responses_total: Dict[Tuple[str, str, str, str], int] = {}
+        self.sip_retransmissions_total: Dict[Tuple[str, str, str, str], int] = {
+            (method, kind, direction, "udp"): 0
+            for method in ("INVITE", "BYE")
+            for kind, direction in (("request", "rx"), ("request", "tx"), ("response", "tx"))
+        }
         self.client_transaction_events: Dict[Tuple[str, str, str], int] = {}
         self.b2bua_calls_total = 0
         self.b2bua_calls_answered_total = 0
@@ -2746,6 +2759,16 @@ class SipServerProtocol(asyncio.DatagramProtocol):
         status_class = f"{status_text[:1]}xx" if status_text and status_text[0].isdigit() else "unknown"
         key = (status_text, status_class, normalize_sip_transport(transport), direction, realm)
         self.sip_responses_total[key] = self.sip_responses_total.get(key, 0) + 1
+
+    def observe_sip_retransmission(self, method: str, kind: str, direction: str, transport: str) -> None:
+        key = (method.upper(), kind, direction, normalize_sip_transport(transport))
+        self.sip_retransmissions_total[key] = self.sip_retransmissions_total.get(key, 0) + 1
+
+    def _on_client_transaction_retransmit(self, transaction: ClientTransaction) -> None:
+        self.observe_sip_retransmission(transaction.method, "request", "tx", "udp")
+
+    def _on_server_transaction_retransmit(self, transaction: ServerTransaction) -> None:
+        self.observe_sip_retransmission(transaction.method, "response", "tx", "udp")
 
     def b2bua_metric_labels(self) -> Dict[str, str]:
         return {
@@ -2859,6 +2882,14 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                         "direction": direction,
                         "realm": realm,
                     },
+                )
+            )
+        for (method, kind, direction, transport), value in sorted(self.sip_retransmissions_total.items()):
+            samples.append(
+                (
+                    "playsbc_sip_retransmissions_total",
+                    value,
+                    {**base_labels, "method": method, "kind": kind, "direction": direction, "transport": transport},
                 )
             )
         for (method, transport, outcome), value in sorted(self.client_transaction_events.items()):
@@ -3390,6 +3421,7 @@ class SipServerProtocol(asyncio.DatagramProtocol):
                 self.logger.sip("MERGED REQUEST REJECTED", f"method={method} merge_id={merge_id}", call_id=message.header("call-id"))
                 return
             if duplicate:
+                self.observe_sip_retransmission(method, "request", "rx", message.transport)
                 logging.info("Replayed cached response for retransmitted %s", method)
                 return
 

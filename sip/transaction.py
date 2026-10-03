@@ -113,6 +113,7 @@ class TransactionManager:
         t4: float = 5.0,
         transaction_timeout: Optional[float] = None,
         schedule_retransmissions: bool = True,
+        on_retransmit: Optional[Callable[[ServerTransaction], None]] = None,
     ) -> None:
         self.send_packet = send_packet
         self.t1 = t1
@@ -120,6 +121,7 @@ class TransactionManager:
         self.t4 = t4
         self.transaction_timeout = 64 * t1 if transaction_timeout is None else transaction_timeout
         self.schedule_retransmissions = schedule_retransmissions
+        self.on_retransmit = on_retransmit
         self.transactions: Dict[TransactionKey, ServerTransaction] = {}
 
     def receive_request(
@@ -314,6 +316,8 @@ class TransactionManager:
 
                 self.send_packet(transaction.cached_response.payload, transaction.cached_response.destination)
                 transaction.response_retransmissions += 1
+                if self.on_retransmit:
+                    self.on_retransmit(transaction)
                 interval = min(interval * 2, self.t2)
         except asyncio.CancelledError:
             return

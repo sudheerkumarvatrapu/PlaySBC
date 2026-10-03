@@ -4,6 +4,7 @@
 {{- $image := get $rasa "image" | default dict -}}
 {{- $project := get $rasa "project" | default dict -}}
 {{- $servicePort := get $rasa "servicePort" | default 5005 -}}
+{{- $evidencePort := get $rasa "evidencePort" | default 5006 -}}
 {{- $trainOnStart := true -}}
 {{- if hasKey $rasa "trainOnStart" -}}
 {{- $trainOnStart = get $rasa "trainOnStart" -}}
@@ -31,6 +32,26 @@ data:
 {{ get $project "credentials" | default "rest:\n" | indent 4 }}
   endpoints.yml: |
 {{ get $project "endpoints" | default "action_endpoint:\n  url: \"\"\n" | indent 4 }}
+  evidence_proxy.py: |
+    import http.client, json, time
+    from datetime import datetime, timezone
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    class Handler(BaseHTTPRequestHandler):
+        def _proxy(self):
+            started=time.monotonic(); length=int(self.headers.get("Content-Length", "0")); body=self.rfile.read(length)
+            conn=http.client.HTTPConnection("127.0.0.1", {{ $servicePort }}, timeout=30)
+            headers={k:v for k,v in self.headers.items() if k.lower() not in {"host","connection","content-length"}}
+            headers["Content-Length"]=str(len(body)); conn.request(self.command,self.path,body=body,headers=headers)
+            response=conn.getresponse(); data=response.read(); self.send_response(response.status)
+            for key,value in response.getheaders():
+                if key.lower() not in {"connection","transfer-encoding","content-length"}: self.send_header(key,value)
+            self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data)
+            try: call_id=str(json.loads(body or b"{}").get("sender", ""))[:256]
+            except Exception: call_id=""
+            print(json.dumps({"timestamp":datetime.now(timezone.utc).isoformat(),"event":"rasa.http.completed","call_id":call_id,"method":self.command,"path":self.path,"status":response.status,"request_bytes":len(body),"response_bytes":len(data),"duration_ms":round((time.monotonic()-started)*1000,3)},separators=(",",":")),flush=True)
+        do_GET=_proxy; do_POST=_proxy
+        def log_message(self,*args): pass
+    ThreadingHTTPServer(("0.0.0.0", {{ $evidencePort }}),Handler).serve_forever()
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,6 +67,8 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/rasa-project: {{ toJson $project | sha256sum | quote }}
       labels:
         app.kubernetes.io/name: {{ include "playsbc.name" . }}-rasa
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -82,23 +105,42 @@ spec:
               port: http
             initialDelaySeconds: {{ get $startupProbe "initialDelaySeconds" | default 10 }}
             periodSeconds: {{ get $startupProbe "periodSeconds" | default 5 }}
+            timeoutSeconds: {{ get $startupProbe "timeoutSeconds" | default 5 }}
             failureThreshold: {{ get $startupProbe "failureThreshold" | default 120 }}
           readinessProbe:
             tcpSocket:
               port: http
             initialDelaySeconds: {{ get $readinessProbe "initialDelaySeconds" | default 5 }}
             periodSeconds: {{ get $readinessProbe "periodSeconds" | default 5 }}
+            timeoutSeconds: {{ get $readinessProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $readinessProbe "failureThreshold" | default 6 }}
           livenessProbe:
             tcpSocket:
               port: http
             initialDelaySeconds: {{ get $livenessProbe "initialDelaySeconds" | default 30 }}
             periodSeconds: {{ get $livenessProbe "periodSeconds" | default 10 }}
+            timeoutSeconds: {{ get $livenessProbe "timeoutSeconds" | default 5 }}
+            failureThreshold: {{ get $livenessProbe "failureThreshold" | default 6 }}
           volumeMounts:
             - name: project
               mountPath: /project
               readOnly: true
           resources:
 {{ toYaml $resources | indent 12 }}
+        - name: rasa-evidence-proxy
+          image: "{{ get $image "repository" | default "rasa/rasa" }}:{{ get $image "tag" | default "3.6.20-full" }}"
+          imagePullPolicy: {{ get $image "pullPolicy" | default "IfNotPresent" }}
+          command: ["python", "/project/evidence_proxy.py"]
+          ports:
+            - name: evidence-http
+              containerPort: {{ $evidencePort }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket: {port: evidence-http}
+          volumeMounts:
+            - name: project
+              mountPath: /project
+              readOnly: true
       volumes:
         - name: project
           configMap:
@@ -118,6 +160,6 @@ spec:
   ports:
     - name: http
       port: {{ $servicePort }}
-      targetPort: http
+      targetPort: evidence-http
       protocol: TCP
 {{- end }}

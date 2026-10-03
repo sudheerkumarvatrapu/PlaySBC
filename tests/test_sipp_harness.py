@@ -1,10 +1,12 @@
 import base64
 import copy
+import datetime as dt
 import hashlib
 import hmac
 import inspect
 import io
 import json
+import shutil
 import socket
 import struct
 import subprocess
@@ -146,6 +148,169 @@ def sip_body(payload: bytes) -> bytes:
 
 
 class SippScenarioTests(unittest.TestCase):
+    def test_non_checked_command_timeout_is_reported_without_aborting_suite(self):
+        timeout = subprocess.TimeoutExpired(
+            ["kubectl", "delete", "pod"], 20, output=b"partial output", stderr=b"api stalled"
+        )
+        with mock.patch.object(subprocess, "run", side_effect=timeout):
+            result = run_k8s_regression.run_command(
+                ["kubectl", "delete", "pod"], timeout=20, check=False
+            )
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(result.stdout, "partial output")
+        self.assertIn("api stalled", result.stderr)
+        self.assertIn("timed out after 20 seconds", result.stderr)
+
+    def test_checked_command_timeout_remains_fatal(self):
+        timeout = subprocess.TimeoutExpired(["kubectl", "get", "pods"], 20)
+        with mock.patch.object(subprocess, "run", side_effect=timeout):
+            with self.assertRaisesRegex(RuntimeError, "timed out after 20 seconds"):
+                run_k8s_regression.run_command(
+                    ["kubectl", "get", "pods"], timeout=20, check=True
+                )
+
+    def test_run_cleanup_retries_and_reports_api_failure(self):
+        args = run_k8s_regression.parse_args(["--profile", "basic-media"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        result = run_k8s_regression.CommandResult([], 124, 20.0, "", "cleanup timeout")
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary)
+            with mock.patch.object(runner, "kubectl", return_value=result) as kubectl, \
+                    mock.patch.object(run_k8s_regression.time, "sleep"):
+                cleanup = runner.delete_run_pods(bundle)
+        self.assertEqual(cleanup.returncode, 1)
+        self.assertEqual(kubectl.call_count, 6)
+        for call in kubectl.call_args_list:
+            self.assertIn("--wait=false", call.args)
+            self.assertIn("--request-timeout=15s", call.args)
+            self.assertEqual(call.kwargs["timeout"], 20)
+            self.assertFalse(call.kwargs["check"])
+
+    def test_run_cleanup_verifies_resources_are_gone(self):
+        args = run_k8s_regression.parse_args(["--profile", "basic-media"])
+        runner = run_k8s_regression.K8sRegressionRunner(args, "unit-k8s")
+        deleted = run_k8s_regression.CommandResult([], 0, 0.01, "deleted\n", "")
+        empty = run_k8s_regression.CommandResult([], 0, 0.01, "", "")
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary)
+            with mock.patch.object(runner, "kubectl", side_effect=[deleted, deleted, empty, empty]) as kubectl:
+                cleanup = runner.delete_run_pods(bundle)
+        self.assertEqual(cleanup.returncode, 0)
+        self.assertEqual(kubectl.call_count, 4)
+
+    def test_in_cluster_kubeconfig_uses_rotating_service_account_token_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            token = root / "token"
+            ca = root / "ca.crt"
+            namespace = root / "namespace"
+            output = root / "kubeconfig"
+            token.write_text("token", encoding="utf-8")
+            ca.write_text("ca", encoding="utf-8")
+            namespace.write_text("playsbc", encoding="utf-8")
+            with mock.patch.dict(
+                run_k8s_regression.os.environ,
+                {"KUBERNETES_SERVICE_HOST": "10.96.0.1", "KUBERNETES_SERVICE_PORT_HTTPS": "443"},
+                clear=True,
+            ):
+                configured = run_k8s_regression.configure_in_cluster_kubeconfig(token, ca, output)
+                configured_env = run_k8s_regression.os.environ.get("KUBECONFIG")
+            rendered = output.read_text(encoding="utf-8")
+            self.assertEqual(configured, output)
+            self.assertEqual(configured_env, str(output))
+            self.assertIn(f"tokenFile: {token}", rendered)
+            self.assertIn("server: https://10.96.0.1:443", rendered)
+            self.assertIn("namespace: playsbc", rendered)
+
+    def test_direct_regression_starts_macos_sleep_inhibitor(self):
+        process = mock.Mock()
+        with (
+            mock.patch.object(run_k8s_regression.sys, "platform", "darwin"),
+            mock.patch.object(run_k8s_regression.shutil, "which", return_value="/usr/bin/caffeinate"),
+            mock.patch.object(run_k8s_regression.subprocess, "Popen", return_value=process) as popen,
+        ):
+            self.assertIs(run_k8s_regression.start_host_sleep_inhibitor(), process)
+        popen.assert_called_once_with(
+            ["caffeinate", "-dimsu", "-w", str(run_k8s_regression.os.getpid())],
+            stdout=run_k8s_regression.subprocess.DEVNULL,
+            stderr=run_k8s_regression.subprocess.DEVNULL,
+        )
+
+    def test_direct_regression_skips_sleep_inhibitor_off_macos(self):
+        with (
+            mock.patch.object(run_k8s_regression.sys, "platform", "linux"),
+            mock.patch.object(run_k8s_regression.subprocess, "Popen") as popen,
+        ):
+            self.assertIsNone(run_k8s_regression.start_host_sleep_inhibitor())
+        popen.assert_not_called()
+
+    def test_only_rtpengine_load_uas_tolerates_duplicate_initial_invite(self):
+        load = run_k8s_regression.profile_values("load-5cps-60s-rtpengine-transcoding", "unit-k8s")
+        ordinary = run_k8s_regression.profile_values("rtpengine-transcoding", "unit-k8s")
+        self.assertIn(
+            '<recv request="INVITE" optional="global" />',
+            run_k8s_regression.rendered_scenario(load, "uas"),
+        )
+        self.assertNotIn(
+            '<recv request="INVITE" optional="global" />',
+            run_k8s_regression.rendered_scenario(ordinary, "uas"),
+        )
+        self.assertNotIn(
+            '<recv request="INVITE" optional="global" />',
+            run_k8s_regression.rendered_scenario(load, "uac"),
+        )
+
+    def test_load_sipp_pod_gets_requests_without_cpu_limits(self):
+        requests = {"cpu": "150m", "memory": "128Mi"}
+        load = run_k8s_regression.pod_manifest(
+            "load-peer", "playsbc-sipp:test", "IfNotPresent", "scenarios", "unit",
+            resource_requests=requests,
+        )
+        ordinary = run_k8s_regression.pod_manifest(
+            "ordinary-peer", "playsbc-sipp:test", "IfNotPresent", "scenarios", "unit",
+        )
+        self.assertEqual(load["spec"]["containers"][0]["resources"], {"requests": requests})
+        self.assertNotIn("resources", ordinary["spec"]["containers"][0])
+
+    def test_standard_uas_accepts_retransmitted_ack_without_skipping_bye(self):
+        for scenario_name in ("b2bua_uas_b.xml", "b2bua_uas_b_media.xml"):
+            scenario = (run_k8s_regression.SCENARIO_DIR / scenario_name).read_text()
+            self.assertIn('<recv request="ACK" rtd="true"', scenario)
+            self.assertIn('<recv request="ACK" optional="global" />', scenario)
+            self.assertLess(
+                scenario.index('<recv request="ACK" optional="global" />'),
+                scenario.index('<recv request="BYE" crlf="true" />'),
+            )
+
+    @unittest.skipUnless(shutil.which("sipp"), "SIPp is not installed")
+    def test_standard_uas_scenarios_parse_in_sipp(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            for profile_name in (
+                "basic-signalling", "basic-media", "rtpengine-transcoding",
+                "tls-srtp-to-udp-rtp", "load-5cps-60s-rtpengine-transcoding",
+                "rfc5359-call-hold-resume", "rfc5359-call-hold-resume-rtpengine",
+                "rfc5359-call-hold-resume-tcp", "rfc5359-call-hold-resume-tls",
+            ):
+                with self.subTest(profile=profile_name):
+                    profile = run_k8s_regression.profile_values(profile_name, "unit-k8s")
+                    (run_dir / "sipp-a-uac").mkdir(exist_ok=True)
+                    (run_dir / "sipp-b-uas").mkdir(exist_ok=True)
+                    run_b2bua_sipp_smoke.prepare_media_scenarios(profile, run_dir)
+                    completed = subprocess.run(
+                        [
+                            shutil.which("sipp"), "-sf", str(profile.uas_scenario),
+                            "-i", "127.0.0.1", "-mi", "127.0.0.1", "-m", "0",
+                            "-nostdin", "-timeout", "1",
+                        ],
+                        cwd=run_dir, capture_output=True, text=True, timeout=5,
+                    )
+                    self.assertTrue(
+                        completed.returncode == 0
+                        or "Unable to bind main socket" in completed.stderr,
+                        completed.stderr,
+                    )
+
     def test_protocol_core_live_call_profiles_cover_layer1_and_layer2(self):
         layer1 = run_k8s_regression.profile_values("protocol-core-layer1-live-call", "unit-k8s")
         layer1_xml = run_k8s_regression.rendered_scenario(layer1, "uac")
@@ -1720,6 +1885,10 @@ Content-Length: 0
         self.assertIn("playsbc_sip_requests_total", dashboard)
         self.assertIn("playsbc_sip_responses_total", dashboard)
         self.assertIn("playsbc_media_negotiations_total", dashboard)
+        self.assertIn("Failed Calls And SIP Timeouts", dashboard)
+        self.assertIn("SIP Retransmissions", dashboard)
+        self.assertIn("playsbc_sip_retransmissions_total", dashboard)
+        self.assertIn("Codec Negotiations By Backend And Realm", dashboard)
         self.assertIn("scrape_target: statefulset-pod", stack)
         self.assertIn("playsbc_pod", stack)
         self.assertIn("-headless.{{ $.Release.Namespace }}.svc.cluster.local", stack)
@@ -3107,6 +3276,57 @@ Content-Length: 0
 
 
 class RealTopologyTests(unittest.TestCase):
+    def test_rasa_evidence_collects_proxy_logs_from_named_pods(self):
+        runner = object.__new__(run_k8s_regression.K8sRegressionRunner)
+        runner.args = SimpleNamespace(helm_release="playsbc", deployment_log_tail=250)
+        event = '{"event":"rasa.http.completed","path":"/model/parse","status":200}\n'
+
+        def fake_kubectl(*parts, **_kwargs):
+            if parts[:2] == ("get", "pods"):
+                output = json.dumps({"items": [{"metadata": {"name": "rasa-current"}, "status": {}}]})
+            elif "rasa-evidence-proxy" in parts:
+                output = event
+            else:
+                output = ""
+            return run_k8s_regression.CommandResult(list(parts), 0, 0.01, output, "")
+
+        runner.kubectl = fake_kubectl
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            runner.collect_rasa_pod_evidence(bundle, dt.datetime.now(dt.timezone.utc))
+            rasa_log = (bundle / "rasa.log").read_text(encoding="utf-8")
+        self.assertIn("pod/rasa-current container/rasa-evidence-proxy", rasa_log)
+        self.assertIn('"status":200', rasa_log)
+
+    def test_layer3_retransmission_evidence_ignores_prior_profile_transactions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            (bundle / "sipmsg.log").write_text("INVITE sip:retransmit@example.test SIP/2.0\n", encoding="utf-8")
+            (bundle / "log.sip").write_text(
+                "CLIENT TRANSACTION STARTED | call_id=prior-a | method=INVITE state=calling\n"
+                "CLIENT TRANSACTION STARTED | call_id=prior-b | method=INVITE state=calling\n"
+                "B2BUA SIP FLOW | B2BUA -> SIPp B: INVITE call_id=current-1 "
+                "target=sip:protocol-layer3-retransmit-b@10.244.0.20:5060\n"
+                "CLIENT TRANSACTION STARTED | call_id=current-1 | method=INVITE state=calling\n",
+                encoding="utf-8",
+            )
+            failures = run_k8s_regression.validate_k8s_profile_evidence(
+                "protocol-core-layer3-live-retransmission", bundle
+            )
+            self.assertFalse(any("scoped outbound INVITE" in failure for failure in failures))
+
+    def test_real_rasa_chat_requires_server_side_http_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            failures = run_k8s_regression.validate_k8s_profile_evidence("ai-rasa-chat-nlu", bundle)
+            self.assertTrue(any("missing server-side HTTP evidence" in failure for failure in failures))
+            (bundle / "rasa.log").write_text(
+                '{"event":"rasa.http.completed","path":"/model/parse","status":200}\n',
+                encoding="utf-8",
+            )
+            failures = run_k8s_regression.validate_k8s_profile_evidence("ai-rasa-chat-nlu", bundle)
+            self.assertFalse(any("server-side" in failure for failure in failures))
+
     def test_topology_waits_for_all_one_shot_services_together(self):
         completed = subprocess.CompletedProcess(["docker", "compose", "wait"], 0, "0\n0\n0\n0\n", "")
         with mock.patch.object(run_real_topology, "run", return_value=completed) as mocked_run:
@@ -3922,6 +4142,29 @@ class RealTopologyTests(unittest.TestCase):
             self.assertIn("INVITE sip:1002@example.test SIP/2.0", sipmsg)
             self.assertIn("SIP/2.0 200 OK", sipmsg)
             self.assertNotIn("ignored error trace", sipmsg)
+
+    def test_kubernetes_combined_sipmsg_retains_complete_pcap_message_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp)
+            invite = (
+                b"INVITE sip:peer@example.test SIP/2.0\r\n"
+                b"Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-1\r\n"
+                b"Call-ID: full-pcap@example.test\r\nCSeq: 1 INVITE\r\n"
+                b"Content-Type: application/sdp\r\nContent-Length: 25\r\n\r\n"
+                b"v=0\r\nm=audio 6000 RTP/AVP"
+            )
+            run_b2bua_sipp_smoke.write_udp_pcap(
+                bundle / "capture.pcap",
+                [run_b2bua_sipp_smoke.PcapPacket(
+                    1.0, "10.0.0.1", 5060, "10.0.0.2", 5062, invite,
+                )],
+            )
+            run_k8s_regression.write_combined_sipmsg_log(bundle, "basic-media")
+            sipmsg = (bundle / "sipmsg.log").read_text(encoding="utf-8")
+            self.assertEqual(sipmsg.count("BEGIN SIP MESSAGE"), 1)
+            self.assertEqual(sipmsg.count("END SIP MESSAGE"), 1)
+            self.assertIn("Via: SIP/2.0/UDP", sipmsg)
+            self.assertIn("m=audio 6000 RTP/AVP", sipmsg)
 
     def test_kubernetes_options_catalog_ladder_is_options_only(self):
         args = run_k8s_regression.parse_args(["--aks-profiles"])

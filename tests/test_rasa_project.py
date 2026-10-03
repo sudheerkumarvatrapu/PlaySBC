@@ -29,6 +29,20 @@ def load_cases(path: str) -> list[dict[str, str]]:
 
 
 class RasaProjectTests(unittest.TestCase):
+    def test_playSBC_rasa_uses_fast_matching_model_in_source_and_helm(self):
+        source = read("rasa/config.yml")
+        helm = read("charts/playsbc/values.yaml")
+        for text in (source, helm):
+            self.assertIn("LogisticRegressionClassifier", text)
+            self.assertNotIn("DIETClassifier", text)
+
+    def test_rasa_deployment_rolls_when_project_changes(self):
+        template = read("charts/playsbc/templates/rasa.yaml")
+        self.assertIn("checksum/rasa-project:", template)
+        self.assertIn("toJson $project | sha256sum", template)
+        self.assertIn("rasa-evidence-proxy", template)
+        self.assertIn("targetPort: evidence-http", template)
+
     def test_chat_nlu_case_file_tracks_requested_intent_matrix(self):
         cases = load_cases("tests/rasa/chat_nlu_cases.yml")
 

@@ -1326,6 +1326,11 @@ class PrometheusMetricTests(unittest.TestCase):
         protocol.rtpengine_control_requests_total = 2
         protocol.observe_sip_request("INVITE", "udp", "rx", "core")
         protocol.observe_sip_response(200, "udp", "tx", "core")
+        protocol.observe_sip_retransmission("INVITE", "request", "rx", "udp")
+        self.assertIsNotNone(protocol.client_transactions["udp"].on_retransmit)
+        self.assertIsNotNone(protocol.transactions.on_retransmit)
+        protocol.client_transactions["udp"].on_retransmit(SimpleNamespace(method="INVITE"))
+        protocol.transactions.on_retransmit(SimpleNamespace(method="INVITE"))
         protocol.observe_media_negotiation("rtpengine", server.PCMU, server.PCMA)
         protocol.b2bua_calls_total = 1
         protocol.b2bua_calls_completed_total = 1
@@ -1353,6 +1358,18 @@ class PrometheusMetricTests(unittest.TestCase):
         )
         self.assertIn(
             'playsbc_sip_responses_total{cluster="playsbc-lab",direction="tx",node="standalone",realm="core",status="200",status_class="2xx",transport="udp"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_sip_retransmissions_total{cluster="playsbc-lab",direction="rx",kind="request",method="INVITE",node="standalone",transport="udp"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_sip_retransmissions_total{cluster="playsbc-lab",direction="tx",kind="request",method="INVITE",node="standalone",transport="udp"} 1',
+            body,
+        )
+        self.assertIn(
+            'playsbc_sip_retransmissions_total{cluster="playsbc-lab",direction="tx",kind="response",method="INVITE",node="standalone",transport="udp"} 1',
             body,
         )
         self.assertIn(
