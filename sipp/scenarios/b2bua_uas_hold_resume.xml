@@ -104,8 +104,6 @@
 
   <recv request="ACK" crlf="true" />
 
-  <pause milliseconds="750" />
-
   <recv request="INVITE" crlf="true">
     <action>
       <ereg regexp="a=sendrecv" search_in="msg" check_it="true" assign_to="2" />

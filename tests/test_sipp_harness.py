@@ -4202,6 +4202,15 @@ class RealTopologyTests(unittest.TestCase):
             self.assertEqual(profile.uas_media_pcap, "pcap/g711u_hold_burst.pcap")
             self.assertIn("play_pcap_audio", run_k8s_regression.rendered_scenario(profile, "uac"))
             self.assertIn("play_pcap_audio", run_k8s_regression.rendered_scenario(profile, "uas"))
+            # The caller owns the hold interval. Pausing the callee after its
+            # hold ACK races a valid resume re-INVITE over TCP/TLS.
+            callee_steps = list(ET.fromstring(run_k8s_regression.rendered_scenario(profile, "uas")))
+            ack_steps = [index for index, step in enumerate(callee_steps)
+                         if step.tag == "recv" and step.get("request") == "ACK"]
+            self.assertEqual(len(ack_steps), 3)
+            self.assertEqual(callee_steps[ack_steps[1] + 1].tag, "recv")
+            self.assertEqual(callee_steps[ack_steps[1] + 1].get("request"), "INVITE")
+            self.assertIn('<pause milliseconds="750" />', run_k8s_regression.rendered_scenario(profile, "uac"))
 
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp)
