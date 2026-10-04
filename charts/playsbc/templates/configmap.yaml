@@ -16,6 +16,7 @@
 {{- $topology := .Values.topology | default dict -}}
 {{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
 {{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
+{{- $localRealDeviceEnabled := get (.Values.localRealDevice | default dict) "enabled" | default false -}}
 {{- if $activeActive -}}
 {{- $fullName := include "playsbc.fullname" . -}}
 {{- $playsbcReplicas := int (get $activeActiveCfg "playsbcReplicas" | default 2) -}}
@@ -54,7 +55,11 @@
 {{- range $i, $_ := until $playsbcReplicas -}}
 {{- $nodeId := printf "%s-%d" $fullName $i -}}
 {{- $rtpIndex := mod $i $rtpReplicas -}}
-{{- $pair := dict "name" (printf "rtpengine-pair-%d" $rtpIndex) "node_id" $nodeId "rtpengine_url" (printf "udp://%s-rtpengine-%d.%s:%v" $fullName $rtpIndex $headlessService $.Values.rtpengine.controlPort) -}}
+{{- $controlPort := int $.Values.rtpengine.controlPort -}}
+{{- if $localRealDeviceEnabled -}}
+{{- $controlPort = add $controlPort $rtpIndex -}}
+{{- end -}}
+{{- $pair := dict "name" (printf "rtpengine-pair-%d" $rtpIndex) "node_id" $nodeId "rtpengine_url" (printf "udp://%s-rtpengine-%d.%s:%v" $fullName $rtpIndex $headlessService $controlPort) -}}
 {{- range $existing := $existingPairs -}}
 {{- if eq (get $existing "node_id" | default "") $nodeId -}}
 {{- $pair = mergeOverwrite $pair $existing -}}

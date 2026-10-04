@@ -91,22 +91,38 @@ Do not run `kind delete cluster` as a restart step; deletion removes the local K
 
 ## Dedicated Local Real-Device Lab
 
-This lane is separate from both `kind-playsbc` regression and AKS:
+This lane is separate from both `kind-playsbc` regression and AKS. It runs two
+PlaySBC pods and two RTPengine pods in the `playsbc` namespace of its own kind
+cluster. One SIP NodePort balances new dialogs with client-IP affinity; the
+RTPengine pods use the kind node's host network with distinct control ports
+and externally mapped UDP ranges. The two PlaySBC
+pods share the lab's registration/dialog SQLite volume on the same kind node.
 
 | Purpose | Cluster | Context | Topology |
 | --- | --- | --- | --- |
 | Full local regression | `playsbc` | `kind-playsbc` | Active-active |
-| LAN OBi/Zoiper calls | `playsbc-real-device` | `kind-playsbc-real-device` | One PlaySBC + one RTPengine |
+| LAN OBi/Zoiper calls | `playsbc-real-device-aa` | `kind-playsbc-real-device-aa` | Two PlaySBC + two RTPengine, one dedicated kind node |
 | Azure validation | `playsbc-aks` | AKS context | Azure values and LoadBalancers |
 
-Start Docker, discover the Mac LAN address, and create the dedicated cluster once. The port mappings are fixed when kind creates the node, so an older cluster with the same name must be recreated.
+Start Docker, discover the Mac LAN address, and create the dedicated cluster.
+Use the new `-aa` name: the old single-replica cluster has incompatible kind
+port mappings. Both clusters cannot bind Mac port `5062` simultaneously. If the
+old lab is running, archive its evidence first and stop its node container with
+`docker stop playsbc-real-device-control-plane`; that is recoverable with
+`docker start`. Do not delete the old cluster just to make room.
 
 ```bash
 cd /Users/sudheerkumar/Documents/Codex/2026-05-18/Mini-Call-Server
+git switch main
+git pull --ff-only origin main
+test -z "$(git status --porcelain)"
 
-export PLAYSBC_VERSION=4.0.0
-export REAL_DEVICE_CLUSTER=playsbc-real-device
-export REAL_DEVICE_CONTEXT=kind-playsbc-real-device
+export REAL_DEVICE_CLUSTER=playsbc-real-device-aa
+export REAL_DEVICE_CONTEXT=kind-playsbc-real-device-aa
+export REAL_DEVICE_NAMESPACE=playsbc
+export SOURCE_TAG=$(git rev-parse --short=12 HEAD)
+export PLAYSBC_IMAGE="playsbc-public-real-device:${SOURCE_TAG}"
+export RTPENGINE_IMAGE="playsbc-rtpengine-public-real-device:${SOURCE_TAG}"
 export LAN_IF=$(route -n get default | awk '/interface:/{print $2; exit}')
 export LAN_IP=$(ipconfig getifaddr "$LAN_IF")
 : "${LAN_IP:?Could not determine the Mac LAN IPv4 address}"
@@ -121,8 +137,19 @@ if ! kind get clusters | grep -qx "$REAL_DEVICE_CLUSTER"; then
     --wait 180s
 fi
 
-kubectl --context "$REAL_DEVICE_CONTEXT" create namespace playsbc \
+kubectl --context "$REAL_DEVICE_CONTEXT" create namespace "$REAL_DEVICE_NAMESPACE" \
   --dry-run=client -o yaml | kubectl --context "$REAL_DEVICE_CONTEXT" apply -f -
+```
+
+Build the current public source and load both images into this cluster. A
+released `v4.0.0` chart/image predates this active-active LAN profile; do not
+mix it with the new values or checker.
+
+```bash
+docker build -f docker/playsbc.Dockerfile -t "$PLAYSBC_IMAGE" .
+docker build -f docker/rtpengine.Dockerfile -t "$RTPENGINE_IMAGE" .
+kind load docker-image "$PLAYSBC_IMAGE" "$RTPENGINE_IMAGE" --name "$REAL_DEVICE_CLUSTER"
+helm lint charts/playsbc
 ```
 
 Create a short-lived lab TLS secret. UDP and TCP calls do not require the phone to trust this certificate; a hardphone TLS test must import or trust the generated CA/certificate.
@@ -147,7 +174,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 30 -sha256 \
   -keyout "$TLS_DIR/tls.key" \
   -out "$TLS_DIR/tls.crt"
 
-kubectl --context "$REAL_DEVICE_CONTEXT" -n playsbc create secret tls playsbc-real-device-tls \
+kubectl --context "$REAL_DEVICE_CONTEXT" -n "$REAL_DEVICE_NAMESPACE" create secret tls playsbc-real-device-tls \
   --cert "$TLS_DIR/tls.crt" \
   --key "$TLS_DIR/tls.key" \
   --dry-run=client -o yaml \
@@ -158,44 +185,72 @@ The local lab disables peer certificate verification, so this standard TLS Secre
 `tls.crt` and `tls.key`. A `ca.crt` entry is required only when
 `playsbc.config.tls_verify_peer=true`.
 
-Install the isolated values profile and advertise the Mac LAN IP on both signalling and media:
-
-The local profile uses a `Recreate` rollout because both revisions cannot own the same fixed host
-ports on one kind node. A short signalling interruption during an upgrade is expected; Helm waits
-for the replacement pod and avoids a host-port scheduling deadlock.
+Install the local active-active profile. PlaySBC uses pod networking. Both
+RTPengine pods share the host network but bind disjoint control and media ports,
+so they do not fight for the same sockets. The kind node publishes
+host SIP `5062`/TLS `5061` to Kubernetes NodePorts `32062`/`32061`. RTP UDP
+`30000-30023` and control `2223` belong to RTPengine-0; RTP UDP `30024-30049`
+and control `2224` belong to RTPengine-1. PlaySBC's HA pairing sends each
+replica to its corresponding RTPengine control port.
 
 ```bash
 helm upgrade --install playsbc \
-  "https://github.com/sudheerkumarvatrapu/PlaySBC/releases/download/v${PLAYSBC_VERSION}/playsbc-${PLAYSBC_VERSION}.tgz" \
+  ./charts/playsbc \
   --kube-context "$REAL_DEVICE_CONTEXT" \
-  --namespace playsbc \
+  --namespace "$REAL_DEVICE_NAMESPACE" \
   --create-namespace \
-  --atomic --wait --timeout 10m \
+  --atomic --wait --timeout 15m \
   -f configs/kubernetes/kind-real-device-values.yaml \
   --set-string localRealDevice.lanIPv4="$LAN_IP" \
   --set-string playsbc.config.sip_advertised_ip="$LAN_IP" \
   --set-string playsbc.config.b2bua_advertised_ip="$LAN_IP" \
   --set-string rtpengine.advertisedIP="$LAN_IP" \
   --set-string tls.existingSecret=playsbc-real-device-tls \
-  --set-string image.tag="$PLAYSBC_VERSION" \
-  --set-string rtpengine.image.tag="$PLAYSBC_VERSION"
+  --set-string image.repository=playsbc-public-real-device \
+  --set-string image.tag="$SOURCE_TAG" \
+  --set image.pullPolicy=IfNotPresent \
+  --set-string rtpengine.image.repository=playsbc-rtpengine-public-real-device \
+  --set-string rtpengine.image.tag="$SOURCE_TAG" \
+  --set rtpengine.image.pullPolicy=IfNotPresent
 
-kubectl --context "$REAL_DEVICE_CONTEXT" -n playsbc rollout status \
-  deployment/playsbc-playsbc --timeout=240s
-kubectl --context "$REAL_DEVICE_CONTEXT" -n playsbc rollout status \
-  deployment/playsbc-playsbc-rtpengine --timeout=240s
+kubectl --context "$REAL_DEVICE_CONTEXT" -n "$REAL_DEVICE_NAMESPACE" rollout status \
+  statefulset/playsbc-playsbc --timeout=300s
+kubectl --context "$REAL_DEVICE_CONTEXT" -n "$REAL_DEVICE_NAMESPACE" rollout status \
+  statefulset/playsbc-playsbc-rtpengine --timeout=300s
 
 python3 tools/check_kind_real_device_lab.py \
   --context "$REAL_DEVICE_CONTEXT" \
   --cluster "$REAL_DEVICE_CLUSTER" \
   --lan-ip "$LAN_IP" \
-  --expected-version "$PLAYSBC_VERSION"
+  --namespace "$REAL_DEVICE_NAMESPACE" \
+  --expected-version "$SOURCE_TAG"
+
+kubectl --context "$REAL_DEVICE_CONTEXT" -n "$REAL_DEVICE_NAMESPACE" get pods -o wide
+kubectl --context "$REAL_DEVICE_CONTEXT" -n "$REAL_DEVICE_NAMESPACE" get svc playsbc-playsbc
 ```
 
-Configure both devices with `$LAN_IP`, SIP port `5062`, users `1001` and `1002`, and password `secret-password`. Monitor and capture without changing the current kube context:
+Configure the OBi1022 as user `1001` and Zoiper as user `1002`:
+
+| Setting | OBi1022 | Zoiper |
+| --- | --- | --- |
+| Registrar/proxy | `$LAN_IP` | `$LAN_IP` |
+| SIP port and transport | `5062`, UDP | `5062`, UDP |
+| Username/auth ID | `1001` | `1002` |
+| Password | `secret-password` | `secret-password` |
+| Media | RTP/UDP, PCMU or PCMA | RTP/UDP, PCMU or PCMA |
+
+Disable any old provider provisioning or outbound proxy on the OBi. Register
+both devices, call `1001 -> 1002`, then `1002 -> 1001`, and confirm two-way
+audio. If both phones appear behind the same source IP, client-IP affinity can
+pin them to one PlaySBC replica; use distinct LAN IPs to exercise both. This
+local test proves two active call-serving replicas and new-call routing, not
+seamless mid-call media migration after a pod failure. Check both pod logs for
+the actual handling of REGISTER/INVITE; do not infer it from readiness alone.
+
+Monitor and capture without changing the current kube context:
 
 ```bash
-kubectl --context "$REAL_DEVICE_CONTEXT" -n playsbc logs -f \
+kubectl --context "$REAL_DEVICE_CONTEXT" -n "$REAL_DEVICE_NAMESPACE" logs -f \
   -l app.kubernetes.io/instance=playsbc \
   --all-containers=true --prefix --max-log-requests=10 --since=10m \
   | grep -aE 'REGISTER|SIP (INVITE|ACK|BYE|CANCEL)|SIP TX response|SIP response|SDP SUMMARY|RTPENGINE|RTP packet|RTCP|1001|1002'
@@ -203,15 +258,18 @@ kubectl --context "$REAL_DEVICE_CONTEXT" -n playsbc logs -f \
 PYTHONPYCACHEPREFIX=/private/tmp/playsbc-pycache \
 python3 tools/run_real_device_capture.py \
   --context "$REAL_DEVICE_CONTEXT" \
-  --namespace playsbc \
+  --namespace "$REAL_DEVICE_NAMESPACE" \
   --duration 120 \
   --capture-image nicolaka/netshoot:latest
 ```
 
-The capture produces one combined `capture.pcap`, one `sipmsg.log`, an HTML report, and one `.tgz`. Stop this lane without touching `kind-playsbc` or AKS:
+The capture produces one combined `capture.pcap`, one `sipmsg.log`, an HTML
+report, and one `.tgz`. Repeat the preflight after any RTPengine restart.
+Stop this lane only when its evidence is
+saved; neither command touches `kind-playsbc` or AKS:
 
 ```bash
-helm --kube-context "$REAL_DEVICE_CONTEXT" -n playsbc uninstall playsbc
+helm --kube-context "$REAL_DEVICE_CONTEXT" -n "$REAL_DEVICE_NAMESPACE" uninstall playsbc
 kind delete cluster --name "$REAL_DEVICE_CLUSTER"
 ```
 

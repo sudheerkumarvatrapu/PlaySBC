@@ -4591,18 +4591,43 @@ class RealTopologyTests(unittest.TestCase):
         validation = (ROOT / "charts" / "playsbc" / "templates" / "validation.yaml").read_text(
             encoding="utf-8"
         )
+        rtpengine = (ROOT / "charts" / "playsbc" / "templates" / "rtpengine.yaml").read_text(
+            encoding="utf-8"
+        )
+        configmap = (ROOT / "charts" / "playsbc" / "templates" / "configmap.yaml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertEqual(cluster.count("hostPort:"), 53)
         self.assertEqual(len(check_kind_real_device_lab.required_bindings(30000, 30049)), 53)
         self.assertIn("localRealDevice:\n  enabled: true", values)
-        self.assertIn("activeActive:\n    enabled: false", values)
-        self.assertIn("hostNetwork: true", values)
+        self.assertIn("activeActive:\n    enabled: true", values)
+        self.assertIn("playsbcReplicas: 2", values)
+        self.assertIn("rtpengineReplicas: 2", values)
+        self.assertIn("hostNetwork: false", values)
+        self.assertIn("  hostNetwork: true", values)
+        self.assertIn("type: NodePort", values)
+        self.assertIn("containerPort: 32062", cluster)
         self.assertNotIn("provider: azure", values)
         self.assertIn('$localRealDeviceEnabled := get $localRealDevice "enabled"', deployment)
-        self.assertIn("else if $localRealDeviceEnabled", deployment)
-        self.assertIn("type: Recreate", deployment)
         self.assertIn("cannot enable Azure cloud exposure", validation)
-        self.assertIn("requires exactly one PlaySBC and one RTPengine replica", validation)
+        self.assertIn("requires two PlaySBC and two RTPengine replicas", validation)
+        self.assertIn("media_min=30000; media_max=30023; ng_port=2223", rtpengine)
+        self.assertIn("media_min=30024; media_max=30049; ng_port=2224", rtpengine)
+        self.assertIn("$controlPort = add $controlPort $rtpIndex", configmap)
+
+    def test_kind_real_device_media_requires_both_host_network_pods_ready(self):
+        pods = {"items": [
+            {"metadata": {"name": f"playsbc-playsbc-rtpengine-{index}"},
+             "status": {"phase": "Running", "podIP": "172.18.0.2",
+                        "containerStatuses": [{"ready": True}]}}
+            for index in range(2)
+        ]}
+        check = check_kind_real_device_lab.ready_rtpengine_pods(pods, "playsbc", "172.18.0.2")
+        self.assertTrue(check.passed)
+        pods["items"][1]["status"]["containerStatuses"][0]["ready"] = False
+        check = check_kind_real_device_lab.ready_rtpengine_pods(pods, "playsbc", "172.18.0.2")
+        self.assertFalse(check.passed)
 
     def test_kind_real_device_binding_parser_preserves_protocol(self):
         published = check_kind_real_device_lab.published_bindings(
@@ -4614,6 +4639,31 @@ class RealTopologyTests(unittest.TestCase):
         )
 
         self.assertEqual(published, {(5062, "tcp"), (5062, "udp"), (30000, "udp")})
+
+    def test_kind_real_device_preflight_requires_nodeports_and_pairing(self):
+        service = {"spec": {"type": "NodePort", "sessionAffinity": "ClientIP", "ports": [
+            {"name": "sip-udp", "protocol": "UDP", "nodePort": 32062},
+            {"name": "sip-tcp", "protocol": "TCP", "nodePort": 32062},
+            {"name": "sip-tls", "protocol": "TCP", "nodePort": 32061},
+        ]}}
+        self.assertTrue(all(check.passed for check in check_kind_real_device_lab.service_checks(service)))
+        service["spec"]["ports"][0]["nodePort"] = 32063
+        self.assertFalse(all(check.passed for check in check_kind_real_device_lab.service_checks(service)))
+
+        config = (
+            "sip_advertised_ip: 192.0.2.10\n"
+            "b2bua_advertised_ip: 192.0.2.10\n"
+            "sip_transport: udp,tcp,tls\nrtp_min: 30000\nrtp_max: 30049\n"
+            "media_backend: rtpengine\n"
+            "playsbc-playsbc-rtpengine-0.playsbc-playsbc-rtpengine-headless:2223\n"
+            "playsbc-playsbc-rtpengine-1.playsbc-playsbc-rtpengine-headless:2224\n"
+        )
+        self.assertTrue(all(check.passed for check in check_kind_real_device_lab.config_checks(
+            config, "192.0.2.10", 30000, 30049
+        )))
+        self.assertFalse(all(check.passed for check in check_kind_real_device_lab.config_checks(
+            config.replace(":2224", ":2223"), "192.0.2.10", 30000, 30049
+        )))
 
     def test_real_device_capture_uses_host_network_tcpdump_pod(self):
         args = run_real_device_capture.parse_args(

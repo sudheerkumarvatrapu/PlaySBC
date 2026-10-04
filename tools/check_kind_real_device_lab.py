@@ -11,6 +11,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+PORT_RANGES = ((30000, 30023), (30024, 30049))
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -54,14 +56,14 @@ def published_bindings(ports: dict[str, Any]) -> set[tuple[int, str]]:
     return published
 
 
-def deployment_checks(
-    deployment: dict[str, Any],
+def workload_checks(
+    workload: dict[str, Any],
     *,
     name: str,
     container: str,
     expected_version: str,
 ) -> list[CheckResult]:
-    spec = deployment.get("spec", {})
+    spec = workload.get("spec", {})
     pod_spec = spec.get("template", {}).get("spec", {})
     containers = pod_spec.get("containers", [])
     target = next(
@@ -69,14 +71,14 @@ def deployment_checks(
         {},
     )
     replicas = int(spec.get("replicas", 0) or 0)
-    ready = int(deployment.get("status", {}).get("readyReplicas", 0) or 0)
+    ready = int(workload.get("status", {}).get("readyReplicas", 0) or 0)
     image = str(target.get("image", ""))
     return [
-        CheckResult(f"{name}-single-replica", replicas == 1 and ready == 1, f"desired={replicas} ready={ready}"),
-        CheckResult(f"{name}-host-network", pod_spec.get("hostNetwork") is True, str(pod_spec.get("hostNetwork"))),
+        CheckResult(f"{name}-active-active", replicas == 2 and ready == 2, f"desired={replicas} ready={ready}"),
+        CheckResult(f"{name}-network", pod_spec.get("hostNetwork") is (name == "rtpengine"), str(pod_spec.get("hostNetwork"))),
         CheckResult(
-            f"{name}-host-network-dns",
-            pod_spec.get("dnsPolicy") == "ClusterFirstWithHostNet",
+            f"{name}-cluster-dns",
+            pod_spec.get("dnsPolicy") == ("ClusterFirstWithHostNet" if name == "rtpengine" else "ClusterFirst"),
             str(pod_spec.get("dnsPolicy", "")),
         ),
         CheckResult(
@@ -87,7 +89,7 @@ def deployment_checks(
     ]
 
 
-def config_checks(config: str, lan_ip: str, rtp_min: int, rtp_max: int) -> list[CheckResult]:
+def config_checks(config: str, lan_ip: str, rtp_min: int, rtp_max: int, release: str = "playsbc") -> list[CheckResult]:
     expected = {
         "sip-advertised-ip": f"sip_advertised_ip: {lan_ip}",
         "b2bua-advertised-ip": f"b2bua_advertised_ip: {lan_ip}",
@@ -95,14 +97,16 @@ def config_checks(config: str, lan_ip: str, rtp_min: int, rtp_max: int) -> list[
         "rtp-min": f"rtp_min: {rtp_min}",
         "rtp-max": f"rtp_max: {rtp_max}",
         "rtpengine-backend": "media_backend: rtpengine",
+        "rtpengine-pair-0": f"{release}-playsbc-rtpengine-0.{release}-playsbc-rtpengine-headless:2223",
+        "rtpengine-pair-1": f"{release}-playsbc-rtpengine-1.{release}-playsbc-rtpengine-headless:2224",
     }
     return [CheckResult(name, marker in config, marker) for name, marker in expected.items()]
 
 
 def rtpengine_command_checks(
-    deployment: dict[str, Any], lan_ip: str, rtp_min: int, rtp_max: int
+    workload: dict[str, Any], lan_ip: str, rtp_min: int, rtp_max: int
 ) -> list[CheckResult]:
-    containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+    containers = workload.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
     container = next(
         (item for item in containers if isinstance(item, dict) and item.get("name") == "rtpengine"),
         {},
@@ -110,10 +114,45 @@ def rtpengine_command_checks(
     rendered = " ".join(str(value) for value in [*container.get("command", []), *container.get("args", [])])
     markers = {
         "rtpengine-advertised-ip": f"!{lan_ip}",
-        "rtpengine-port-min": f"--port-min={rtp_min}",
-        "rtpengine-port-max": f"--port-max={rtp_max}",
+        "rtpengine-first-range": f"media_min={rtp_min}; media_max={PORT_RANGES[0][1]}; ng_port=2223",
+        "rtpengine-second-range": f"media_min={PORT_RANGES[1][0]}; media_max={rtp_max}; ng_port=2224",
     }
     return [CheckResult(name, marker in rendered, marker) for name, marker in markers.items()]
+
+
+def service_checks(service: dict[str, Any]) -> list[CheckResult]:
+    spec = service.get("spec", {})
+    ports = {(item.get("name"), item.get("protocol")): item.get("nodePort") for item in spec.get("ports", [])}
+    return [
+        CheckResult("sip-nodeport", spec.get("type") == "NodePort" and
+                    ports.get(("sip-udp", "UDP")) == 32062 and
+                    ports.get(("sip-tcp", "TCP")) == 32062, str(ports)),
+        CheckResult("tls-nodeport", ports.get(("sip-tls", "TCP")) == 32061, str(ports)),
+        CheckResult("sip-affinity", spec.get("sessionAffinity") == "ClientIP", str(spec.get("sessionAffinity"))),
+    ]
+
+
+def rtpengine_service_checks(service: dict[str, Any], release: str) -> list[CheckResult]:
+    selector = service.get("spec", {}).get("selector", {})
+    primary = f"{release}-playsbc-rtpengine-0"
+    return [CheckResult("rtpengine-primary-service", selector.get("statefulset.kubernetes.io/pod-name") == primary, str(selector))]
+
+
+def ready_rtpengine_pods(payload: dict[str, Any], release: str, node_ip: str) -> CheckResult:
+    pods = {pod.get("metadata", {}).get("name"): pod for pod in payload.get("items", [])}
+    expected = [f"{release}-playsbc-rtpengine-{index}" for index in range(2)]
+    details = []
+    valid = True
+    for name in expected:
+        pod = pods.get(name, {})
+        status = pod.get("status", {})
+        container_statuses = status.get("containerStatuses", [])
+        ready = status.get("phase") == "Running" and bool(container_statuses) and all(
+            item.get("ready") for item in container_statuses
+        )
+        valid = valid and ready and status.get("podIP") == node_ip
+        details.append(f"{name}:ready={ready},ip={status.get('podIP', 'missing')}")
+    return CheckResult("rtpengine-pods-ready-on-kind-node", valid, "; ".join(details))
 
 
 def parse_json_result(result: subprocess.CompletedProcess[str], description: str) -> dict[str, Any]:
@@ -128,8 +167,8 @@ def parse_json_result(result: subprocess.CompletedProcess[str], description: str
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cluster", default="playsbc-real-device")
-    parser.add_argument("--context", default="kind-playsbc-real-device")
+    parser.add_argument("--cluster", default="playsbc-real-device-aa")
+    parser.add_argument("--context", default="kind-playsbc-real-device-aa")
     parser.add_argument("--namespace", default="playsbc")
     parser.add_argument("--release", default="playsbc")
     parser.add_argument("--lan-ip", required=True)
@@ -167,13 +206,18 @@ def main(argv: list[str] | None = None) -> int:
     sbc_name = f"{args.release}-playsbc"
     rtpengine_name = f"{args.release}-playsbc-rtpengine"
     sbc = parse_json_result(
-        run_command([*prefix, "get", "deployment", sbc_name, "-o", "json"]),
-        f"deployment/{sbc_name}",
+        run_command([*prefix, "get", "statefulset", sbc_name, "-o", "json"]),
+        f"statefulset/{sbc_name}",
     )
     rtpengine = parse_json_result(
-        run_command([*prefix, "get", "deployment", rtpengine_name, "-o", "json"]),
-        f"deployment/{rtpengine_name}",
+        run_command([*prefix, "get", "statefulset", rtpengine_name, "-o", "json"]),
+        f"statefulset/{rtpengine_name}",
     )
+    service = parse_json_result(run_command([*prefix, "get", "service", sbc_name, "-o", "json"]), "SIP Service")
+    rtp_service = parse_json_result(run_command([*prefix, "get", "service", rtpengine_name, "-o", "json"]), "RTPengine Service")
+    pods = parse_json_result(run_command([*prefix, "get", "pods", "-l", f"app.kubernetes.io/name=playsbc-rtpengine,app.kubernetes.io/instance={args.release}", "-o", "json"]), "RTPengine pods")
+    node = parse_json_result(run_command([*prefix, "get", "node", nodes[0], "-o", "json"]), "kind node")
+    node_ip = next((address.get("address", "") for address in node.get("status", {}).get("addresses", []) if address.get("type") == "InternalIP"), "")
     config_result = run_command([*prefix, "get", "configmap", f"{args.release}-playsbc-config", "-o", "json"])
     config_map = parse_json_result(config_result, "PlaySBC ConfigMap")
     config = str(config_map.get("data", {}).get("server.yaml", ""))
@@ -184,15 +228,18 @@ def main(argv: list[str] | None = None) -> int:
             not missing_ports,
             "complete" if not missing_ports else ",".join(f"{port}/{protocol}" for port, protocol in missing_ports),
         ),
-        *deployment_checks(sbc, name="playsbc", container="playsbc", expected_version=args.expected_version),
-        *deployment_checks(
+        *workload_checks(sbc, name="playsbc", container="playsbc", expected_version=args.expected_version),
+        *workload_checks(
             rtpengine,
             name="rtpengine",
             container="rtpengine",
             expected_version=args.expected_version,
         ),
-        *config_checks(config, lan_ip, args.rtp_min, args.rtp_max),
+        *config_checks(config, lan_ip, args.rtp_min, args.rtp_max, args.release),
         *rtpengine_command_checks(rtpengine, lan_ip, args.rtp_min, args.rtp_max),
+        *service_checks(service),
+        *rtpengine_service_checks(rtp_service, args.release),
+        ready_rtpengine_pods(pods, args.release, node_ip),
     ]
 
     for check in checks:

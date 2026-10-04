@@ -73,12 +73,12 @@ See [EVOLUTION_PLAN.md](EVOLUTION_PLAN.md#next-implementation-local-multi-node-h
 
 ## Local Real Devices
 
-OBi1022 and Zoiper use the dedicated `playsbc-real-device` kind cluster when both are on the same LAN. This is intentionally separate from the active-active `playsbc` regression cluster and from AKS. The cluster exposes these ports one-to-one through kind `extraPortMappings`:
+OBi1022 and Zoiper use the dedicated `playsbc-real-device-aa` kind cluster when both are on the same LAN. This is separate from the `playsbc` regression cluster and AKS. Two PlaySBC pods share registration/dialog state, while two host-network RTPengine pods use disjoint media and control ports. The cluster exposes these host ports through kind `extraPortMappings`:
 
 - SIP `5062/UDP`, `5062/TCP`, and `5061/TCP`
 - RTP/RTCP `30000-30049/UDP`
 
-PlaySBC and RTPengine advertise the Mac LAN IP. NodePort translation is not used for this RTP baseline. The chart rejects blank/mismatched LAN addresses, Azure exposure, active-active mode, or a media range other than `30000-30049` in this profile.
+PlaySBC and RTPengine advertise the Mac LAN IP. SIP uses NodePort `32062`/`32061` behind the host's `5062`/`5061`; RTP remains one-to-one to the node. The chart rejects blank/mismatched LAN addresses, Azure exposure, incorrect replica counts, or a media range other than `30000-30049` in this profile.
 
 Use the maintained [dedicated local real-device commands](KUBERNETES_HELM_RUNBOOK.md#dedicated-local-real-device-lab). This validates LAN device behavior, but not Azure LoadBalancer, public NAT, managed identity, or cloud firewall behavior.
 
@@ -87,4 +87,4 @@ Use the maintained [dedicated local real-device commands](KUBERNETES_HELM_RUNBOO
 - `kubectl port-forward` is suitable for HTTP, Grafana, Prometheus, and TCP checks; it does not solve UDP SIP/RTP exposure.
 - Multi-node kind still runs on one Mac and cannot prove physical host or availability-zone failure.
 - AKS remains the milestone lane for Azure identity, ACR, public LoadBalancers, static IPs, and internet real-device calls.
-- The local real-device capture command must include `--context kind-playsbc-real-device`; the AKS capture must use its AKS context. Context isolation is part of the evidence contract.
+- The local real-device capture command must include `--context kind-playsbc-real-device-aa`; the AKS capture must use its AKS context. Context isolation is part of the evidence contract.

@@ -37,14 +37,19 @@
 {{- if (get $azure "enabled" | default false) -}}
 {{- fail "The kind real-device profile cannot enable Azure cloud exposure." -}}
 {{- end -}}
-{{- if .Values.topology.activeActive.enabled -}}
-{{- fail "The kind real-device profile is a dedicated single-workload lane; active-active must remain disabled." -}}
+{{- $activeActive := .Values.topology.activeActive -}}
+{{- if or (not $activeActive.enabled) (not $activeActive.useStatefulSet) -}}
+{{- fail "The kind real-device profile requires active-active StatefulSets." -}}
 {{- end -}}
-{{- if or (ne (int .Values.replicaCount) 1) (ne (int .Values.rtpengine.replicas) 1) -}}
-{{- fail "The kind real-device profile requires exactly one PlaySBC and one RTPengine replica." -}}
+{{- if or (ne (int $activeActive.playsbcReplicas) 2) (ne (int $activeActive.rtpengineReplicas) 2) -}}
+{{- fail "The kind real-device profile requires two PlaySBC and two RTPengine replicas." -}}
 {{- end -}}
-{{- if or (not .Values.hostNetwork) (not .Values.rtpengine.hostNetwork) -}}
-{{- fail "The kind real-device profile requires hostNetwork=true for PlaySBC and RTPengine." -}}
+{{- if or .Values.hostNetwork (not .Values.rtpengine.hostNetwork) -}}
+{{- fail "The kind real-device profile requires pod-networked PlaySBC and host-networked RTPengine with split ports." -}}
+{{- end -}}
+{{- $nodePorts := get .Values.service "nodePorts" | default dict -}}
+{{- if or (ne .Values.service.type "NodePort") (ne (int (get $nodePorts "sip" | default 0)) 32062) (ne (int (get $nodePorts "tls" | default 0)) 32061) -}}
+{{- fail "The kind real-device profile requires SIP NodePort 32062 and TLS NodePort 32061." -}}
 {{- end -}}
 {{- if or (ne (int .Values.rtpengine.rtpMin) 30000) (ne (int .Values.rtpengine.rtpMax) 30049) -}}
 {{- fail "The kind real-device profile requires the mapped RTP range 30000-30049/UDP." -}}

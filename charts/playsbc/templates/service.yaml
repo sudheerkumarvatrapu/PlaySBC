@@ -2,6 +2,7 @@
 {{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
 {{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
 {{- $useStatefulSet := and $activeActive (get $activeActiveCfg "useStatefulSet" | default true) -}}
+{{- $nodePorts := get .Values.service "nodePorts" | default dict -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -34,14 +35,23 @@ spec:
       port: {{ .Values.service.sipPort }}
       targetPort: sip-udp
       protocol: UDP
+{{- if and (eq .Values.service.type "NodePort") (get $nodePorts "sip") }}
+      nodePort: {{ get $nodePorts "sip" }}
+{{- end }}
     - name: sip-tcp
       port: {{ .Values.service.sipPort }}
       targetPort: sip-tcp
       protocol: TCP
+{{- if and (eq .Values.service.type "NodePort") (get $nodePorts "sip") }}
+      nodePort: {{ get $nodePorts "sip" }}
+{{- end }}
     - name: sip-tls
       port: {{ .Values.service.tlsPort }}
       targetPort: sip-tls
       protocol: TCP
+{{- if and (eq .Values.service.type "NodePort") (get $nodePorts "tls") }}
+      nodePort: {{ get $nodePorts "tls" }}
+{{- end }}
     - name: health
       port: {{ .Values.service.healthPort }}
       targetPort: health

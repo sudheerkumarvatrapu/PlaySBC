@@ -2,6 +2,7 @@
 {{- $topology := .Values.topology | default dict -}}
 {{- $activeActiveCfg := get $topology "activeActive" | default dict -}}
 {{- $activeActive := get $activeActiveCfg "enabled" | default false -}}
+{{- $localRealDeviceEnabled := get (.Values.localRealDevice | default dict) "enabled" | default false -}}
 {{- $useStatefulSet := and $activeActive (get $activeActiveCfg "useStatefulSet" | default true) -}}
 {{- $replicas := int (get .Values.rtpengine "replicas" | default 1) -}}
 {{- if $activeActive -}}
@@ -63,6 +64,13 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - >-
+{{- if $localRealDeviceEnabled }}
+              case "${POD_NAME##*-}" in
+                0) media_min=30000; media_max=30023; ng_port=2223 ;;
+                1) media_min=30024; media_max=30049; ng_port=2224 ;;
+                *) echo "unsupported real-device RTPengine ordinal" >&2; exit 1 ;;
+              esac;
+{{- end }}
               exec rtpengine --foreground --log-stderr
 {{- if .Values.rtpengine.hostNetwork }}
               --interface=default/${NODE_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
@@ -73,9 +81,18 @@ spec:
               --interface=core/${POD_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
               --interface=peer/${POD_IP}{{ if $advertisedIP }}!{{ $advertisedIP }}{{ end }}
 {{- end }}
+{{- if $localRealDeviceEnabled }}
+              --listen-ng=0.0.0.0:${ng_port}
+{{- else }}
               --listen-ng=0.0.0.0:{{ .Values.rtpengine.controlPort }}
+{{- end }}
+{{- if $localRealDeviceEnabled }}
+              --port-min=${media_min}
+              --port-max=${media_max}
+{{- else }}
               --port-min={{ .Values.rtpengine.rtpMin }}
               --port-max={{ .Values.rtpengine.rtpMax }}
+{{- end }}
               --table=-1
           env:
             - name: NODE_IP
@@ -108,6 +125,9 @@ spec:
   selector:
     app.kubernetes.io/name: {{ include "playsbc.name" . }}-rtpengine
     app.kubernetes.io/instance: {{ .Release.Name }}
+{{- if $localRealDeviceEnabled }}
+    statefulset.kubernetes.io/pod-name: {{ include "playsbc.fullname" . }}-rtpengine-0
+{{- end }}
   ports:
     - name: ng-control
       port: {{ .Values.rtpengine.controlPort }}

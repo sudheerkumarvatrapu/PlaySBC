@@ -1,4 +1,4 @@
-# Dedicated single-node kind profile for OBi1022/Zoiper LAN calls.
+# Dedicated active-active kind profile for OBi1022/Zoiper LAN calls.
 # Set both advertised IP values to the Mac LAN IPv4 address at Helm runtime.
 
 localRealDevice:
@@ -6,12 +6,18 @@ localRealDevice:
   lanIPv4: ""
 
 topology:
-  model: kind-real-device-single
+  model: kind-real-device-active-active
   activeActive:
-    enabled: false
-    useStatefulSet: false
+    enabled: true
+    useStatefulSet: true
+    playsbcReplicas: 2
+    rtpengineReplicas: 2
+    clusterId: playsbc-real-device
+    sharedState:
+      enabled: true
+      accessModes: [ReadWriteOnce]
 
-replicaCount: 1
+replicaCount: 2
 
 image:
   repository: ghcr.io/sudheerkumarvatrapu/playsbc
@@ -19,13 +25,16 @@ image:
   pullPolicy: Always
 
 service:
-  type: ClusterIP
+  type: NodePort
   sipPort: 5062
   tlsPort: 5061
   healthPort: 8080
   sessionAffinity: ClientIP
+  nodePorts:
+    sip: 32062
+    tls: 32061
 
-hostNetwork: true
+hostNetwork: false
 
 authSecret:
   enabled: true
@@ -43,7 +52,7 @@ rtpengine:
     repository: ghcr.io/sudheerkumarvatrapu/playsbc-rtpengine
     tag: "4.0.0"
     pullPolicy: Always
-  replicas: 1
+  replicas: 2
   hostNetwork: true
   sessionAffinity: ClientIP
   rtpMin: 30000

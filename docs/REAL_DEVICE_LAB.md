@@ -13,7 +13,11 @@ Validated baseline: SIP UDP `5062`, RTP/RTCP UDP `30000-30049`, PCMU/PCMA, diges
 | Lane | SIP/RTP advertised address | Kube context | What it proves |
 | --- | --- | --- | --- |
 | AKS | Azure SIP and RTP public IPs | AKS context | Public LB, NAT, ACR, internet devices |
-| Local kind | Mac LAN IPv4 | `kind-playsbc-real-device` | LAN registration, calls, media, capture |
+| Local kind active-active | Mac LAN IPv4 | `kind-playsbc-real-device-aa` | Two PlaySBC/two RTPengine pods, LAN registration, calls, media, capture |
+
+For the local lane, follow the dedicated [build, deployment, RTP routing,
+preflight, and OBi/Zoiper configuration steps](KUBERNETES_HELM_RUNBOOK.md#dedicated-local-real-device-lab).
+The local active-active profile is not the AKS exposure profile below.
 
 Do not reuse the local values file in AKS or the AKS values file locally. The capture tool accepts `--context` so evidence collection cannot silently follow whichever context was selected last.
 
